@@ -2,6 +2,13 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+.env
+.env.*
+!.env.example
+
+# Local runtime data and credentials must not become public project artifacts.
+.runtime/
+secrets/
 
 # Tickets a character files are runtime, not source.
 tickets/

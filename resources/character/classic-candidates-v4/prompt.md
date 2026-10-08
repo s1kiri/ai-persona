@@ -1,0 +1,9 @@
+# Гарик — более округлая голова и чуть менее человеческое лицо
+
+8 октября 2026. Встроенный imagegen, редактирование v3.
+
+Edit the provided image, one restrained character refinement. The face is now TOO human, while the skull is angular and oddly triangular. Make the FACE about 15% more alien, and the HEAD smoothly rounder. Do not return to the previous huge-eyed feminine alien.
+Change only head and face; keep male character, apparent age around forty, lively dry confident half-smile, readable brows and mouth, pose, body, burgundy Adidas jacket with three white stripes, grey T-shirt, kitchen, framing and photographic lighting.
+Remove ALL beard and moustache stubble; clean-shaven skin with no dark hair shadow. Widen the eyes modestly, about 15% relative to reference, a little more horizontally oval and slightly more alien, but retain visible sclera, dark-brown irises, ordinary readable lids, straight low masculine eyebrows and strong brow. No giant black insect eyes, no doe eyes, no makeup or decorative eyelashes.
+Subtly integrate alien anatomy into the facial planes: slightly flatter and shorter nose bridge with recognizable nostrils, subtly wider upper cheeks and gentle continuous cheek-to-jaw contours. Keep a definite male jaw and blunt chin, expressive ordinary-sized lips, lived-in forty-year-old faint wrinkles. It must look like an alien with an expressive masculine face, not a literal human face pasted onto an alien skull.
+Replace the protruding pointed temple corners and sharply angular triangular crown with a balanced smoothly rounded slightly enlarged oval bald alien cranium. Reduce excessive width at the projecting side corners; continuous soft curved silhouette from forehead over crown and temples, no mushroom cap, no ledges, no sharp points. Retain grey-olive matte skin. Natural plausible photoreal alien; no grotesque textures or older age. Moderate changes, not a complete redesign.

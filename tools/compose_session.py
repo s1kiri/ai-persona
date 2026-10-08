@@ -23,13 +23,16 @@ import io
 import os
 import sys
 
+from compose_persona import compose_persona
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENTS = os.path.join(ROOT, 'agent')
 
 
 def read(*parts):
     try:
-        return io.open(os.path.join(*parts), encoding='utf-8').read().strip()
+        with io.open(os.path.join(*parts), encoding='utf-8') as source:
+            return source.read().strip()
     except OSError:
         return ''
 
@@ -47,7 +50,9 @@ def unanswered(home):
         p = os.path.join(home, name)
         if not os.path.exists(p):
             continue
-        for line in io.open(p, encoding='utf-8'):
+        with io.open(p, encoding='utf-8') as source:
+            lines = source.readlines()
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -72,7 +77,7 @@ def unanswered(home):
     return out
 
 
-def compose(name, from_operator=None):
+def compose(name, from_operator=None, register=None):
     home = os.path.join(AGENTS, name)
     if not os.path.isdir(home):
         print('no such character: %s' % name, file=sys.stderr)
@@ -112,7 +117,7 @@ def compose(name, from_operator=None):
 
     add('--- WHO YOU ARE ---')
     add('')
-    add(read(home, 'PERSONA.md') or '(no PERSONA.md)')
+    add(compose_persona(home, register).strip())
     add('')
 
     goals = read(home, 'GOALS.md')
@@ -147,8 +152,14 @@ def main():
     ap.add_argument('character')
     ap.add_argument('--from-operator', default=None,
                     help='a message delivered exactly once, placed at the very top')
+    ap.add_argument('--register', default=None,
+                    help='speech register from the character prompt.json')
     a = ap.parse_args()
-    out = compose(a.character, a.from_operator)
+    try:
+        out = compose(a.character, a.from_operator, a.register)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print('cannot compose session: %s' % exc, file=sys.stderr)
+        return 2
     if out is None:
         return 2
     sys.stdout.write(out)

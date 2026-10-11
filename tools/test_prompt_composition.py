@@ -65,7 +65,8 @@ class PromptCompositionTests(unittest.TestCase):
             ('non-obscene', 'garik-prompt-non-obscene.md'),
             ('free', 'garik-prompt-full.md'),
             ('non-obscene-chat', 'garik-prompt-chat-non-obscene.md'),
-            ('free-chat', 'garik-prompt-chat.md')
+            ('free-chat', 'garik-prompt-chat.md'),
+            ('auto', 'garik-prompt-contextual.md')
         ):
             exported = (ROOT / 'resources/character' / filename).read_text(encoding='utf-8')
             self.assertEqual(exported, compose_persona(AGENTS / 'garik', register))
@@ -73,13 +74,22 @@ class PromptCompositionTests(unittest.TestCase):
     def test_chat_scene_is_separate_from_actual_workplace_session(self):
         chat = compose_persona(AGENTS / 'garik', 'free-chat')
         clean_chat = compose_persona(AGENTS / 'garik', 'non-obscene-chat')
-        self.assertIn('# Сейчас у тебя', chat)
-        self.assertIn('# Сейчас у тебя', clean_chat)
-        self.assertNotIn('# Сейчас у тебя', compose('garik', register='free'))
+        self.assertIn('# Текущая встреча', chat)
+        self.assertIn('# Текущая встреча', clean_chat)
+        self.assertNotIn('# Текущая встреча', compose('garik', register='free'))
         self.assertIn('# Живой голос в свободной беседе', chat)
         self.assertNotIn('# Живой голос в свободной беседе', clean_chat)
         self.assertLess(len(chat), 18000)
         self.assertLess(len(clean_chat), 18000)
+
+    def test_garik_has_principles_instead_of_scripted_replies(self):
+        for register in ('free','non-obscene','free-chat','non-obscene-chat'):
+            prompt = compose_persona(AGENTS / 'garik', register)
+            self.assertNotIn('**Человек:**',prompt)
+            self.assertNotIn('**Ты:**',prompt)
+            self.assertNotIn('усилитель присмотрел',prompt)
+            self.assertNotIn('Проверим тебя: ты хозяин',prompt)
+            self.assertNotIn('У тебя есть свой незаконченный интерес',prompt)
 
     def test_sample_selection_preserves_source_and_reports_missing_expression(self):
         home = AGENTS / 'garik'

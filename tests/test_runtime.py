@@ -8,6 +8,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from persona_runtime import proxy
 
 from persona_runtime.codex import CodexBackend, CodexError, configured_model, failure_detail
 from persona_runtime.engine import Engine
@@ -225,6 +228,14 @@ class RuntimeTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "absent-proxy.json"
+        guard = patch("persona_runtime.codex.transport", side_effect=lambda env, **kw: proxy.transport(env, path))
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def test_failures_distinguish_routing_local_permissions_and_cli_flags(self):
         self.assertIn('before inference', failure_detail(['workspace routing discovery failed'], '', 1))
         self.assertIn('service files', failure_detail([], 'Operation not permitted (os error 1)', 1))
@@ -238,7 +249,7 @@ class AdapterTests(unittest.TestCase):
                 'unrelated': {'status': 'ok', 'summary': 'not for output'}}}
             binary = self.fake_cli(directory, 'import sys\nassert sys.argv[1:] == ["doctor", "--json"]\nprint(%r)\n' % json.dumps(report))
             result = CodexBackend(binary, model='synthetic-model').doctor()
-            self.assertEqual(result['checks'], {'auth.credentials': {'status': 'ok', 'summary': 'configured'}})
+            self.assertEqual(result['checks'], {'auth.credentials': {'status': 'ok', 'summary': 'See status; raw diagnostics suppressed'}})
             self.assertEqual(result['adapter_model'], 'synthetic-model')
             self.assertFalse(result['model_called'])
             self.assertNotIn('not for output', json.dumps(result))

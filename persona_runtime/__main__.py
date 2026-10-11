@@ -33,6 +33,12 @@ def parser():
     p.add_argument('--retrieval', choices=('recent','bm25','dense','hybrid'), default='hybrid')
     commands = p.add_subparsers(dest='command', required=True)
     commands.add_parser('doctor', help='проверить CLI, вход и сеть без вызова модели; нужен доступ к служебной папке Codex')
+    proxy = commands.add_parser('proxy', help='SOCKS5: локальная настройка, проверка и отключение')
+    actions = proxy.add_subparsers(dest='proxy_action', required=True)
+    for action in ('set', 'status', 'off'):
+        actions.add_parser(action)
+    health = actions.add_parser('health')
+    health.add_argument('--codex', dest='probe_codex', action='store_true', help='явно разрешить один ограниченный запрос модели')
     commands.add_parser('init', help='создать локальную память, не вызывая модель')
     commands.add_parser('status', help='очередь, ошибки, следующее пробуждение; без модели')
     send = commands.add_parser('send', help='поставить сообщение в очередь; без модели')
@@ -93,6 +99,33 @@ def main(argv=None):
         return 2
     store = None
     try:
+        if args.command == 'proxy':
+            from . import proxy
+            if args.proxy_action == 'set':
+                show(proxy.interactive_set())
+            elif args.proxy_action == 'status':
+                show(proxy.status())
+            elif args.proxy_action == 'off':
+                show(proxy.disable())
+            else:
+                report = proxy.health(timeout=min(args.timeout, 10))
+                if args.probe_codex and report['ok']:
+                    backend = CodexBackend(args.codex, args.model, min(args.timeout, 60))
+                    # Same restricted transport/schema as character turns; no memory writes.
+                    from .protocol import SCHEMA
+                    prompt = ('Connection probe only. Return a valid decision with reply=OK, state=probe, '
+                              'goals=probe, wake_after_minutes=5, memories=[], relations=[], journal=[], memory_query=null. No tools. Schema: ' + json.dumps(SCHEMA))
+                    report['model_called'] = True
+                    try:
+                        backend.decide(prompt)
+                        report['proxy_transport'] = backend.last_proxy_report
+                        report['codex'] = 'ok'
+                    except RuntimeError as exc:
+                        report.update(ok=False, codex='failed', error=str(exc))
+                        report['proxy_transport'] = getattr(backend, 'last_proxy_report', {'enabled': True})
+                show(report)
+                return 0 if report['ok'] else 1
+            return 0
         if args.command == 'memory-setup':
             from .embedding import setup
             show(setup())
@@ -184,7 +217,9 @@ def main(argv=None):
                     show({'model_calls': completed, 'stopped': 'local limit'})
         return 0
     except KeyboardInterrupt:
-        print('\nОстановлено. Незавершённое событие сохранено; следующий worker восстановит очередь.', file=sys.stderr)
+        message = ('Операция прокси отменена.' if args.command == 'proxy' else
+                   'Остановлено. Незавершённое событие сохранено; следующий worker восстановит очередь.')
+        print('\n' + message, file=sys.stderr)
         return 130
     except (OSError, ValueError, RuntimeError, sqlite3.Error, ImportError) as exc:
         print('Ошибка: %s' % exc, file=sys.stderr)

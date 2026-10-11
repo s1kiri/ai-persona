@@ -7,6 +7,9 @@ import signal
 import shutil
 import subprocess
 import tempfile
+from contextlib import contextmanager
+
+from .proxy import transport, child_command
 
 from .protocol import SCHEMA, decode
 
@@ -29,7 +32,7 @@ def failure_detail(errors, stderr, returncode):
                 'Try from a regular terminal; character data has not been committed by this turn.')
     if 'unexpected argument' in text or 'unrecognized option' in text:
         return 'Codex CLI is incompatible with the adapter flags; check its version and exec --help.'
-    return detail or 'Codex exit %d; run python3 -m persona_runtime doctor for diagnostics.' % returncode
+    return 'Codex exit %d; run python3 -m persona_runtime doctor for diagnostics.' % returncode
 
 
 def cli_environment():
@@ -66,12 +69,23 @@ class CodexBackend:
         self.binary = binary or shutil.which('codex') or (str(bundled) if bundled.is_file() else 'codex')
         self.model, self.timeout = model or configured_model(), timeout
 
+    @contextmanager
+    def connection(self):
+        with transport(cli_environment(), timeout=self.timeout) as (env, bridge):
+            try:
+                self._proxy_bridge = bridge
+                yield env
+            finally:
+                self.last_proxy_report = ({'enabled': True, 'connect_requests': bridge.requests,
+                                           'failed_connections': bridge.failures} if bridge else {'enabled': False})
+
     def doctor(self):
         """Explicit native health check, not a model call. Return only a narrow safe report."""
         try:
-            result = subprocess.run([self.binary, 'doctor', '--json'], env=cli_environment(),
-                                    text=True, encoding='utf-8', capture_output=True,
-                                    timeout=self.timeout)
+            with self.connection() as environment:
+                result = subprocess.run(child_command([self.binary, 'doctor', '--json'], self._proxy_bridge), env=environment,
+                                        text=True, encoding='utf-8', capture_output=True,
+                                        timeout=self.timeout)
         except FileNotFoundError:
             raise CodexError('Codex CLI not found; set --codex to its executable path')
         except subprocess.TimeoutExpired:
@@ -88,7 +102,9 @@ class CodexBackend:
                     'network.websocket_reachability', 'desktop.app_server.handshake')
         return {'cli_version': report.get('codexVersion'), 'adapter_model': self.model,
                 'model_called': False, 'overall_status': report.get('overallStatus'),
-                'checks': {key: {field: checks[key].get(field) for field in ('status', 'summary')}
+                'proxy': self.last_proxy_report,
+                'checks': {key: {'status': checks[key].get('status'),
+                                  'summary': 'See status; raw diagnostics suppressed'}
                            for key in selected if isinstance(checks.get(key), dict)},
                 'note': 'HTTP/WebSocket reachability does not prove workspace routing or a successful model turn.'}
 
@@ -129,49 +145,57 @@ class CodexBackend:
             if self.model:
                 command.extend(['--model', self.model])
             command.append('-')
-            environment = cli_environment()
             try:
-                process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE, text=True, encoding='utf-8',
-                                           env=environment, cwd=str(workspace), start_new_session=True)
-                try:
-                    stdout, stderr = process.communicate(prompt, timeout=self.timeout)
-                except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                    os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.communicate(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.communicate()
-                    raise
+                with self.connection() as environment:
+                    return self._execute(child_command(command, self._proxy_bridge), prompt, workspace, answer, environment)
             except FileNotFoundError:
                 raise CodexError('Codex CLI not found; set --codex to its executable path')
-            except subprocess.TimeoutExpired:
-                raise CodexError('Codex timed out; event retained for explicit retry')
-            usage = {}
-            errors = []
-            for line in stdout.splitlines():
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if event.get('type') == 'turn.completed':
-                    usage = event.get('usage', {})
-                elif event.get('type') in ('error', 'turn.failed'):
-                    error = event.get('error')
-                    nested = error.get('message') if isinstance(error, dict) else error
-                    errors.append(event.get('message') or nested or 'Codex turn failed')
-                elif event.get('type') == 'item.completed':
-                    item = event.get('item', {})
-                    if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change'):
-                        raise CodexError('unexpected tool use in the restricted local adapter')
-            if process.returncode or errors:
-                # Do not persist raw model output, environment, or diagnostic transcripts.
-                raise CodexError(failure_detail(errors, stderr, process.returncode))
-            if not answer.exists():
-                raise CodexError('Codex returned no structured answer')
+
+    def _execute(self, command, prompt, workspace, answer, environment):
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, encoding='utf-8',
+                                       env=environment, cwd=str(workspace), start_new_session=True)
             try:
-                decision = decode(answer.read_text(encoding='utf-8'))
-            except (ValueError, TypeError) as exc:
-                raise CodexError('invalid structured decision: %s' % exc)
-            return decision, usage
+                stdout, stderr = process.communicate(prompt, timeout=self.timeout)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+                raise
+        except FileNotFoundError:
+            raise CodexError('Codex CLI not found; set --codex to its executable path')
+        except subprocess.TimeoutExpired:
+            raise CodexError('Codex timed out; event retained for explicit retry')
+        usage = {}
+        errors = []
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get('type') == 'turn.completed':
+                usage = event.get('usage', {})
+            elif event.get('type') in ('error', 'turn.failed'):
+                error = event.get('error')
+                nested = error.get('message') if isinstance(error, dict) else error
+                errors.append(event.get('message') or nested or 'Codex turn failed')
+            elif event.get('type') == 'item.completed':
+                item = event.get('item', {})
+                if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change'):
+                    raise CodexError('unexpected tool use in the restricted local adapter')
+        if process.returncode or errors:
+            # Do not persist raw model output, environment, or diagnostic transcripts.
+            raise CodexError(failure_detail([], stderr + '\n' + '\n'.join(map(str, errors)), process.returncode))
+        if self._proxy_bridge and not self._proxy_bridge.requests:
+            raise CodexError('Codex returned without using the proxy bridge; result rejected')
+        if not answer.exists():
+            raise CodexError('Codex returned no structured answer')
+        try:
+            decision = decode(answer.read_text(encoding='utf-8'))
+        except (ValueError, TypeError):
+            raise CodexError('invalid structured decision; raw response suppressed')
+        return decision, usage

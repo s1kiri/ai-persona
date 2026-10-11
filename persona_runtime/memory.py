@@ -139,10 +139,14 @@ class Memory:
         self.index('edge:' + item_id, owner, value['text'])
 
     def episode(self, event, reply=None):
-        if event['kind'] != 'message':
-            return
-        owner = 'person:' + event['person']
-        text = 'Audience message: ' + event['text']
+        if event['kind'] == 'wake':
+            if not reply:
+                return
+            owner = 'self'
+            text = 'Host-confirmed autonomous local delivery (words are not proof of their claims):'
+        else:
+            owner = 'person:' + event['person']
+            text = 'Audience message: ' + event['text']
         if reply:
             text += '\nConfirmed delivered Garik reply: ' + reply
         self.db.execute('INSERT OR REPLACE INTO episodes VALUES (?,?,?,?)',
@@ -283,10 +287,13 @@ class Memory:
 
     def context(self, event, query=None, mode=None, extra=None):
         mode = mode or self.mode
-        rows = list(self.db.execute('''SELECT e.id,e.text,o.text AS reply FROM events e
-            LEFT JOIN outbox o ON o.event_id=e.id AND o.status='delivered'
-            WHERE e.conversation=? AND e.person=? AND e.kind='message' AND e.status='done'
-            ORDER BY e.created DESC,e.rowid DESC LIMIT 6''', (event['conversation'],event['person'])))
+        include_wakes=event['kind']=='wake' or (event['person']=='operator' and event['conversation']=='local')
+        rows=list(self.db.execute("""SELECT e.id,e.kind,e.text,
+            (SELECT group_concat(text,char(10)) FROM
+                (SELECT text FROM outbox WHERE event_id=e.id AND status='delivered' ORDER BY ordinal)) AS reply
+            FROM events e WHERE e.status IN ('done','superseded') AND
+                ((e.kind='message' AND e.person=? AND e.conversation=?) OR (? AND e.kind='wake'))
+            ORDER BY e.created DESC,e.rowid DESC LIMIT 8""",(event['person'],event['conversation'],include_wakes)))
         history = [dict(row) for row in reversed(rows)]
         # The nearest two user messages resolve references like "what colour was it?".
         search_query = query or '\n'.join([r['text'] for r in history[-2:]] + [event['text']])
@@ -298,10 +305,16 @@ class Memory:
         # Fixed core is small; large history entries cannot evict all relevant memories.
         context = {'state': self.store.get('state')[:1800], 'goals': self.store.get('goals')[:1800],
                    'memories': [], 'history': [], 'journal_receipts': [],
+                   'audience': self.store.audience(event), 'activities': [],
                    'retrieval': {'mode':mode,'counter':self.budget.name,'budget':self.budget.limit}}
         while self.budget.cost(context) > self.budget.limit and (context['state'] or context['goals']):
             context['state'] = context['state'][:len(context['state'])//2]
             context['goals'] = context['goals'][:len(context['goals'])//2]
+        for activity in self.store.activity_context():
+            core={key:activity[key] for key in ('key','title','kind','status','next_step','due','source_event')}
+            context['activities'].append(core)
+            if self.budget.cost(context)>self.budget.limit-700:
+                context['activities'].pop()
         candidates = personal + matches + (extra or [])
         seen = set()
         content_seen = set()
@@ -350,8 +363,9 @@ class Memory:
                 decision = json.loads(row['decision'])
                 for note in decision.get('memories',[]):
                     self.record(event,note,row['turn_time'])
-                reply = self.db.execute("SELECT text FROM outbox WHERE event_id=? AND status='delivered'", (event['id'],)).fetchone()
-                self.episode(event, reply['text'] if reply else None)
+                order = ' ORDER BY ordinal' if 'ordinal' in {r['name'] for r in self.db.execute('PRAGMA table_info(outbox)')} else ''
+                replies = self.db.execute("SELECT text FROM outbox WHERE event_id=? AND status='delivered'" + order, (event['id'],)).fetchall()
+                self.episode(event, '\n'.join(r['text'] for r in replies) if replies else None)
             self.store.put('memory_version','2')
 
     def export_journal(self):

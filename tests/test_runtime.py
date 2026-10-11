@@ -2,17 +2,20 @@
 import copy
 import json
 import os
+import pty
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
 from persona_runtime import proxy
 
-from persona_runtime.codex import CodexBackend, CodexError, configured_model, failure_detail
+from persona_runtime.codex import CodexBackend, CodexError, CodexCancelled, configured_model, failure_detail
 from persona_runtime.engine import Engine
 from persona_runtime.protocol import validate
 from persona_runtime.store import Store, worker_lock
@@ -159,6 +162,7 @@ class RuntimeTests(unittest.TestCase):
     def test_wake_polling_is_idempotent_and_respects_deadline(self):
         self.enqueue()
         self.engine.step()
+        self.store.acknowledge(self.store.pending_output()[0]['id'])
         due = float(self.store.get('next_wake'))
         self.assertIsNone(self.engine.wake_if_due(now=due - 1))
         first = self.engine.wake_if_due(now=due)
@@ -204,8 +208,8 @@ class RuntimeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         for name in ('obscene.md', 'non-obscene.md'):
             self.assertIn((root / 'resources/lexicon' / name).read_text().strip(), prompt)
-        self.assertNotIn('# Сейчас у тебя', prompt)
-        self.assertIn('Video, voice, Telegram sending', prompt)
+        self.assertNotIn('# Текущая встреча', prompt)
+        self.assertIn('Telegram sending, purchases and physical actions are NOT connected', prompt)
 
     def test_malformed_actions_and_boolean_wake_are_rejected(self):
         for mutate in (lambda d: d.update(wake_after_minutes=True),
@@ -276,6 +280,7 @@ class AdapterTests(unittest.TestCase):
             binary = self.fake_cli(directory, '''import json, os, pathlib, sys
 args = sys.argv
 assert '--ignore-user-config' in args and '--ephemeral' in args
+assert '--no-daemon' in args
 assert 'forced_login_method="chatgpt"' in args
 assert 'features.shell_tool=false' in args
 assert args[args.index('--sandbox')+1] == 'read-only'
@@ -305,6 +310,137 @@ pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('{}
             binary = self.fake_cli(directory, 'import time\ntime.sleep(10)\n')
             with self.assertRaisesRegex(CodexError, 'timed out'):
                 CodexBackend(binary, timeout=0.1).decide('test')
+
+    def test_native_cancellation_terminates_process_without_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid = Path(directory)/'pid'
+            binary = self.fake_cli(directory, 'import os,time,pathlib\npathlib.Path(%r).write_text(str(os.getpid()))\ntime.sleep(30)\n' % str(pid))
+            cancellation = threading.Event()
+            def cancel_after_start():
+                deadline=time.monotonic()+3
+                while not pid.exists() and time.monotonic()<deadline:
+                    time.sleep(.01)
+                cancellation.set()
+            timer = threading.Thread(target=cancel_after_start)
+            timer.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaises(CodexCancelled):
+                    CodexBackend(binary, timeout=10).decide('test',cancel=cancellation)
+            finally:
+                timer.join()
+            self.assertLess(time.monotonic()-started,3)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid.read_text()),0)
+
+    def test_native_web_events_count_calls_and_are_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body = '''import pathlib,sys,json
+assert '--search' in sys.argv
+assert 'web_search="live"' in sys.argv
+for kind in ('item.started','item.completed'):
+ print(json.dumps({'type':kind,'item':{'id':'web-1','type':'web_search','action':{'type':'search','query':'synthetic','unsafe':'not retained'}}}),flush=True)
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
+''' % json.dumps(decision())
+            backend=CodexBackend(self.fake_cli(directory,body))
+            backend.decide('test',web_search=True)
+            self.assertEqual(backend.last_web['calls'],1)
+            self.assertNotIn('unsafe',json.dumps(backend.last_web))
+            with self.assertRaisesRegex(CodexError,'unexpected web search'):
+                # Don't use the flag assertion when checking an unwanted tool.
+                other=self.fake_cli(directory,body.replace("assert '--search' in sys.argv\n",'').replace("assert 'web_search=\"live\"' in sys.argv\n",''))
+                CodexBackend(other).decide('test')
+
+    def test_native_web_limit_stops_before_answer_and_unavailable_never_claims_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary=self.fake_cli(directory,'''import json,time
+for i in range(3):
+ print(json.dumps({'type':'item.started','item':{'id':str(i),'type':'web_search'}}),flush=True)
+time.sleep(30)
+''')
+            with self.assertRaisesRegex(CodexError,'call limit'):
+                CodexBackend(binary,timeout=10).decide('test',web_search=True,max_web_calls=2)
+            binary=self.fake_cli(directory,'''import pathlib,sys,json
+print(json.dumps({'type':'item.completed','item':{'id':'err','type':'error','message':'web unavailable; private-secret'}}))
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
+'''%json.dumps(decision()))
+            backend=CodexBackend(binary)
+            with self.assertRaisesRegex(CodexError,'no result claimed'):
+                backend.decide('test',web_search=True)
+            self.assertEqual(backend.last_web['events'],[])
+            self.assertNotIn('private-secret',json.dumps(backend.last_web))
+
+    def test_failed_native_web_item_is_not_a_success_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary=self.fake_cli(directory,'''import pathlib,sys,json
+print(json.dumps({'type':'item.completed','item':{'id':'web-1','type':'web_search','status':'failed','error':'private detail'}}))
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
+'''%json.dumps(decision()))
+            backend=CodexBackend(binary)
+            with self.assertRaisesRegex(CodexError,'no result claimed'):
+                backend.decide('test',web_search=True)
+            self.assertEqual(backend.last_web['calls'],1)
+            self.assertEqual(backend.last_web['events'],[])
+            self.assertNotIn('private detail',json.dumps(backend.last_web))
+
+    def test_real_tty_loop_accepts_input_during_native_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data=Path(directory)/'data';started=Path(directory)/'started'
+            binary=self.fake_cli(directory,'''import json,pathlib,sys,time
+with pathlib.Path(%r).open('a') as output:output.write('started\\n')
+time.sleep(1)
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1}}))
+'''%(str(started),json.dumps(decision())))
+            code='''from unittest.mock import patch
+from persona_runtime import proxy
+from persona_runtime.__main__ import main
+with patch('persona_runtime.codex.transport',side_effect=lambda env,**kw:proxy.transport(env,%r)):
+ raise SystemExit(main(%r))
+'''%(str(Path(directory)/'absent.json'),['--data-dir',str(data),'--codex',binary,'--no-web','chat','--no-autonomy','--max-calls','2'])
+            master,slave=pty.openpty()
+            process=subprocess.Popen([sys.executable,'-c',code],stdin=slave,stdout=slave,stderr=slave)
+            os.close(slave)
+            try:
+                os.write(master,b'old input\n')
+                deadline=time.monotonic()+5
+                while not started.exists() and time.monotonic()<deadline:time.sleep(.01)
+                self.assertTrue(started.exists(),'native generation did not start')
+                os.write(master,b'new input\n')
+                process.wait(timeout=8)
+                self.assertEqual(process.returncode,0)
+                with sqlite3.connect(data/'runtime.sqlite3') as database:
+                    rows=database.execute('SELECT text,status FROM events ORDER BY rowid').fetchall()
+                    self.assertEqual(rows,[('old input','superseded'),('new input','done')])
+                    self.assertEqual(database.execute('SELECT count(*) FROM turns').fetchone()[0],1)
+                    self.assertEqual(database.execute("SELECT count(*) FROM outbox WHERE status='delivered'").fetchone()[0],1)
+            finally:
+                if process.poll() is None:process.kill();process.wait()
+                os.close(master)
+
+    def test_watch_delivers_delayed_parts_after_call_budget_without_an_extra_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data=Path(directory)/'data'
+            store=Store(data);store.enqueue('Synthetic user message');store.close()
+            value=decision();value['reply']=None
+            value['messages']=[{'text':'one','delay_seconds':0},{'text':'two','delay_seconds':1}]
+            binary=self.fake_cli(directory,'''import pathlib,sys,json
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1}}))
+'''%json.dumps(value))
+            from persona_runtime.__main__ import main
+            import io
+            from contextlib import redirect_stdout
+            started=time.monotonic()
+            with redirect_stdout(io.StringIO()):
+                result=main(['--data-dir',str(data),'--codex',binary,'--no-web','watch','--max-turns','1','--max-minutes','1'])
+            self.assertEqual(result,0)
+            self.assertLess(time.monotonic()-started,6)
+            with sqlite3.connect(data/'runtime.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM model_attempts').fetchone()[0],1)
+                delivered=db.execute('SELECT delivered FROM outbox ORDER BY ordinal').fetchall()
+                self.assertEqual(len(delivered),2)
+                self.assertGreaterEqual(delivered[1][0]-delivered[0][0],1)
 
 
 if __name__ == '__main__':

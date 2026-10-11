@@ -7,6 +7,9 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import queue
+import threading
+import time
 from contextlib import contextmanager
 
 from .proxy import transport, child_command
@@ -63,7 +66,12 @@ def configured_model(path=None):
     return None
 
 
+class CodexCancelled(CodexError):
+    pass
+
+
 class CodexBackend:
+    supports_control = True
     def __init__(self, binary=None, model=None, timeout=180):
         bundled = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')
         self.binary = binary or shutil.which('codex') or (str(bundled) if bundled.is_file() else 'codex')
@@ -108,19 +116,19 @@ class CodexBackend:
                            for key in selected if isinstance(checks.get(key), dict)},
                 'note': 'HTTP/WebSocket reachability does not prove workspace routing or a successful model turn.'}
 
-    def decide(self, prompt):
+    def decide(self, prompt, cancel=None, web_search=False, max_web_calls=2):
         # Deliberately outside the source tree. All needed context arrives on stdin.
         with tempfile.TemporaryDirectory(prefix='persona-turn-') as directory:
             workspace = Path(directory)
             schema = workspace / 'decision.schema.json'
             answer = workspace / 'answer.json'
             schema.write_text(json.dumps(SCHEMA), encoding='utf-8')
-            command = [self.binary, 'exec', '--ignore-user-config', '--ephemeral',
+            command = [self.binary, '--no-daemon'] + (['--search'] if web_search else []) + ['exec', '--ignore-user-config', '--ephemeral',
                        '--skip-git-repo-check', '--sandbox', 'read-only',
                        '-c', 'approval_policy="never"',
                        '-c', 'forced_login_method="chatgpt"',
                        '-c', 'project_doc_max_bytes=0',
-                       '-c', 'web_search="disabled"',
+                       '-c', 'web_search="live"' if web_search else 'web_search="disabled"',
                        '-c', 'features.shell_tool=false',
                        '-c', 'features.unified_exec=false',
                        '-c', 'features.shell_snapshot=false',
@@ -134,7 +142,7 @@ class CodexBackend:
                        '-c', 'features.computer_use=false',
                        '-c', 'features.browser_use=false',
                        '-c', 'features.image_generation=false',
-                       '-c', 'features.code_mode_host=false',
+                       '-c', 'features.code_mode_host=true' if web_search else 'features.code_mode_host=false',
                        '-c', 'features.workspace_dependencies=false',
                        '-c', 'features.sleep_tool=false',
                        '-c', 'features.view_image=false',
@@ -147,55 +155,141 @@ class CodexBackend:
             command.append('-')
             try:
                 with self.connection() as environment:
-                    return self._execute(child_command(command, self._proxy_bridge), prompt, workspace, answer, environment)
+                    return self._execute(child_command(command, self._proxy_bridge), prompt, workspace, answer, environment, cancel, web_search, max_web_calls)
             except FileNotFoundError:
                 raise CodexError('Codex CLI not found; set --codex to its executable path')
 
-    def _execute(self, command, prompt, workspace, answer, environment):
+    def _execute(self, command, prompt, workspace, answer, environment, cancel=None, web_search=False, max_web_calls=2):
+        self.last_web = {'enabled': web_search, 'calls': 0, 'events': [], 'seen_item_types': []}
+        if cancel is not None and cancel.is_set():
+            raise CodexCancelled('generation cancelled before start')
+        if not 1 <= max_web_calls <= 3:
+            raise CodexError('web search limit must be 1..3')
         try:
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, text=True, encoding='utf-8',
                                        env=environment, cwd=str(workspace), start_new_session=True)
-            try:
-                stdout, stderr = process.communicate(prompt, timeout=self.timeout)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.communicate(timeout=3)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate()
-                raise
         except FileNotFoundError:
             raise CodexError('Codex CLI not found; set --codex to its executable path')
-        except subprocess.TimeoutExpired:
-            raise CodexError('Codex timed out; event retained for explicit retry')
-        usage = {}
-        errors = []
-        for line in stdout.splitlines():
+        messages = queue.Queue()
+        def feed():
             try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get('type') == 'turn.completed':
-                usage = event.get('usage', {})
-            elif event.get('type') in ('error', 'turn.failed'):
-                error = event.get('error')
-                nested = error.get('message') if isinstance(error, dict) else error
-                errors.append(event.get('message') or nested or 'Codex turn failed')
-            elif event.get('type') == 'item.completed':
-                item = event.get('item', {})
-                if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change'):
-                    raise CodexError('unexpected tool use in the restricted local adapter')
-        if process.returncode or errors:
-            # Do not persist raw model output, environment, or diagnostic transcripts.
-            raise CodexError(failure_detail([], stderr + '\n' + '\n'.join(map(str, errors)), process.returncode))
-        if self._proxy_bridge and not self._proxy_bridge.requests:
-            raise CodexError('Codex returned without using the proxy bridge; result rejected')
-        if not answer.exists():
-            raise CodexError('Codex returned no structured answer')
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+        def read(stream, channel):
+            try:
+                for line in stream:
+                    messages.put((channel,line))
+            except (OSError, UnicodeError):
+                messages.put(('reader_error',''))
+            finally:
+                messages.put(('eof',channel))
+        threads = [threading.Thread(target=feed,daemon=True),
+                   threading.Thread(target=read,args=(process.stdout,'stdout'),daemon=True),
+                   threading.Thread(target=read,args=(process.stderr,'stderr'),daemon=True)]
+        for thread in threads: thread.start()
+        usage, errors, diagnostics, ended, output_bytes = {}, [], [], 0, 0
+        web_ids = set()
+        started = time.monotonic()
         try:
-            decision = decode(answer.read_text(encoding='utf-8'))
-        except (ValueError, TypeError):
-            raise CodexError('invalid structured decision; raw response suppressed')
-        return decision, usage
+            while ended < 2 or process.poll() is None:
+                if cancel is not None and cancel.is_set():
+                    raise CodexCancelled('generation cancelled; no decision committed')
+                if time.monotonic()-started > self.timeout:
+                    raise CodexError('Codex timed out; event retained for explicit retry')
+                try:
+                    channel,line = messages.get(timeout=.1)
+                except queue.Empty:
+                    continue
+                if channel == 'eof':
+                    ended += 1
+                    continue
+                if channel == 'reader_error':
+                    raise CodexError('invalid CLI output encoding; transcript suppressed')
+                output_bytes += len(line.encode())
+                if output_bytes > 2000000:
+                    raise CodexError('CLI output limit exceeded; transcript suppressed')
+                if channel == 'stderr':
+                    diagnostics.append(line[:1000])
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event,dict):
+                    continue
+                if event.get('type') == 'turn.completed':
+                    usage = event.get('usage',{})
+                elif event.get('type') in ('error','turn.failed'):
+                    error = event.get('error')
+                    nested = error.get('message') if isinstance(error,dict) else error
+                    errors.append(event.get('message') or nested or 'Codex turn failed')
+                elif event.get('type') in ('item.started','item.updated','item.completed'):
+                    item = event.get('item',{})
+                    kind = item.get('type')
+                    if kind and kind not in self.last_web['seen_item_types']:
+                        self.last_web['seen_item_types'].append(kind)
+                    if kind == 'error':
+                        detail = str(item).lower()
+                        classifications = ('not available', 'unavailable', 'disabled',
+                                           'not supported', 'failed', 'timeout', 'tool')
+                        self.last_web.setdefault('error_categories', []).append(
+                            [word for word in classifications if word in detail])
+                    if kind not in ('reasoning','agent_message','error','web_search','web_search_call'):
+                        raise CodexError('unexpected tool use in the restricted local adapter')
+                    if kind in ('web_search','web_search_call'):
+                        if not web_search:
+                            raise CodexError('unexpected web search in a non-search turn')
+                        item_id = item.get('id') or 'missing-id'
+                        if item_id not in web_ids:
+                            web_ids.add(item_id)
+                            self.last_web['calls'] = len(web_ids)
+                            if len(web_ids) > max_web_calls:
+                                raise CodexError('native web search call limit exceeded')
+                        if event['type'] == 'item.completed':
+                            if item.get('status') in ('failed','error') or item.get('error'):
+                                self.last_web.setdefault('error_categories', []).append(['native tool failed'])
+                                continue
+                            action = item.get('action',{})
+                            safe_action = {key: value for key,value in action.items()
+                                           if key in ('type','query','queries','url','pattern','domains')}
+                            self.last_web['events'].append({'id':item_id,'action':safe_action,'status':'completed'})
+            process.wait(timeout=1)
+            if process.returncode or errors:
+                raise CodexError(failure_detail([], ''.join(diagnostics)+'\n'+'\n'.join(map(str,errors)), process.returncode))
+            if web_search and not self.last_web['events']:
+                if answer.exists():
+                    try:
+                        self.last_web['unconfirmed_decision'] = decode(answer.read_text(encoding='utf-8'))
+                    except (ValueError,TypeError,OSError):
+                        pass
+                raise CodexError('requested native search did not complete; no result claimed')
+            if self._proxy_bridge and not self._proxy_bridge.requests:
+                raise CodexError('Codex returned without using the proxy bridge; result rejected')
+            if not answer.exists():
+                raise CodexError('Codex returned no structured answer')
+            try:
+                decision = decode(answer.read_text(encoding='utf-8'))
+            except (ValueError,TypeError):
+                raise CodexError('invalid structured decision; raw response suppressed')
+            return decision,usage
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid,signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=3)
+            for stream in (process.stdout,process.stderr):
+                stream.close()
+            for thread in threads:
+                thread.join(timeout=.2)

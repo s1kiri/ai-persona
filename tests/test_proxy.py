@@ -251,6 +251,8 @@ print(json.dumps({'type':'turn.completed','usage':{}}))
             result = proxy.health(self.path, keychain_factory=Vault)
             self.assertTrue(result['ok'])
             self.assertEqual(result['http_status'],403)
+            self.assertTrue(result['transport_ok'])
+            self.assertFalse(result['http_response_ok'])
             context.return_value.wrap_socket.assert_called_once_with(tls, server_hostname='chatgpt.com')
             self.assertIn(b'HEAD / HTTP/1.1',tls.request)
         with patch('persona_runtime.proxy.connect_tcp', return_value=tls), patch('persona_runtime.proxy.negotiate'), patch('persona_runtime.proxy.destination'), patch('ssl.create_default_context') as context:

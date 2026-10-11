@@ -29,6 +29,8 @@ def parser():
     p.add_argument('--codex', help='путь к Codex CLI; иначе поиск в PATH и приложении на Mac')
     p.add_argument('--model', help='модель Codex; иначе строка model из конфигурации или стандарт CLI')
     p.add_argument('--timeout', type=int, default=180, help='предел секунд на один вызов')
+    p.add_argument('--no-web', action='store_true', help='не разрешать персонажу настоящий поиск Codex')
+    p.add_argument('--max-web-calls', type=int, default=2, help='предел native web tool calls за поисковый ход (1..3)')
     p.add_argument('--memory-budget', type=int, default=4000, help='бюджет контекста памяти в оценочных токенах')
     p.add_argument('--retrieval', choices=('recent','bm25','dense','hybrid'), default='hybrid')
     commands = p.add_subparsers(dest='command', required=True)
@@ -44,7 +46,7 @@ def parser():
     send = commands.add_parser('send', help='поставить сообщение в очередь; без модели')
     send.add_argument('text')
     send.add_argument('--event-id', help='стабильный ID события для защиты от повторов')
-    chat = commands.add_parser('chat', help='личный разговор; свободный регистр, /quit для выхода')
+    chat = commands.add_parser('chat', help='личный разговор; речь по контексту, /quit для выхода')
     chat.add_argument('--max-calls', type=int, default=20, help='предел вызовов Codex за сеанс, включая дополнительный поиск')
     chat.add_argument('--max-wakes', type=int, default=3, help='предел самостоятельных пробуждений за сеанс')
     chat.add_argument('--max-minutes', type=int, default=60, help='время самостоятельных пробуждений; разговор доступен после него')
@@ -55,8 +57,9 @@ def parser():
         sub.add_argument('--person', default='operator', help='стабильный ID собеседника')
         sub.add_argument('--name', default='Кирилл', help='отображаемое имя')
         sub.add_argument('--conversation', default='local')
-        sub.add_argument('--register', choices=('non-obscene', 'free'),
-                         default='free' if sub is chat else 'non-obscene')
+        sub.add_argument('--surface', choices=('private','formal','unknown'), help='контекст речи; личный чат оператора считается private')
+        sub.add_argument('--register', choices=('auto', 'non-obscene', 'free'),
+                         default='auto' if sub is chat else 'non-obscene')
     step = commands.add_parser('step', help='обработать очередь и показать ответы')
     step.add_argument('--count', type=int, default=1, help='максимум вызовов модели (1..20)')
     commands.add_parser('outbox', help='показать неподтверждённые ответы, не меняя статус')
@@ -76,12 +79,15 @@ def parser():
     watch = commands.add_parser('watch', help='локальный цикл с конечным лимитом вызовов; Ctrl+C для остановки')
     watch.add_argument('--max-turns', type=int, default=3, help='предел вызовов модели (1..20)')
     watch.add_argument('--max-minutes', type=int, default=30, help='предел времени работы (1..1440 минут)')
-    watch.add_argument('--register', choices=('non-obscene', 'free'), default='non-obscene')
+    watch.add_argument('--register', choices=('auto', 'non-obscene', 'free'), default='non-obscene')
     return p
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if not 1 <= args.max_web_calls <= 3:
+        print('--max-web-calls must be 1..3', file=sys.stderr)
+        return 2
     if not 1 <= args.timeout <= 600:
         print('--timeout must be 1..600', file=sys.stderr)
         return 2
@@ -143,7 +149,7 @@ def main(argv=None):
         from .memory import Budget
         store.memory.budget = Budget(args.memory_budget)
         store.memory.mode = args.retrieval
-        engine = Engine(store, backend)
+        engine = Engine(store, backend, web_enabled=not args.no_web, max_web_calls=args.max_web_calls)
         if args.command == 'init':
             show({'data': str(store.directory), 'ready': True, 'model_called': False})
         elif args.command == 'status':
@@ -153,9 +159,9 @@ def main(argv=None):
             show(status)
         elif args.command == 'send':
             show({'event_id': store.enqueue(args.text, args.person, args.name, args.conversation,
-                                             args.register, args.event_id), 'model_called': False})
+                                             args.register, args.event_id, surface=args.surface or 'unknown'), 'model_called': False})
         elif args.command == 'outbox':
-            show(store.pending_output())
+            show(store.pending_output(include_future=True))
         elif args.command == 'ack':
             store.acknowledge(args.output_id)
             show({'acknowledged': args.output_id})
@@ -187,29 +193,33 @@ def main(argv=None):
                 else:
                     deliver(store)
                 if args.command == 'step':
-                    completed = 0
-                    for _ in range(args.count):
-                        if engine.step() is None:
+                    completed = model_calls = 0
+                    while model_calls < args.count:
+                        if engine.step(max_calls=min(3,args.count-model_calls)) is None:
                             break
+                        model_calls += engine.last_calls
                         completed += 1
                         deliver(store)
-                    show({'processed': completed})
+                    show({'processed': completed, 'model_calls':model_calls})
                 elif args.command == 'chat':
                     from .session import Session
                     autonomy = args.autonomy if args.autonomy is not None else (args.person == 'operator' and args.conversation == 'local')
                     session = Session(store, engine, args.person, args.name, args.conversation,
                                       args.register, autonomy, args.max_calls, args.max_wakes, args.max_minutes,
-                                      deliver=lambda: deliver(store,args.person,args.conversation))
-                    while store.status()['events'].get('pending',0) and not session.stopped:
-                        session.process()
+                                      deliver=lambda: deliver(store,args.person,args.conversation), surface=args.surface)
                     session.run()
                 elif args.command == 'watch':
                     end = time.monotonic() + args.max_minutes * 60
                     completed = 0
                     print('Локальный цикл: не более %d вызовов / %d минут. Ctrl+C — остановка.' % (args.max_turns, args.max_minutes), flush=True)
-                    while completed < args.max_turns and time.monotonic() < end:
+                    while (completed < args.max_turns or store.pending_output(include_future=True)) and time.monotonic() < end:
+                        # Timed delivery is independent of another model call.
+                        deliver(store)
+                        if completed >= args.max_turns:
+                            time.sleep(.05)
+                            continue
                         engine.wake_if_due(args.register)
-                        if engine.step(max_calls=min(2,args.max_turns-completed)) is not None:
+                        if engine.step(max_calls=min(3,args.max_turns-completed)) is not None:
                             completed += engine.last_calls
                             deliver(store)
                         else:

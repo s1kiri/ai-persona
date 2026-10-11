@@ -291,6 +291,10 @@ def health(path=CONFIG, timeout=10, host='chatgpt.com', keychain_factory=Keychai
                 raise ProxyError('HTTPS: назначение не вернуло HTTP ответ.')
             report[stage] = 'ok'
             report['http_status'] = int(parts[1])
+        report['transport_ok'] = True
+        report['http_response_ok'] = 200 <= report['http_status'] < 400
+        report['note'] = ('HTTPS reached and certificate verified; HTTP status is the actual site response, '
+                          'not a Codex authentication/model result.')
         report['ok'] = True
     except ProxyError as exc:
         report[stage] = 'failed'
@@ -303,6 +307,7 @@ def health(path=CONFIG, timeout=10, host='chatgpt.com', keychain_factory=Keychai
     finally:
         if sock:
             sock.close()
+    report.setdefault('transport_ok', False)
     return report
 
 

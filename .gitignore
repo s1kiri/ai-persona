@@ -12,3 +12,6 @@ secrets/
 
 # Tickets a character files are runtime, not source.
 tickets/
+
+# Internal planning stays local until the independent private project exists.
+.local/

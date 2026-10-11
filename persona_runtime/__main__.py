@@ -36,11 +36,13 @@ def parser():
     send = commands.add_parser('send', help='поставить сообщение в очередь; без модели')
     send.add_argument('text')
     send.add_argument('--event-id', help='стабильный ID события для защиты от повторов')
-    for sub in (send, commands.add_parser('chat', help='интерактивный разговор; /quit для выхода')):
+    chat = commands.add_parser('chat', help='личный разговор; свободный регистр, /quit для выхода')
+    for sub in (send, chat):
         sub.add_argument('--person', default='operator', help='стабильный ID собеседника')
         sub.add_argument('--name', default='Кирилл', help='отображаемое имя')
         sub.add_argument('--conversation', default='local')
-        sub.add_argument('--register', choices=('non-obscene', 'free'), default='non-obscene')
+        sub.add_argument('--register', choices=('non-obscene', 'free'),
+                         default='free' if sub is chat else 'non-obscene')
     step = commands.add_parser('step', help='обработать очередь и показать ответы')
     step.add_argument('--count', type=int, default=1, help='максимум вызовов модели (1..20)')
     commands.add_parser('outbox', help='показать неподтверждённые ответы, не меняя статус')

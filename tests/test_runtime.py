@@ -130,14 +130,17 @@ class RuntimeTests(unittest.TestCase):
         self.store.retry(event_id)
         self.assertEqual(self.engine.step(), event_id)
 
-    def test_memories_and_history_do_not_cross_people_or_conversations(self):
+    def test_memories_follow_person_but_history_stays_in_conversation(self):
         self.enqueue(person='alice', conversation='one')
         self.engine.step()
         for person, conversation in (('bob', 'one'), ('alice', 'two')):
             event_id = self.enqueue(person=person, conversation=conversation)
             event = dict(self.store.db.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone())
             context = self.store.context(event)
-            self.assertEqual(context['memories'], [])
+            if person == 'bob':
+                self.assertEqual(context['memories'], [])
+            else:
+                self.assertTrue(any('hot sauce' in note['text'] for note in context['memories']))
             self.assertEqual(context['history'], [])
 
     def test_memory_update_keeps_provenance(self):
@@ -252,7 +255,8 @@ class AdapterTests(unittest.TestCase):
 
     def fake_cli(self, directory, body):
         path = Path(directory) / 'synthetic-codex'
-        path.write_text('#!' + sys.executable + '\n' + body, encoding='utf-8')
+        # Kernel shebang parsing cannot handle the spaces in this project's venv path.
+        path.write_text('#!' + str(Path(sys.executable).resolve()) + '\n' + body, encoding='utf-8')
         path.chmod(0o700)
         return str(path)
 

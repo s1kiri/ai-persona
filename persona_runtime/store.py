@@ -44,6 +44,15 @@ class Store:
             );
         ''')
 
+        from .memory import Memory
+        self.memory = Memory(self)
+        if self.get('memory_version') != '2':
+            with worker_lock(self.directory):
+                if self.db.execute('SELECT 1 FROM turns LIMIT 1').fetchone():
+                    self.backup(self.directory / 'backups' / ('before-memory-v2-' + str(uuid.uuid4()) + '.sqlite3'))
+                self.memory.migrate()
+        self.sync_journal()
+
     def close(self):
         self.db.close()
 
@@ -112,23 +121,18 @@ class Store:
                 raise ValueError('retry requires a failed event with fewer than three attempts')
 
     def context(self, event):
-        scope = self.scope(event)
-        memories = [dict(r) for r in self.db.execute('''SELECT key,kind,basis,text,source_event FROM memories
-            WHERE scope=? ORDER BY updated DESC, key LIMIT 20''', (scope,))]
-        rows = list(self.db.execute('''SELECT e.id,e.text,o.text AS reply FROM events e
-            LEFT JOIN outbox o ON o.event_id=e.id AND o.status='delivered'
-            WHERE e.conversation=? AND e.person=? AND e.kind='message' AND e.status='done'
-            ORDER BY e.created DESC,e.rowid DESC LIMIT 6''', (event['conversation'], event['person'])))
-        return {'state': self.get('state'), 'goals': self.get('goals'),
-                'memories': memories, 'history': [dict(r) for r in reversed(rows)]}
+        context, _ = self.memory.context(event)
+        return context
 
     @staticmethod
     def scope(event):
         # JSON tuple avoids collisions in user-supplied identifiers.
         return json.dumps([event['conversation'], event['person']], ensure_ascii=False)
 
-    def complete(self, event, decision, usage, now=None):
+    def complete(self, event, decision, usage, now=None, retrieval=None):
         validate(decision)
+        if decision.get('memory_query'):
+            raise ValueError('intermediate recall decisions cannot be committed')
         now = time.time() if now is None else now
         with self.db:
             row = self.db.execute('SELECT status FROM events WHERE id=?', (event['id'],)).fetchone()
@@ -138,6 +142,11 @@ class Store:
                 self.db.execute('INSERT OR REPLACE INTO memories VALUES (?,?,?,?,?,?,?)',
                                 (self.scope(event), memory['key'], memory['kind'], memory['basis'],
                                  memory['text'], event['id'], now))
+                self.memory.record(event, memory, now)
+            for relation in decision.get('relations', []):
+                self.memory.relation(event, relation, now)
+            self.memory.episode(event)
+            self.memory.journal(event, decision.get('journal', []), now)
             if decision['reply'] is not None:
                 self.db.execute('INSERT INTO outbox (id,event_id,conversation,text) VALUES (?,?,?,?)',
                                 (str(uuid.uuid4()), event['id'], event['conversation'], decision['reply']))
@@ -146,21 +155,48 @@ class Store:
             self.put('next_wake', now + decision['wake_after_minutes'] * 60)
             self.db.execute('INSERT INTO turns VALUES (?,?,?,?)',
                             (event['id'], json.dumps(decision, ensure_ascii=False), json.dumps(usage), now))
+            if retrieval is not None:
+                self.db.execute('INSERT OR REPLACE INTO retrieval_log VALUES (?,?)',
+                                (event['id'], json.dumps(retrieval)))
             self.db.execute("UPDATE events SET status='done', completed=?, error=NULL WHERE id=?", (now, event['id']))
 
-    def pending_output(self):
-        return [dict(r) for r in self.db.execute("SELECT * FROM outbox WHERE status='queued' ORDER BY rowid")]
+        self.sync_journal()
+
+    def sync_journal(self):
+        try:
+            self.memory.export_journal()
+        except OSError as exc:
+            # SQLite remains canonical. Export retries on the next launch without rerunning the model.
+            with self.db:
+                self.put('journal_export_error', str(exc)[:500])
+        else:
+            if self.get('journal_export_error'):
+                with self.db:
+                    self.put('journal_export_error', '')
+
+    def pending_output(self, person=None, conversation=None):
+        if person is None:
+            return [dict(r) for r in self.db.execute("SELECT * FROM outbox WHERE status='queued' ORDER BY rowid")]
+        include_wakes = person == 'operator' and conversation == 'local'
+        return [dict(r) for r in self.db.execute('''SELECT o.* FROM outbox o JOIN events e ON e.id=o.event_id
+            WHERE o.status='queued' AND ((e.person=? AND e.conversation=?) OR (? AND e.kind='wake'))
+            ORDER BY o.rowid''', (person,conversation,include_wakes))]
 
     def acknowledge(self, output_id):
         with self.db:
+            output = self.db.execute('SELECT * FROM outbox WHERE id=?', (output_id,)).fetchone()
             changed = self.db.execute("UPDATE outbox SET status='delivered', delivered=? WHERE id=? AND status='queued'", (time.time(), output_id)).rowcount
             if not changed:
                 raise ValueError('no queued output with that ID')
+            event = self.db.execute('SELECT * FROM events WHERE id=?', (output['event_id'],)).fetchone()
+            self.memory.episode(dict(event), output['text'])
 
     def status(self):
         return {'events': {r['status']: r['n'] for r in self.db.execute('SELECT status,COUNT(*) AS n FROM events GROUP BY status')},
                 'queued_replies': len(self.pending_output()),
-                'memories': self.db.execute('SELECT COUNT(*) FROM memories').fetchone()[0],
+                'memories': self.db.execute('SELECT COUNT(*) FROM recollections WHERE valid_to IS NULL').fetchone()[0],
+                'journal_entries': self.db.execute('SELECT COUNT(*) FROM journal').fetchone()[0],
+                'journal_export_error': self.get('journal_export_error') or None,
                 'next_wake': self.get('next_wake'),
                 'failed': [dict(r) for r in self.db.execute("SELECT id,attempts,error FROM events WHERE status='failed'")]}
 

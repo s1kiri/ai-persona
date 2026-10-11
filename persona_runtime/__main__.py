@@ -16,8 +16,8 @@ def show(value):
     print(json.dumps(value, ensure_ascii=False, indent=2), flush=True)
 
 
-def deliver(store):
-    for output in store.pending_output():
+def deliver(store, person=None, conversation=None):
+    for output in store.pending_output(person, conversation):
         print('\nГарик [%s]: %s\n' % (output['id'], output['text']), flush=True)
         # Confirmation is distinct from generation; a crash before this may replay output.
         store.acknowledge(output['id'])
@@ -29,6 +29,8 @@ def parser():
     p.add_argument('--codex', help='путь к Codex CLI; иначе поиск в PATH и приложении на Mac')
     p.add_argument('--model', help='модель Codex; иначе строка model из конфигурации или стандарт CLI')
     p.add_argument('--timeout', type=int, default=180, help='предел секунд на один вызов')
+    p.add_argument('--memory-budget', type=int, default=4000, help='бюджет контекста памяти в оценочных токенах')
+    p.add_argument('--retrieval', choices=('recent','bm25','dense','hybrid'), default='hybrid')
     commands = p.add_subparsers(dest='command', required=True)
     commands.add_parser('doctor', help='проверить CLI, вход и сеть без вызова модели; нужен доступ к служебной папке Codex')
     commands.add_parser('init', help='создать локальную память, не вызывая модель')
@@ -37,6 +39,12 @@ def parser():
     send.add_argument('text')
     send.add_argument('--event-id', help='стабильный ID события для защиты от повторов')
     chat = commands.add_parser('chat', help='личный разговор; свободный регистр, /quit для выхода')
+    chat.add_argument('--max-calls', type=int, default=20, help='предел вызовов Codex за сеанс, включая дополнительный поиск')
+    chat.add_argument('--max-wakes', type=int, default=3, help='предел самостоятельных пробуждений за сеанс')
+    chat.add_argument('--max-minutes', type=int, default=60, help='время самостоятельных пробуждений; разговор доступен после него')
+    autonomy = chat.add_mutually_exclusive_group()
+    autonomy.add_argument('--autonomy', dest='autonomy', action='store_true', default=None)
+    autonomy.add_argument('--no-autonomy', dest='autonomy', action='store_false')
     for sub in (send, chat):
         sub.add_argument('--person', default='operator', help='стабильный ID собеседника')
         sub.add_argument('--name', default='Кирилл', help='отображаемое имя')
@@ -51,6 +59,12 @@ def parser():
     retry = commands.add_parser('retry', help='разрешить повтор ошибочного события; без модели')
     retry.add_argument('event_id')
     commands.add_parser('memory', help='показать текущую память; без модели')
+    commands.add_parser('memory-setup', help='один раз скачать локальный эмбеддер и токенизатор')
+    commands.add_parser('journal', help='показать сохранённый личный дневник; без модели')
+    recall = commands.add_parser('recall', help='проверить локальный поиск без вызова Codex')
+    recall.add_argument('query')
+    recall.add_argument('--person', default='operator')
+    recall.add_argument('--conversation', default='local')
     backup = commands.add_parser('backup', help='сохранить согласованную копию SQLite; без модели')
     backup.add_argument('path', type=Path)
     watch = commands.add_parser('watch', help='локальный цикл с конечным лимитом вызовов; Ctrl+C для остановки')
@@ -65,6 +79,12 @@ def main(argv=None):
     if not 1 <= args.timeout <= 600:
         print('--timeout must be 1..600', file=sys.stderr)
         return 2
+    if not 1000 <= args.memory_budget <= 12000:
+        print('--memory-budget must be 1000..12000', file=sys.stderr)
+        return 2
+    if args.command == 'chat' and (not 1 <= args.max_calls <= 100 or not 0 <= args.max_wakes <= 20 or not 1 <= args.max_minutes <= 1440):
+        print('invalid chat limits', file=sys.stderr)
+        return 2
     if args.command == 'step' and not 1 <= args.count <= 20:
         print('--count must be 1..20', file=sys.stderr)
         return 2
@@ -73,6 +93,10 @@ def main(argv=None):
         return 2
     store = None
     try:
+        if args.command == 'memory-setup':
+            from .embedding import setup
+            show(setup())
+            return 0
         backend = CodexBackend(args.codex, args.model, args.timeout)
         if args.command == 'doctor':
             show(backend.doctor())
@@ -83,6 +107,9 @@ def main(argv=None):
                         for allowed in ((ROOT / '.runtime').resolve(), (ROOT / '.local').resolve()))):
             raise ValueError('within the repository, data must live under .runtime/ or .local/')
         store = Store(args.data_dir)
+        from .memory import Budget
+        store.memory.budget = Budget(args.memory_budget)
+        store.memory.mode = args.retrieval
         engine = Engine(store, backend)
         if args.command == 'init':
             show({'data': str(store.directory), 'ready': True, 'model_called': False})
@@ -104,7 +131,13 @@ def main(argv=None):
             show({'queued_for_retry': args.event_id})
         elif args.command == 'memory':
             show({'state': store.get('state'), 'goals': store.get('goals'),
-                  'notes': [dict(r) for r in store.db.execute('SELECT * FROM memories ORDER BY updated,key')]})
+                  'notes': [dict(r) for r in store.db.execute('SELECT * FROM recollections WHERE valid_to IS NULL ORDER BY created,key')],
+                  'relations': [dict(r) for r in store.db.execute('SELECT * FROM relations WHERE valid_to IS NULL ORDER BY created,key')]})
+        elif args.command == 'journal':
+            show([dict(r) for r in store.db.execute('SELECT * FROM journal ORDER BY created,id')])
+        elif args.command == 'recall':
+            context, report = store.memory.context({'person':args.person,'conversation':args.conversation,'kind':'message','text':args.query}, query=args.query)
+            show({'context':context,'report':report,'model_called':False})
         elif args.command == 'backup':
             destination = args.path.expanduser().resolve()
             # A casual backup command must not put private data into tracked source paths.
@@ -116,7 +149,10 @@ def main(argv=None):
         else:
             with worker_lock(store.directory):
                 store.recover()
-                deliver(store)
+                if args.command == 'chat':
+                    deliver(store, args.person, args.conversation)
+                else:
+                    deliver(store)
                 if args.command == 'step':
                     completed = 0
                     for _ in range(args.count):
@@ -126,38 +162,31 @@ def main(argv=None):
                         deliver(store)
                     show({'processed': completed})
                 elif args.command == 'chat':
-                    if store.status()['events'].get('pending', 0):
-                        raise ValueError('pending events exist; use step before starting chat')
-                    print('Гарик локально. /quit — выйти. Режим: %s.\n' % args.register, flush=True)
-                    while True:
-                        try:
-                            text = input('Ты: ').strip()
-                        except EOFError:
-                            break
-                        if text == '/quit':
-                            break
-                        if not text:
-                            continue
-                        store.enqueue(text, args.person, args.name, args.conversation, args.register)
-                        engine.step()
-                        deliver(store)
+                    from .session import Session
+                    autonomy = args.autonomy if args.autonomy is not None else (args.person == 'operator' and args.conversation == 'local')
+                    session = Session(store, engine, args.person, args.name, args.conversation,
+                                      args.register, autonomy, args.max_calls, args.max_wakes, args.max_minutes,
+                                      deliver=lambda: deliver(store,args.person,args.conversation))
+                    while store.status()['events'].get('pending',0) and not session.stopped:
+                        session.process()
+                    session.run()
                 elif args.command == 'watch':
                     end = time.monotonic() + args.max_minutes * 60
                     completed = 0
                     print('Локальный цикл: не более %d вызовов / %d минут. Ctrl+C — остановка.' % (args.max_turns, args.max_minutes), flush=True)
                     while completed < args.max_turns and time.monotonic() < end:
                         engine.wake_if_due(args.register)
-                        if engine.step() is not None:
-                            completed += 1
+                        if engine.step(max_calls=min(2,args.max_turns-completed)) is not None:
+                            completed += engine.last_calls
                             deliver(store)
                         else:
                             time.sleep(1)
-                    show({'processed': completed, 'stopped': 'local limit'})
+                    show({'model_calls': completed, 'stopped': 'local limit'})
         return 0
     except KeyboardInterrupt:
         print('\nОстановлено. Незавершённое событие сохранено; следующий worker восстановит очередь.', file=sys.stderr)
         return 130
-    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, ImportError) as exc:
         print('Ошибка: %s' % exc, file=sys.stderr)
         return 1
     finally:

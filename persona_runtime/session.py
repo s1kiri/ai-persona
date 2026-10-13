@@ -25,6 +25,8 @@ class Session:
         self.async_mode=False
         self.executor,self.future,self.turn=None,None,None
         self.last_input=-float('inf')
+        self.on_dispatch=None
+        self.dispatch_guard=None
 
     def autonomy_status(self):
         if self.paused:return 'на паузе'
@@ -74,9 +76,17 @@ class Session:
         return True
 
     def submit(self):
+        if self.dispatch_guard and not self.dispatch_guard():
+            self.stopped=True
+            self.engine.cancel(self.turn,'known usage or daily attempt limit reached')
+            self.turn=None
+            self.output('Лимит известного расхода или дневных попыток достигнут. Новые вызовы остановлены.')
+            return False
         self.engine.dispatch(self.turn)
         self.calls+=1
+        if self.on_dispatch:self.on_dispatch(self.turn)
         self.future=self.executor.submit(self.engine.generate,self.turn)
+        return True
 
     def poll(self):
         if self.future is None:
@@ -161,14 +171,18 @@ class Session:
         elif text.startswith('/'):
             self.output('Неизвестная команда. /help — список команд.')
         elif text:
-            self.last_input=self.clock()
-            self.interrupt()
-            self.store.supersede_pending(self.person,self.conversation)
-            self.store.enqueue(text,self.person,self.name,self.conversation,self.register,surface=self.surface)
-            if self.stopped:
-                self.output('Лимит исчерпан; сообщение сохранено без вызова модели.')
-            else:
-                self.process()
+            self.message(text)
+
+    def message(self,text,event_id=None):
+        if event_id and self.store.db.execute('SELECT 1 FROM events WHERE id=?',(event_id,)).fetchone():
+            return self.store.enqueue(text,self.person,self.name,self.conversation,self.register,event_id=event_id,surface=self.surface)
+        self.last_input=self.clock()
+        self.interrupt()
+        self.store.supersede_pending(self.person,self.conversation)
+        event_id=self.store.enqueue(text,self.person,self.name,self.conversation,self.register,event_id=event_id,surface=self.surface)
+        if self.stopped:self.output('Лимит исчерпан; сообщение сохранено без вызова модели.')
+        else:self.process()
+        return event_id
 
     def close(self):
         if self.turn:

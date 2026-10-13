@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 import sys
 import time
+from contextlib import nullcontext
 
 from .codex import CodexBackend
 from .engine import Engine, ROOT
@@ -80,6 +81,17 @@ def parser():
     watch.add_argument('--max-turns', type=int, default=3, help='предел вызовов модели (1..20)')
     watch.add_argument('--max-minutes', type=int, default=30, help='предел времени работы (1..1440 минут)')
     watch.add_argument('--register', choices=('auto', 'non-obscene', 'free'), default='non-obscene')
+    daemon=commands.add_parser('daemon',help='фоновая жизнь и локальная панель')
+    daemon_commands=daemon.add_subparsers(dest='daemon_action',required=True)
+    for name in ('start','run'):
+        sub=daemon_commands.add_parser(name)
+        sub.add_argument('--port',type=int,default=8765)
+        from .daemon import Limits
+        for key,value in vars(Limits()).items():
+            if type(value) is bool:sub.add_argument('--no-'+key,dest=key,action='store_false',default=True)
+            else:sub.add_argument('--'+key.replace('_','-'),dest=key,type=int,default=value)
+    for name in ('status','stop','autostart-template'):daemon_commands.add_parser(name)
+    commands.add_parser('panel',help='открыть панель; при необходимости запустить ограниченный daemon')
     return p
 
 
@@ -104,7 +116,45 @@ def main(argv=None):
         print('invalid watch limits', file=sys.stderr)
         return 2
     store = None
+    owned_lock=None
+    lock_entered=False
     try:
+        if args.command in ('daemon','panel'):
+            destination=args.data_dir.expanduser().resolve()
+            if destination==ROOT or (ROOT in destination.parents and not any(p==destination or p in destination.parents for p in (ROOT/'.local',ROOT/'.runtime'))):
+                raise ValueError('within repository, data must live under .runtime/ or .local/')
+            from .daemon import Runtime,Limits,control,start,stop
+            action='panel' if args.command=='panel' else args.daemon_action
+            if action in ('start','run'):
+                values={key:getattr(args,key) for key in vars(Limits())}
+                limits=Limits(**values).validate()
+                if not 1024<=args.port<=65535:raise ValueError('port must be 1024..65535')
+                if action=='start':show(start(args.data_dir,limits,args.port,args.codex,args.model,args.timeout))
+                else:
+                    runtime=Runtime(args.data_dir,args.port,limits,backend_factory=lambda:CodexBackend(args.codex,args.model,args.timeout))
+                    import signal
+                    signal.signal(signal.SIGTERM,lambda *_:runtime.stopping.set())
+                    signal.signal(signal.SIGINT,lambda *_:runtime.stopping.set())
+                    runtime.run()
+            elif action=='status':
+                state=control(args.data_dir)
+                show({'running':bool(state),**({k:state[k] for k in ('pid','started','mode','model','limits','calls_used','wakes_used','next_wake','usage')} if state else {}),
+                      'url':json.loads((args.data_dir/'daemon.json').read_text())['url'] if state else None})
+            elif action=='stop':show(stop(args.data_dir))
+            elif action=='autostart-template':
+                import plistlib
+                destination=ROOT/'.local/garik.launchagent.plist'
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                with destination.open('wb') as output:plistlib.dump({'Label':'local.persona.garik','ProgramArguments':[sys.executable,'-m','persona_runtime','--data-dir',str(args.data_dir.resolve()),'daemon','run'],
+                    'WorkingDirectory':str(ROOT),'RunAtLoad':False,'KeepAlive':False},output)
+                destination.chmod(0o600)
+                show({'template':str(destination),'installed':False,'autostart_enabled':False})
+            else:
+                import subprocess
+                result=start(args.data_dir,codex=args.codex,model=args.model,timeout=args.timeout)
+                subprocess.run(['/usr/bin/open','-a','Microsoft Edge',result['url']],check=True)
+                show(result)
+            return 0
         if args.command == 'proxy':
             from . import proxy
             if args.proxy_action == 'set':
@@ -145,7 +195,10 @@ def main(argv=None):
                 not any(allowed == destination or allowed in destination.parents
                         for allowed in ((ROOT / '.runtime').resolve(), (ROOT / '.local').resolve()))):
             raise ValueError('within the repository, data must live under .runtime/ or .local/')
-        store = Store(args.data_dir)
+        destination.mkdir(parents=True,exist_ok=True,mode=0o700)
+        owned_lock=worker_lock(destination)
+        owned_lock.__enter__();lock_entered=True
+        store = Store(args.data_dir,locked=True)
         from .memory import Budget
         store.memory.budget = Budget(args.memory_budget)
         store.memory.mode = args.retrieval
@@ -186,7 +239,7 @@ def main(argv=None):
             store.backup(destination)
             show({'backup': str(destination)})
         else:
-            with worker_lock(store.directory):
+            with nullcontext():
                 store.recover()
                 if args.command == 'chat':
                     deliver(store, args.person, args.conversation)
@@ -237,6 +290,7 @@ def main(argv=None):
     finally:
         if store:
             store.close()
+        if lock_entered:owned_lock.__exit__(None,None,None)
 
 
 if __name__ == '__main__':

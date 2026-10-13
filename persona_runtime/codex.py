@@ -10,6 +10,7 @@ import tempfile
 import queue
 import threading
 import time
+import sys
 from contextlib import contextmanager
 
 from .proxy import transport, child_command
@@ -116,7 +117,8 @@ class CodexBackend:
                            for key in selected if isinstance(checks.get(key), dict)},
                 'note': 'HTTP/WebSocket reachability does not prove workspace routing or a successful model turn.'}
 
-    def decide(self, prompt, cancel=None, web_search=False, max_web_calls=2):
+    def decide(self, prompt, cancel=None, web_search=False, max_web_calls=2, observer=None):
+        self.last_usage={}
         # Deliberately outside the source tree. All needed context arrives on stdin.
         with tempfile.TemporaryDirectory(prefix='persona-turn-') as directory:
             workspace = Path(directory)
@@ -155,18 +157,20 @@ class CodexBackend:
             command.append('-')
             try:
                 with self.connection() as environment:
-                    return self._execute(child_command(command, self._proxy_bridge), prompt, workspace, answer, environment, cancel, web_search, max_web_calls)
+                    return self._execute(child_command(command, self._proxy_bridge), prompt, workspace, answer, environment, cancel, web_search, max_web_calls,observer)
             except FileNotFoundError:
                 raise CodexError('Codex CLI not found; set --codex to its executable path')
 
-    def _execute(self, command, prompt, workspace, answer, environment, cancel=None, web_search=False, max_web_calls=2):
+    def _execute(self, command, prompt, workspace, answer, environment, cancel=None, web_search=False, max_web_calls=2,observer=None):
+        self.last_usage={}
         self.last_web = {'enabled': web_search, 'calls': 0, 'events': [], 'seen_item_types': []}
         if cancel is not None and cancel.is_set():
             raise CodexCancelled('generation cancelled before start')
         if not 1 <= max_web_calls <= 3:
             raise CodexError('web search limit must be 1..3')
         try:
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            supervised=[sys.executable,str(Path(__file__).with_name('child_guard.py')),str(os.getpid()),*command]
+            process = subprocess.Popen(supervised, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, text=True, encoding='utf-8',
                                        env=environment, cwd=str(workspace), start_new_session=True)
         except FileNotFoundError:
@@ -194,6 +198,7 @@ class CodexBackend:
         web_ids = set()
         started = time.monotonic()
         try:
+            if observer:observer({'type':'process.started','pid':process.pid})
             while ended < 2 or process.poll() is None:
                 if cancel is not None and cancel.is_set():
                     raise CodexCancelled('generation cancelled; no decision committed')
@@ -222,6 +227,8 @@ class CodexBackend:
                     continue
                 if event.get('type') == 'turn.completed':
                     usage = event.get('usage',{})
+                    self.last_usage=usage
+                    if observer:observer({'type':'usage','usage':usage})
                 elif event.get('type') in ('error','turn.failed'):
                     error = event.get('error')
                     nested = error.get('message') if isinstance(error,dict) else error
@@ -243,6 +250,10 @@ class CodexBackend:
                         if not web_search:
                             raise CodexError('unexpected web search in a non-search turn')
                         item_id = item.get('id') or 'missing-id'
+                        action=item.get('action',{})
+                        safe_action={key:value for key,value in action.items() if key in ('type','query','queries','url','pattern','domains')}
+                        if observer:observer({'type':'web.tool','id':item_id,'stage':event['type'].split('.')[-1],
+                                              'failed':item.get('status') in ('failed','error') or bool(item.get('error')),'action':safe_action})
                         if item_id not in web_ids:
                             web_ids.add(item_id)
                             self.last_web['calls'] = len(web_ids)

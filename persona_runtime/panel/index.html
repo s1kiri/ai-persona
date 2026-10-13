@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Гарик — живая панель</title><link rel="stylesheet" href="/panel.css"><script src="/panel.js" defer></script></head>
+<body>
+<aside class="rail">
+ <a class="brand" href="/">G<span>•</span><small>PERSONA LAB</small></a>
+ <div class="rail-section">РАБОЧЕЕ МЕСТО</div>
+ <nav><button class="nav active" data-page="home">◉ <span>Жизнь и чат</span></button><button class="nav" data-page="context">▤ <span>Контекст</span></button><button class="nav" data-page="usage">↗ <span>Расход</span></button><button class="nav" data-page="channels">⌘ <span>Подключения</span></button></nav>
+ <div class="rail-bottom"><img src="/avatar.png" alt=""><div><strong>Гарик</strong><small>Один герой. Своя жизнь.</small></div></div>
+ <div class="local-label"><i></i> Только на этом Mac</div>
+</aside>
+<main>
+ <header><div><div class="eyebrow">GARIK / CONTROL ROOM</div><h1>Жизнь продолжается<span>.</span></h1></div>
+ <div class="top-controls"><span id="connection" class="badge muted">Подключаемся</span><button id="pause" class="button">Пауза инициативы</button><button id="stop" class="button quiet danger">Остановить</button></div></header>
+ <div id="banner" class="banner hidden"></div>
+ <section id="page-home" class="page">
+  <div class="overview">
+   <article class="card identity"><div class="identity-copy"><div class="eyebrow">СЕЙЧАС</div><h2 id="runtime-title">Гарик локально</h2><p id="runtime-copy">Вкладку можно закрыть. Фоновый процесс живёт отдельно.</p><div class="identity-meta"><span id="uptime">—</span><span id="model">—</span></div></div><img class="hero" src="/avatar.png" alt="Гарик в бордовой олимпийке"><div class="identity-glow"></div></article>
+   <article class="card next"><div class="eyebrow">СВОЁ ДЕЛО</div><h3 id="activity">Пока не выбрано</h3><p id="next-step">Новых участников и внешних действий не придумываем.</p><div class="wake-line"><span>Следующее пробуждение</span><strong id="wake">—</strong></div><small id="wake-detail"></small></article>
+  </div>
+  <div class="workspace">
+   <article class="card chat"><div class="card-head"><div><h2>Разговор с Гарычем</h2><small>Личный локальный чат · речь по ситуации</small></div><span id="typing" class="badge hidden">Пишет…</span></div>
+    <div id="messages" class="messages"><div class="empty">Можно просто поздороваться.<br><small>Этот чат сохраняется между открытиями панели.</small></div></div>
+    <div id="pending" class="pending hidden"></div>
+    <form id="chat-form"><textarea id="message-input" placeholder="Что у тебя, Гарыч?" aria-label="Сообщение Гарику" rows="2" maxlength="16000"></textarea><div class="composer-bottom"><span>Enter — отправить · Shift+Enter — строка</span><div><button id="cancel" type="button" class="button quiet">Отменить ответ</button><button id="send" class="button primary" type="submit">Отправить ↗</button></div></div></form>
+   </article>
+   <div class="side-stack">
+    <article class="card tokens"><div class="card-head"><h2>Токены</h2><small>Этот запуск</small></div><div class="token-total" id="session-total">—</div><div class="token-legend"><div><i class="dot pink"></i>Вход <strong id="input-total">—</strong></div><div><i class="dot mint"></i>Выход <strong id="output-total">—</strong></div><div><i class="dot violet"></i>Из входа: кэш <strong id="cache-total">—</strong></div></div><p class="measurement" id="usage-status">Ждём фактический usage Codex.</p><progress id="calls-progress" max="20" value="0"></progress><div class="budget-line" id="budget-line">—</div><small id="token-budget"></small></article>
+    <article class="card feed-card"><div class="card-head"><h2>Пульс</h2><span class="live"><i></i> LIVE</span></div><div id="feed" class="feed"><div class="empty">Здесь появятся наблюдаемые действия.</div></div></article>
+   </div>
+  </div>
+ </section>
+ <section id="page-context" class="page hidden"><div class="section-intro"><h2>Что у него в голове — по объёму</h2><p>Размер подготовленных частей оценивается локально. Приватные рассуждения и внутренний текст состояния сюда не выводятся.</p></div><div class="two-columns"><article class="card padded"><h3>Состав последнего запроса</h3><div id="context-parts"></div><p id="context-note" class="measurement"></p></article><article class="card padded"><h3>Память и ограничения</h3><div id="context-limits"></div><div id="memory-sources" class="source-list"></div></article></div><article class="card padded sources-card"><h3>Источники после поиска</h3><div id="sources" class="source-list"></div><p class="measurement">Завершённый вызов инструмента не доказывает истинность статьи. Сохраняется источник и его происхождение.</p></article></section>
+ <section id="page-usage" class="page hidden"><div class="section-intro"><h2>Расход без магии</h2><p>Input + output. Cached input показан внутри входа; отдельно его к итогу не прибавляем. Это токены, а не денежная стоимость.</p></div><div id="usage-summary" class="summary-grid"></div><article class="card padded"><div class="card-head"><h3>Последние вызовы</h3><small>Точный usage · неизвестное значение — «—»</small></div><div class="table-wrap"><table><thead><tr><th>Когда / тип</th><th>Статус</th><th>Модель</th><th>Input</th><th>Output</th><th>Cached</th><th>Cache write</th><th>Reasoning</th></tr></thead><tbody id="calls-table"></tbody></table></div><p class="measurement">Вызов может быть отменён или завершиться ошибкой после расхода токенов. Уже полученный usage остаётся в учёте. Архивные записи могут быть итогами целого хода.</p></article></section>
+ <section id="page-channels" class="page hidden"><div class="section-intro"><h2>Где он живёт</h2><p>Только реальные подключения. Будущие каналы ждут отдельного подключения.</p></div><div id="channel-cards" class="summary-grid"></div><article class="card padded"><h3>Границы этого запуска</h3><div id="limits-list" class="limits-list"></div><p class="measurement">Mac должен бодрствовать. Закрытие браузера не останавливает runtime; сон Mac приостанавливает работу. Автозапуск при входе и caffeinate не включены.</p></article></section>
+ <footer><span>PERSONA LAB / ЛОКАЛЬНЫЙ ПРОТОТИП</span><span id="process-info">—</span></footer>
+</main></body></html>

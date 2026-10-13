@@ -1,5 +1,5 @@
 """SQLite is canonical; source character files are immutable seed data."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
@@ -15,7 +15,8 @@ class StaleTurn(RuntimeError):
 
 
 class Store:
-    def __init__(self, directory):
+    def __init__(self, directory, locked=False):
+        self.locked=locked
         self.directory = Path(directory).expanduser().resolve()
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = self.directory / 'runtime.sqlite3'
@@ -51,7 +52,7 @@ class Store:
         from .memory import Memory
         self.memory = Memory(self)
         if self.get('memory_version') != '2':
-            with worker_lock(self.directory):
+            with (nullcontext() if self.locked else worker_lock(self.directory)):
                 if self.db.execute('SELECT 1 FROM turns LIMIT 1').fetchone():
                     self.backup(self.directory / 'backups' / ('before-memory-v2-' + str(uuid.uuid4()) + '.sqlite3'))
                 self.memory.migrate()
@@ -61,7 +62,7 @@ class Store:
     def migrate_life(self):
         if self.get('runtime_version') == '3':
             return
-        with worker_lock(self.directory):
+        with (nullcontext() if self.locked else worker_lock(self.directory)):
             if self.db.execute('SELECT 1 FROM turns LIMIT 1').fetchone():
                 self.backup(self.directory/'backups'/('before-life-v3-'+str(uuid.uuid4())+'.sqlite3'))
             with self.db:

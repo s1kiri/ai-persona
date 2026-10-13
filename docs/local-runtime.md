@@ -4,6 +4,9 @@
 с авторизацией ChatGPT; тяжёлой модели на ноутбуке нет. Telegram, голос,
 видео и облачное развёртывание в этот этап не входят.
 
+Для работы после закрытия вкладки есть [фоновый процесс и браузерная панель](runtime-panel.md):
+`garik daemon start`, `garik panel`, `garik daemon status`, `garik daemon stop`.
+
 Нужны Python 3.9+ и Codex CLI с поддержкой `--ignore-user-config`, `--ephemeral`
 и `--output-schema`. Разработка проверялась с CLI 0.162.0-alpha.17.2.
 Базовый цикл работает без дополнительных библиотек; для гибридной памяти нужно

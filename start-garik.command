@@ -3,7 +3,7 @@
 set -eu
 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 case "${1-}" in
-  proxy) ;;
+  proxy|daemon|panel) ;;
   *) set -- chat "$@" ;;
 esac
 if [ -x .venv/bin/python ]; then

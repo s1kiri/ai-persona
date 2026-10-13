@@ -28,7 +28,7 @@ def parser():
     p = argparse.ArgumentParser(description='Локальный Гарик: память, события и Codex по подписке.')
     p.add_argument('--data-dir', type=Path, default=ROOT / '.runtime/garik')
     p.add_argument('--codex', help='путь к Codex CLI; иначе поиск в PATH и приложении на Mac')
-    p.add_argument('--model', help='модель Codex; иначе строка model из конфигурации или стандарт CLI')
+    p.add_argument('--model', help='модель Codex; по умолчанию gpt-6.1-sol, рассуждение medium')
     p.add_argument('--timeout', type=int, default=180, help='предел секунд на один вызов')
     p.add_argument('--no-web', action='store_true', help='не разрешать персонажу настоящий поиск Codex')
     p.add_argument('--max-web-calls', type=int, default=2, help='предел native web tool calls за поисковый ход (1..3)')

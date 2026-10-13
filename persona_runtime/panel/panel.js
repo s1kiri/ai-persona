@@ -41,7 +41,7 @@ function renderMessages(){
 }
 function renderFeed(){
  clear('feed');
- const names={'runtime.started':'Runtime запущен','runtime.stopped':'Runtime остановлен','runtime.control':'Управление','runtime.notice':'Состояние','call.started':'Вызов Codex','call.finished':'Вызов окончен','usage':'Получен точный usage','web.tool':'Нативный веб-инструмент','chat.delivered':'Сообщение в локальном чате'};
+ const names={'runtime.started':'Runtime запущен','runtime.stopped':'Runtime остановлен','runtime.control':'Управление','runtime.notice':'Состояние','call.started':'Вызов Codex','call.finished':'Вызов окончен','usage':'Получен точный usage','web.tool':'Нативный веб-инструмент','chat.delivered':'Сообщение в локальном чате','cli.diagnostic':'Диагностика Codex','cli.result':'Завершение CLI'};
  for(const e of state.feed){
   const row=node('div',null,'event');row.append(node('i'));const body=node('div');
   body.append(node('div',names[e.kind]||e.kind,'event-title'));
@@ -52,6 +52,8 @@ function renderFeed(){
   if(e.kind==='runtime.control')text={pause:'Пауза инициативы',resume:'Продолжить инициативу',cancel:'Отмена текущего хода',stop:'Остановка'}[e.data.action];
   if(e.kind==='web.tool'){const a=e.data.action;text=(e.data.failed?'Ошибка инструмента · ':e.data.stage==='completed'?'Завершён · ':'Начат · ')+(a.query||(a.queries||[]).join(' / ')||a.url||a.type||'');}
   if(e.kind==='usage'){const u=e.data.usage;text='Input '+fmt(u.input_tokens)+' · output '+fmt(u.output_tokens)+' · cached '+fmt(u.cached_input_tokens);}
+  if(e.kind==='cli.diagnostic'){const descriptions={capacity:'Модель перегружена',reconnecting:'Переподключение',stream_disconnected:'Поток прерван',timeout:'Истекло ожидание',connection_reset:'Соединение сброшено',rate_limit:'Лимит запросов',authentication:'Ошибка авторизации',workspace_routing:'Ошибка маршрутизации',configuration:'Предупреждение настройки',invalid_response:'Ошибка формата ответа',unclassified:'Неизвестная ошибка; сырой текст скрыт'};text=e.data.event+' · '+e.data.categories.map(x=>descriptions[x]||x).join(' · ');}
+  if(e.kind==='cli.result')text=e.data.retry_recovered?'Переподключение восстановлено; итоговый ответ проверен.':'Код '+fmt(e.data.exit_code)+' · '+(e.data.turn_failed?'Ход завершился ошибкой':e.data.turn_completed?'Получено завершение хода':'Завершение хода не получено');
   if(text)body.append(node('p',text));body.append(node('small',date(e.created)));row.append(body);$('feed').append(row);
  }
 }
@@ -109,7 +111,7 @@ function render(){
  const titles={idle:'Занимается своим',generating:state.current?.category==='search'?'Пошёл искать':'Сейчас в движении',paused:'Инициатива на паузе',budget:'Лимит этого запуска достигнут',stopping:'Завершает работу'};
  set('runtime-title',titles[state.mode]||'Гарик локально');
  set('runtime-copy',state.test_backend?'Тестовый исполнитель · синтетические данные.':'Вкладку можно закрыть. Гарик продолжит в пределах лимитов.');
- set('model',state.model||'Модель CLI · не указана');
+ set('model',(state.model||'Модель CLI · не указана')+(state.reasoning_effort?' · '+state.reasoning_effort:''));
  const active=state.activities.find(x=>['active','waiting'].includes(x.status)),recent=active||state.activities[0];
  set('activity',recent?.title||'Выбирает своё дело');set('next-step',recent?.next_step||'Можно исследовать, записать что-нибудь или спокойно ждать.');
  $('pause').textContent=state.autonomy==='на паузе'?'Возобновить':'Пауза инициативы';

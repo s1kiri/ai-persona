@@ -92,6 +92,10 @@ class Ledger:
             kind=event.get('type');data={}
             if kind=='usage':data={'usage':usage_values(event.get('usage',{}))}
             elif kind=='process.started':data={'pid':event['pid']}
+            elif kind=='cli.diagnostic':
+                data={k:v for k,v in event.items() if k in ('event','categories','after_completion','retry_attempt','retry_limit')}
+            elif kind=='cli.result':
+                data={k:v for k,v in event.items() if k in ('turn_completed','turn_failed','exit_code','answer_present','answer_valid','retry_recovered')}
             elif kind=='web.tool':data={'id':str(event.get('id',''))[:160],'stage':event.get('stage'),'failed':bool(event.get('failed')),'action':safe_action(event.get('action',{}))}
             else:return
             value={'id':str(uuid.uuid4()),'call_id':call_id,'kind':kind,'data':data,'created':time.time()}

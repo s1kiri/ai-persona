@@ -102,6 +102,7 @@ class Runtime:
         value={'instance':self.id,'database_id':store.get('panel_database_id'),'pid':os.getpid(),'started':self.started,'mode':mode,
             'test_backend':not isinstance(self.backend,CodexBackend),
             'revision':0,'csrf':self.csrf,'model':self.backend.model,'limits':asdict(self.limits),
+            'reasoning_effort':getattr(self.backend,'reasoning_effort',None),
             'calls_used':session.calls,'wakes_used':session.wakes,'autonomy':session.autonomy_status(),
             'autonomy_until':self.started+self.limits.max_minutes*60,'next_wake':next_wake,'effective_wake':effective,
             'current':current,'activities':activities,'messages':messages,'pending':queue_info,

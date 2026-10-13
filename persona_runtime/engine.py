@@ -189,7 +189,7 @@ class Engine:
     def accept(self,turn,result):
         decision,usage=result
         web=getattr(self.backend,'last_web',{})
-        self.store.finish_attempt(turn.attempt,'completed',{'usage':usage,'web':web})
+        self.store.finish_attempt(turn.attempt,'completed',{'usage':usage,'web':web,'diagnostics':getattr(self.backend,'last_diagnostics',{})})
         if turn.cancel.is_set() or self.store.is_stale(turn.event):
             self.cancel(turn)
             raise CodexCancelled('stale generation discarded without committing actions')
@@ -233,7 +233,8 @@ class Engine:
 
     def failed(self,turn,exc):
         self.store.finish_attempt(turn.attempt,'cancelled' if isinstance(exc,(CodexCancelled,StaleTurn)) else 'failed',
-                                  {'web':getattr(self.backend,'last_web',{})})
+                                  {'web':getattr(self.backend,'last_web',{}),'usage':getattr(self.backend,'last_usage',{}),
+                                   'diagnostics':getattr(self.backend,'last_diagnostics',{})})
         if isinstance(exc,(CodexCancelled,StaleTurn)):
             self.cancel(turn,str(exc))
         else:

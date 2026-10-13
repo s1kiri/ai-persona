@@ -280,6 +280,8 @@ class AdapterTests(unittest.TestCase):
             binary = self.fake_cli(directory, '''import json, os, pathlib, sys
 args = sys.argv
 assert '--ignore-user-config' in args and '--ephemeral' in args
+assert 'model_reasoning_effort="medium"' in args
+assert args[args.index('--model')+1] == 'gpt-6.1-sol'
 assert '--no-daemon' in args
 assert 'forced_login_method="chatgpt"' in args
 assert 'features.shell_tool=false' in args
@@ -382,6 +384,60 @@ pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
             self.assertEqual(backend.last_web['calls'],1)
             self.assertEqual(backend.last_web['events'],[])
             self.assertNotIn('private detail',json.dumps(backend.last_web))
+
+    def test_stream_error_receipt_preserves_sequence_without_private_cli_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary=self.fake_cli(directory,'''import pathlib,sys,json
+print(json.dumps({'type':'error','message':'Reconnecting... 1/5 (stream disconnected before completion: https://user:private-secret@example.test)'}))
+print(json.dumps({'type':'item.completed','item':{'type':'web_search','id':'search-after-reconnect','action':{'type':'search','query':'synthetic'}}}))
+pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':11,'output_tokens':3}}))
+'''%json.dumps(decision()))
+            backend=CodexBackend(binary);observed=[]
+            value,usage=backend.decide('test',observer=observed.append,web_search=True)
+            self.assertEqual(value['reply'],decision()['reply'])
+            receipt=backend.last_diagnostics
+            self.assertTrue(receipt['turn_completed']);self.assertTrue(receipt['answer_valid'])
+            self.assertFalse(receipt['turn_failed']);self.assertEqual(receipt['exit_code'],0)
+            self.assertTrue(receipt['retry_recovered'])
+            self.assertEqual(receipt['events'][0]['retry_attempt'],1)
+            self.assertIn('stream_disconnected',receipt['events'][0]['categories'])
+            self.assertNotIn('private-secret',json.dumps([receipt,observed]))
+            self.assertEqual(backend.last_usage['input_tokens'],11)
+
+    def test_unknown_failed_and_late_errors_are_not_recovered_from_exit_zero(self):
+        cases=[
+            [{'type':'error','message':'unknown private-secret'}],
+            [{'type':'error','message':'fatal unrelated error mentions Reconnecting... 1/5'}],
+            [{'type':'turn.failed','error':{'message':'Selected model is at capacity. private-secret'}}],
+            [{'type':'error','message':'Reconnecting... 1/5 (stream disconnected)'},
+             {'type':'turn.failed','error':{'message':'failed private-secret'}}],
+        ]
+        for events in cases:
+            with self.subTest(events=events),tempfile.TemporaryDirectory() as directory:
+                body='import pathlib,sys,json\n'
+                body+='\n'.join('print(%r)'%json.dumps(event) for event in events)+'\n'
+                body+="pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)\n"%json.dumps(decision())
+                body+="print(json.dumps({'type':'turn.completed','usage':{'input_tokens':11}}))\n"
+                backend=CodexBackend(self.fake_cli(directory,body))
+                with self.assertRaises(CodexError):backend.decide('test')
+                self.assertFalse(backend.last_diagnostics['retry_recovered'])
+                self.assertNotIn('private-secret',json.dumps(backend.last_diagnostics))
+        with tempfile.TemporaryDirectory() as directory:
+            body="import pathlib,sys,json\npathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)\n"%json.dumps(decision())
+            body+="print(json.dumps({'type':'turn.completed','usage':{}}))\nprint(json.dumps({'type':'error','message':'Reconnecting... 1/5'}))\n"
+            with self.assertRaises(CodexError):CodexBackend(self.fake_cli(directory,body)).decide('test')
+
+    def test_reconnect_needs_valid_answer_completion_and_zero_exit(self):
+        for completed,valid,code in ((False,True,0),(True,False,0),(True,True,1)):
+            with self.subTest(completed=completed,valid=valid,code=code),tempfile.TemporaryDirectory() as directory:
+                body="import pathlib,sys,json\nprint(json.dumps({'type':'error','message':'Reconnecting... 1/5'}))\n"
+                body+="pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)\n"%json.dumps(decision() if valid else {})
+                if completed:body+="print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1}}))\n"
+                body+='sys.exit(%d)\n'%code
+                backend=CodexBackend(self.fake_cli(directory,body))
+                with self.assertRaises(CodexError):backend.decide('test')
+                self.assertFalse(backend.last_diagnostics['retry_recovered'])
 
     def test_real_tty_loop_accepts_input_during_native_generation(self):
         with tempfile.TemporaryDirectory() as directory:

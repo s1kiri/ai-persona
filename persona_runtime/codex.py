@@ -22,6 +22,41 @@ class CodexError(RuntimeError):
     pass
 
 
+def safe_cli_error(kind,message,after_completion=False):
+    """Keep diagnostic structure, never arbitrary CLI text/URLs/credentials."""
+    text=str(message).lower()
+    categories=[name for name,fragments in (
+        ('reconnecting',('reconnecting',)),
+        ('stream_disconnected',('stream disconnected','stream closed')),
+        ('timeout',('timed out','timeout')),
+        ('connection_reset',('connection reset','connection closed')),
+        ('capacity',('at capacity','overloaded')),
+        ('rate_limit',('rate limit','too many requests')),
+        ('authentication',('unauthorized','authentication failed')),
+        ('workspace_routing',('workspace routing',)),
+        ('configuration',('disabled','unavailable','not available')),
+        ('invalid_response',('error decoding','failed to parse','invalid response')),
+    ) if any(fragment in text for fragment in fragments)]
+    value={'event':kind,'categories':categories or ['unclassified'],'after_completion':after_completion}
+    retry=re.match(r'reconnecting\.{0,3}\s*(\d{1,3})\s*/\s*(\d{1,3})\b',text.strip())
+    if retry:value.update(retry_attempt=int(retry[1]),retry_limit=int(retry[2]))
+    return value
+
+
+def recovered_reconnections(diagnostics):
+    """A completed, valid turn may have recovered explicitly announced retries.
+
+    Unknown errors and turn.failed stay fatal, even with exit code zero.
+    """
+    errors=[event for event in diagnostics['events'] if event['event']!='item.error']
+    allowed={'reconnecting','stream_disconnected','timeout','connection_reset','invalid_response'}
+    return bool(errors) and diagnostics['turn_completed'] and not diagnostics['turn_failed'] and diagnostics['answer_valid'] and diagnostics['exit_code']==0 and all(
+        event['event']=='error' and not event['after_completion'] and
+        'reconnecting' in event['categories'] and set(event['categories'])<=allowed and
+        1<=event.get('retry_attempt',0)<=event.get('retry_limit',0)<=100
+        for event in errors)
+
+
 def failure_detail(errors, stderr, returncode):
     """Actionable diagnostics without copying a raw CLI transcript into memory."""
     detail = str(errors[-1])[:500] if errors else ''
@@ -76,7 +111,8 @@ class CodexBackend:
     def __init__(self, binary=None, model=None, timeout=180):
         bundled = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')
         self.binary = binary or shutil.which('codex') or (str(bundled) if bundled.is_file() else 'codex')
-        self.model, self.timeout = model or configured_model(), timeout
+        self.model, self.timeout = model or 'gpt-6.1-sol', timeout
+        self.reasoning_effort='medium'
 
     @contextmanager
     def connection(self):
@@ -119,6 +155,8 @@ class CodexBackend:
 
     def decide(self, prompt, cancel=None, web_search=False, max_web_calls=2, observer=None):
         self.last_usage={}
+        self.last_diagnostics={}
+        self.last_web={'enabled':web_search,'calls':0,'events':[],'seen_item_types':[]}
         # Deliberately outside the source tree. All needed context arrives on stdin.
         with tempfile.TemporaryDirectory(prefix='persona-turn-') as directory:
             workspace = Path(directory)
@@ -149,7 +187,7 @@ class CodexBackend:
                        '-c', 'features.sleep_tool=false',
                        '-c', 'features.view_image=false',
                        '-c', 'features.unbounded_connection_retries=false',
-                       '-c', 'model_reasoning_effort="low"',
+                       '-c', 'model_reasoning_effort="'+self.reasoning_effort+'"',
                        '--color', 'never', '--json', '--cd', str(workspace),
                        '--output-schema', str(schema), '--output-last-message', str(answer)]
             if self.model:
@@ -163,6 +201,8 @@ class CodexBackend:
 
     def _execute(self, command, prompt, workspace, answer, environment, cancel=None, web_search=False, max_web_calls=2,observer=None):
         self.last_usage={}
+        self.last_diagnostics={'events':[],'turn_completed':False,'turn_failed':False,'exit_code':None,
+                               'answer_present':False,'answer_valid':False,'retry_recovered':False}
         self.last_web = {'enabled': web_search, 'calls': 0, 'events': [], 'seen_item_types': []}
         if cancel is not None and cancel.is_set():
             raise CodexCancelled('generation cancelled before start')
@@ -226,6 +266,7 @@ class CodexBackend:
                 if not isinstance(event,dict):
                     continue
                 if event.get('type') == 'turn.completed':
+                    self.last_diagnostics['turn_completed']=True
                     usage = event.get('usage',{})
                     self.last_usage=usage
                     if observer:observer({'type':'usage','usage':usage})
@@ -233,12 +274,19 @@ class CodexBackend:
                     error = event.get('error')
                     nested = error.get('message') if isinstance(error,dict) else error
                     errors.append(event.get('message') or nested or 'Codex turn failed')
+                    diagnostic=safe_cli_error(event['type'],errors[-1],self.last_diagnostics['turn_completed'])
+                    self.last_diagnostics['events'].append(diagnostic)
+                    if event['type']=='turn.failed':self.last_diagnostics['turn_failed']=True
+                    if observer:observer({'type':'cli.diagnostic',**diagnostic})
                 elif event.get('type') in ('item.started','item.updated','item.completed'):
                     item = event.get('item',{})
                     kind = item.get('type')
                     if kind and kind not in self.last_web['seen_item_types']:
                         self.last_web['seen_item_types'].append(kind)
                     if kind == 'error':
+                        diagnostic=safe_cli_error('item.error',item.get('message',''),self.last_diagnostics['turn_completed'])
+                        self.last_diagnostics['events'].append(diagnostic)
+                        if observer:observer({'type':'cli.diagnostic',**diagnostic})
                         detail = str(item).lower()
                         classifications = ('not available', 'unavailable', 'disabled',
                                            'not supported', 'failed', 'timeout', 'tool')
@@ -268,8 +316,18 @@ class CodexBackend:
                                            if key in ('type','query','queries','url','pattern','domains')}
                             self.last_web['events'].append({'id':item_id,'action':safe_action,'status':'completed'})
             process.wait(timeout=1)
-            if process.returncode or errors:
-                raise CodexError(failure_detail([], ''.join(diagnostics)+'\n'+'\n'.join(map(str,errors)), process.returncode))
+            self.last_diagnostics['exit_code']=process.returncode
+            self.last_diagnostics['answer_present']=answer.exists()
+            try:
+                decode(answer.read_text(encoding='utf-8'))
+                self.last_diagnostics['answer_valid']=True
+            except (ValueError,TypeError,OSError):pass
+            self.last_diagnostics['retry_recovered']=recovered_reconnections(self.last_diagnostics)
+            if process.returncode or (errors and not self.last_diagnostics['retry_recovered']):
+                detail=failure_detail([], ''.join(diagnostics)+'\n'+'\n'.join(map(str,errors)), process.returncode)
+                if errors and detail.startswith('Codex exit'):
+                    detail='Codex reported '+('turn.failed' if self.last_diagnostics['turn_failed'] else 'a stream error')+'; exit %d; inspect the safe CLI diagnostic receipt.'%process.returncode
+                raise CodexError(detail)
             if web_search and not self.last_web['events']:
                 if answer.exists():
                     try:
@@ -304,3 +362,5 @@ class CodexBackend:
                 stream.close()
             for thread in threads:
                 thread.join(timeout=.2)
+            self.last_diagnostics['exit_code']=process.returncode
+            if observer:observer({'type':'cli.result',**{k:v for k,v in self.last_diagnostics.items() if k!='events'}})

@@ -47,6 +47,9 @@ class Store:
                 event_id TEXT PRIMARY KEY REFERENCES events(id), decision TEXT NOT NULL,
                 usage TEXT NOT NULL, completed REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runtime_progress (
+                event_id TEXT PRIMARY KEY REFERENCES events(id), value TEXT NOT NULL
+            );
         ''')
 
         from .memory import Memory
@@ -152,6 +155,15 @@ class Store:
             cursor=self.db.execute("INSERT INTO model_attempts (source_event,started,status) VALUES (?,?,'started')",(event['id'],time.time()))
             return cursor.lastrowid
 
+    def progress(self,event_id):
+        row=self.db.execute('SELECT value FROM runtime_progress WHERE event_id=?',(event_id,)).fetchone()
+        return json.loads(row['value']) if row else None
+
+    def save_progress(self,event_id,value):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO runtime_progress VALUES (?,?)',
+                            (event_id,json.dumps(value,ensure_ascii=False)))
+
     def finish_attempt(self,attempt_id,status,receipt=None):
         with self.db:
             self.db.execute('UPDATE model_attempts SET status=?,result=? WHERE id=?',(status,json.dumps(receipt or {},ensure_ascii=False),attempt_id))
@@ -201,11 +213,14 @@ class Store:
                 (event_id,) + payload + (time.time() if now is None else now,))
         return event_id
 
-    def recover(self):
+    def recover(self, retry_interrupted=True):
         """Caller MUST hold the process lock. An interrupted call is not a completed action."""
         with self.db:
             self.db.execute("UPDATE model_attempts SET status='interrupted',result=? WHERE status='started'",(json.dumps({'reason':'worker stopped before a result was accepted'}),))
-            self.db.execute("UPDATE events SET status='pending', error='interrupted before commit' WHERE status='processing' AND attempts<3")
+            if retry_interrupted:
+                self.db.execute("UPDATE events SET status='pending', error='interrupted before commit' WHERE status='processing' AND attempts<3")
+            else:
+                self.db.execute("UPDATE events SET status='failed', error='interrupted persistent turn; explicit reconciliation required' WHERE status='processing'")
             self.db.execute("UPDATE events SET status='failed', error='interrupted; attempt limit reached' WHERE status='processing'")
 
     def claim(self):

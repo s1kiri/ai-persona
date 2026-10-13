@@ -9,6 +9,7 @@ import time
 from contextlib import nullcontext
 
 from .codex import CodexBackend
+from .app_server import AppServerBackend
 from .engine import Engine, ROOT
 from .store import Store, worker_lock
 
@@ -115,7 +116,7 @@ def main(argv=None):
     if args.command == 'watch' and (not 1 <= args.max_turns <= 20 or not 1 <= args.max_minutes <= 1440):
         print('invalid watch limits', file=sys.stderr)
         return 2
-    store = None
+    store = backend = None
     owned_lock=None
     lock_entered=False
     try:
@@ -131,7 +132,7 @@ def main(argv=None):
                 if not 1024<=args.port<=65535:raise ValueError('port must be 1024..65535')
                 if action=='start':show(start(args.data_dir,limits,args.port,args.codex,args.model,args.timeout))
                 else:
-                    runtime=Runtime(args.data_dir,args.port,limits,backend_factory=lambda:CodexBackend(args.codex,args.model,args.timeout))
+                    runtime=Runtime(args.data_dir,args.port,limits,backend_factory=lambda:AppServerBackend(args.data_dir,args.codex,args.model,args.timeout,limits.max_known_tokens))
                     import signal
                     signal.signal(signal.SIGTERM,lambda *_:runtime.stopping.set())
                     signal.signal(signal.SIGINT,lambda *_:runtime.stopping.set())
@@ -190,6 +191,8 @@ def main(argv=None):
         if args.command == 'doctor':
             show(backend.doctor())
             return 0
+        if args.command in ('chat','step','watch'):
+            backend=AppServerBackend(args.data_dir,args.codex,args.model,args.timeout)
         destination = args.data_dir.expanduser().resolve()
         if destination == ROOT or (ROOT in destination.parents and
                 not any(allowed == destination or allowed in destination.parents
@@ -240,7 +243,8 @@ def main(argv=None):
             show({'backup': str(destination)})
         else:
             with nullcontext():
-                store.recover()
+                if getattr(backend,'supports_sessions',False):backend.recover_store(store)
+                else:store.recover()
                 if args.command == 'chat':
                     deliver(store, args.person, args.conversation)
                 else:
@@ -288,6 +292,7 @@ def main(argv=None):
         print('Ошибка: %s' % exc, file=sys.stderr)
         return 1
     finally:
+        if getattr(backend,'supports_sessions',False):backend.close()
         if store:
             store.close()
         if lock_entered:owned_lock.__exit__(None,None,None)

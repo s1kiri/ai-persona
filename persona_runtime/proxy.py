@@ -378,7 +378,10 @@ class Tunnel(socketserver.BaseRequestHandler):
             while True:
                 ready, _, _ = select.select((client, remote), (), (), self.server.timeout)
                 if not ready:
-                    return
+                    # A persistent Codex connection may be idle between messages.
+                    # Shutdown closes active sockets; setup still has a deadline.
+                    if self.server.stopping:return
+                    continue
                 for source in ready:
                     data = source.recv(65536)
                     if not data:

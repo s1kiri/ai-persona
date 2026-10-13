@@ -116,12 +116,18 @@ function renderContext(){
  const report=state.calls.find(x=>x.context&&Object.keys(x.context).length)?.context;
  clear('context-parts');clear('memory-sources');
  if(!report){$('context-parts').append(node('p','Первый подготовленный запрос ещё не зафиксирован.'));set('context-note','Оценки будут доступны при запуске вызова.');return;}
+ if(report.research){
+  $('context-parts').append(node('p','Отдельное исследование: короткий вопрос и цель, без личности и переписки Гарика.'));
+  set('context-note','Расход этого этапа учитывается отдельно в журнале вызовов.');
+  details('context-limits',[['Контекст','Вопрос и идентификатор задачи'],['Результат','До 8 фактов со ссылками и 4 оговорок']]);
+ }else{
  const names={canon:'Личность и лексика',contract:'Контракт среды',input:'Новая реплика',state:'Состояние и намерения',history:'История',memory:'Память',activity:'Занятия',sources:'Квитанции источников'};
  const max=Math.max(...Object.values(report.parts),1);
  for(const [key,value] of Object.entries(report.parts)){const row=node('div',null,'part'),head=node('div',null,'part-head');head.append(node('span',names[key]||key),node('strong','~'+fmt(value)));const bar=node('progress');bar.max=max;bar.value=value;row.append(head,bar);$('context-parts').append(row);}
  set('context-note','Подготовлено ~'+fmt(report.total)+' · '+report.counter+'. Это не токенизатор модели. Внутренние инструкции CLI и результаты native web вне этой оценки.');
  details('context-limits',[['Память',fmt(report.memory_used)+' / '+fmt(report.memory_budget)+' оценочных токенов'],['История',report.history_entries+' реплик; '+report.history_excerpted+' сокращено'],['Состояние',report.state_chars_included+' / '+report.state_chars_available+' символов'],['Убрано повторов диалога',fmt(report.duplicate_episode_chunks_removed)],['Суммаризация','Снимок состояния модели; отдельного суммаризатора нет']]);
  for(const m of state.memory){const card=node('div',(m.kind||m.type)+' · '+m.basis);card.append(node('small','Источник '+m.source_event+' · '+date(m.created)+(m.excerpted?' · сокращено':'')+(m.historical_dialogue?' · прежний диалог':'')));$('memory-sources').append(card);}
+ }
  clear('sources');
  for(const source of state.sources){const item=node('div');if(source.url){const a=node('a',source.title);a.href=source.url;a.target='_blank';a.rel='noopener noreferrer';item.append(a);}else item.append(node('span',source.title));item.append(node('small','Источник хода '+source.source_event+' · '+date(source.created)));$('sources').append(item);}
  if(!state.sources.length)$('sources').append(node('small','Подтверждённых поисковых источников пока нет.'));

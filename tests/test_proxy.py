@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 import uuid
@@ -204,6 +205,22 @@ class ProxyTests(unittest.TestCase):
                     self.assertNotIn(SECRET.encode(), answer)
                 self.assertEqual(mock.destinations, [])
                 self.assertEqual(bridge.failures, 1)
+
+    def test_persistent_tunnel_survives_idle_and_shutdown_closes_it(self):
+        with server() as mock:
+            self.setup_config(mock.server_address[1])
+            with proxy.transport({},self.path,timeout=.1,keychain_factory=Vault) as (_,bridge):
+                sock=socket.create_connection(bridge.server_address,timeout=2)
+                try:
+                    sock.sendall(b'CONNECT destination.invalid:443 HTTP/1.1\r\n\r\n')
+                    self.assertIn(b'200',sock.recv(4096))
+                    time.sleep(.25)  # More than two bridge idle intervals.
+                    sock.sendall(b'still alive')
+                    self.assertEqual(sock.recv(11),b'still alive')
+                except Exception:sock.close();raise
+            try:self.assertEqual(sock.recv(1),b'')
+            finally:sock.close()
+            self.assertFalse(bridge.active)
     @unittest.skipUnless(sys.platform == 'darwin', 'macOS child network guard')
     def test_child_guard_allows_bridge_blocks_other_tcp_and_keeps_secret_out_of_argv(self):
         from test_runtime import decision

@@ -19,6 +19,7 @@ from urllib.request import Request,build_opener,ProxyHandler
 from urllib.error import URLError
 
 from .codex import CodexBackend
+from .app_server import AppServerBackend
 from .engine import Engine,ROOT
 from .memory import Budget
 from .session import Session
@@ -57,7 +58,7 @@ class Runtime:
     def __init__(self,directory,port=8765,limits=None,backend_factory=None):
         self.directory=Path(directory).resolve();self.port=port
         self.limits=(limits or Limits()).validate()
-        self.backend_factory=backend_factory or CodexBackend
+        self.backend_factory=backend_factory or (lambda:AppServerBackend(self.directory,max_known_tokens=self.limits.max_known_tokens))
         self.commands=queue.Queue();self.condition=threading.Condition()
         self.payload='{}';self.revision=0;self.stopping=threading.Event()
         self.ready=threading.Event();self.failure=None;self.ended=None
@@ -128,8 +129,11 @@ class Runtime:
         try:
             with worker_lock(self.directory):
                 store=Store(self.directory,locked=True)
-                ledger=Ledger(store);store.recover();ledger.sync()
+                ledger=Ledger(store)
                 self.backend=self.backend_factory()
+                if getattr(self.backend,'supports_sessions',False):self.backend.recover_store(store)
+                else:store.recover()
+                ledger.sync()
                 engine=Engine(store,self.backend,web_enabled=self.limits.web,max_web_calls=self.limits.max_web_calls)
                 store.memory.budget=Budget(self.limits.memory_budget)
                 session=Session(store,engine,max_calls=self.limits.max_calls,max_wakes=self.limits.max_wakes,

@@ -12,6 +12,7 @@ def usage_values(value):
     return {key:value[key] if type(value.get(key)) is int and value[key]>=0 else None for key in FIELDS}
 
 def safe_action(action):
+    if not isinstance(action,dict):action={}
     result={}
     for key in ('type','query','pattern'):
         if isinstance(action.get(key),str):result[key]=action[key][:400]
@@ -95,7 +96,9 @@ class Ledger:
             elif kind=='cli.diagnostic':
                 data={k:v for k,v in event.items() if k in ('event','categories','after_completion','retry_attempt','retry_limit')}
             elif kind=='cli.result':
-                data={k:v for k,v in event.items() if k in ('turn_completed','turn_failed','exit_code','answer_present','answer_valid','retry_recovered')}
+                data={k:v for k,v in event.items() if k in ('turn_completed','turn_failed','exit_code','answer_present','answer_valid','retry_recovered','startup_ms','first_delta_ms','elapsed_ms','persistent_session','recovered_without_inference')}
+            elif kind=='session.input':
+                data={k:v for k,v in event.items() if k in ('startup_ms','sent_chars','new_thread')}
             elif kind=='web.tool':data={'id':str(event.get('id',''))[:160],'stage':event.get('stage'),'failed':bool(event.get('failed')),'action':safe_action(event.get('action',{}))}
             else:return
             value={'id':str(uuid.uuid4()),'call_id':call_id,'kind':kind,'data':data,'created':time.time()}
@@ -125,6 +128,8 @@ class Ledger:
                 with self.db:
                     self.db.execute('INSERT OR IGNORE INTO observations VALUES (?,?,?,?,?)',(record['id'],record['call_id'],record['kind'],json.dumps(record['data']),record['created']))
                     if record['kind']=='usage':self.merge_usage(record['call_id'],record['data']['usage'])
+                    if record['kind']=='cli.result' and record['data'].get('recovered_without_inference'):
+                        self.db.execute('UPDATE call_ledger SET call_count=0 WHERE id=?',(record['call_id'],))
                     self.store.put('observations_offset',source.tell())
 
     def merge_usage(self,call_id,value):
@@ -152,8 +157,9 @@ class Ledger:
         query='SELECT * FROM call_ledger';args=[]
         if session_id:query+=' WHERE session_id=?';args=[session_id]
         elif day:query+=' WHERE started>=?';args=[int(time.time()//86400)*86400]
-        rows=list(self.db.execute(query,args));result={'attempts':sum(row['call_count'] or 1 for row in rows),'unknown_attempt_groups':sum(row['call_count'] is None for row in rows),'known_calls':0,'known_token_calls':0,'unknown_calls':0,'total_tokens':0,**{k:0 for k in FIELDS},'coverage':{k:0 for k in FIELDS}}
+        rows=list(self.db.execute(query,args));result={'attempts':sum(row['call_count'] if row['call_count'] is not None else 1 for row in rows),'unknown_attempt_groups':sum(row['call_count'] is None for row in rows),'known_calls':0,'known_token_calls':0,'unknown_calls':0,'total_tokens':0,**{k:0 for k in FIELDS},'coverage':{k:0 for k in FIELDS}}
         for row in rows:
+            if row['call_count']==0:continue
             values=json.loads(row['usage'])
             known=values.get('input_tokens') is not None and values.get('output_tokens') is not None
             result['known_calls' if known else 'unknown_calls']+=row['call_count'] or 1

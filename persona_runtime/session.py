@@ -195,6 +195,7 @@ class Session:
             self.engine.failed(self.turn,CodexCancelled('session stopped'))
         if self.executor:
             self.executor.shutdown(wait=True,cancel_futures=True)
+        if getattr(self.engine.backend,'supports_sessions',False):self.engine.backend.close()
         self.turn=self.future=None
 
     def run(self,stream=None):

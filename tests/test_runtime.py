@@ -442,16 +442,12 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':11,'output_tok
     def test_real_tty_loop_accepts_input_during_native_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             data=Path(directory)/'data';started=Path(directory)/'started'
-            binary=self.fake_cli(directory,'''import json,pathlib,sys,time
-with pathlib.Path(%r).open('a') as output:output.write('started\\n')
-time.sleep(1)
-pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1}}))
-'''%(str(started),json.dumps(decision())))
+            from fake_app_server import make_cli
+            binary=make_cli(directory,decision(),started=started,delay=1)
             code='''from unittest.mock import patch
 from persona_runtime import proxy
 from persona_runtime.__main__ import main
-with patch('persona_runtime.codex.transport',side_effect=lambda env,**kw:proxy.transport(env,%r)):
+with patch('persona_runtime.app_server.transport',side_effect=lambda env,**kw:proxy.transport(env,%r)):
  raise SystemExit(main(%r))
 '''%(str(Path(directory)/'absent.json'),['--data-dir',str(data),'--codex',binary,'--no-web','chat','--no-autonomy','--max-calls','2'])
             master,slave=pty.openpty()
@@ -480,15 +476,13 @@ with patch('persona_runtime.codex.transport',side_effect=lambda env,**kw:proxy.t
             store=Store(data);store.enqueue('Synthetic user message');store.close()
             value=decision();value['reply']=None
             value['messages']=[{'text':'one','delay_seconds':0},{'text':'two','delay_seconds':1}]
-            binary=self.fake_cli(directory,'''import pathlib,sys,json
-pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(%r)
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1}}))
-'''%json.dumps(value))
+            from fake_app_server import make_cli
+            binary=make_cli(directory,value)
             from persona_runtime.__main__ import main
             import io
             from contextlib import redirect_stdout
             started=time.monotonic()
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()),patch('persona_runtime.app_server.transport',side_effect=lambda env,**kw:proxy.transport(env,Path(directory)/'absent.json')):
                 result=main(['--data-dir',str(data),'--codex',binary,'--no-web','watch','--max-turns','1','--max-minutes','1'])
             self.assertEqual(result,0)
             self.assertLess(time.monotonic()-started,6)

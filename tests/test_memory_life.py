@@ -52,6 +52,25 @@ class MemoryLifeTests(unittest.TestCase):
     def event(self,person='alice',text='bass',kind='message'):
         return {'person':person,'conversation':'one','kind':kind,'text':text}
 
+    def test_full_recent_dialogue_is_not_duplicated_as_episode_but_facts_remain(self):
+        event_id=self.complete(decision(reply='Bass is burgundy.',memories=[note('bass','Burgundy bass')]),text='Bass colour?')
+        self.store.acknowledge(self.store.pending_output()[0]['id'])
+        context,report=self.store.memory.context(self.event(),mode='recent')
+        self.assertTrue(any(h['id']==event_id for h in context['history']))
+        self.assertFalse(any(m['type']=='episode' and m['source_event']==event_id for m in context['memories']))
+        self.assertTrue(any(m.get('key')=='bass' for m in context['memories']))
+        self.assertGreater(report['duplicate_episode_chunks_removed'],0)
+        other={**self.event(),'conversation':'another'}
+        context,_=self.store.memory.context(other,mode='recent')
+        self.assertTrue(any(m['type']=='episode' for m in context['memories']))
+
+    def test_excerpted_history_keeps_recall_chunks(self):
+        self.complete(decision(reply='Bass answer. '*150),text='Bass question. '*150)
+        self.store.acknowledge(self.store.pending_output()[0]['id'])
+        context,report=self.store.memory.context(self.event(),mode='recent')
+        self.assertTrue(any(m['type']=='episode' for m in context['memories']))
+        self.assertEqual(report['duplicate_episode_chunks_removed'],0)
+
     def test_old_preference_is_invalidated_but_source_and_versions_remain(self):
         old=self.complete(decision(memories=[note('bass','Burgundy bass')]))
         new=self.complete(decision(memories=[note('bass','Cream white bass')]))

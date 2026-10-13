@@ -150,6 +150,7 @@ class Engine:
             'selected_records':[{**{k:v for k,v in record.items() if k in ('id','type','kind','basis','source_event','created','visibility','historical_dialogue')},
                                  'excerpted':'[excerpt;' in record['text']} for record in context['memories']],
             'history_entries':len(context['history']),
+            'duplicate_episode_chunks_removed':self.last_report.get('duplicate_episode_chunks_removed',0),
             'history_excerpted':sum('[excerpt]' in str(v) for v in context['history']),
             'state_chars_available':len(self.store.get('state'))+len(self.store.get('goals')),
             'state_chars_included':len(context['state'])+len(context['goals']),

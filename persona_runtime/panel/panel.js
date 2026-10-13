@@ -5,7 +5,42 @@ const labels={message:'Общение',wake:'Пробуждение',search:'П�
 const statuses={running:'В процессе',completed:'Завершён',failed:'Ошибка',cancelled:'Отменён',interrupted:'Прерван'};
 let state=null,revision=null,connected=false,sending=false;
 const storageKey='garik-pending-message';
-let pendingSend=null;
+let pendingSend=null,stopFlow=null;
+try{stopFlow=JSON.parse(sessionStorage.getItem('garik-stop'));}catch{}
+function stopping(){return state?.mode==='stopping'||state?.mode==='stopped'||Boolean(stopFlow&&state&&stopFlow.instance===state.instance);}
+function rememberStop(phase,instance=state?.instance){
+ stopFlow=phase?{instance,phase}:null;
+ try{if(stopFlow)sessionStorage.setItem('garik-stop',JSON.stringify(stopFlow));else sessionStorage.removeItem('garik-stop');}catch{}
+}
+function controls(){
+ const locked=stopping();
+ for(const id of ['pause','cancel','send'])$(id).disabled=!connected||locked||(id==='send'&&sending);
+ $('stop').disabled=!connected||locked&&stopFlow?.phase!=='uncertain';
+ $('stop').textContent=stopFlow?.phase==='uncertain'?'Повторить остановку':state?.mode==='stopped'?'Демон остановлен':locked?'Останавливается…':'Остановить демон';
+}
+function renderStop(){
+ controls();
+ if(!stopping())return;
+ const done=state?.mode==='stopped',uncertain=stopFlow?.phase==='uncertain';
+ set('connection',done?'Остановлен':uncertain?'Нужна проверка':'Останавливается');
+ $('connection').classList.add('muted');
+ set('runtime-title',done?'Демон остановлен':uncertain?'Остановка не подтверждена':'Демон завершает работу');
+ set('runtime-copy',done?'Модельный процесс завершён. Память и чат сохранены.':'Чат остаётся на экране. Новые сообщения пока не отправляются.');
+ set('wake','Не запускается');$('typing').classList.add('hidden');$('pending').classList.add('hidden');
+ banner(done?'Демон остановлен. Чтобы продолжить: garik daemon start. Затем обнови панель.':uncertain?'Подтверждение остановки не получено. Проверь garik daemon status. Черновик сохранён.':connected?'Завершаем текущую работу и сохраняем состояние…':stopFlow?.phase==='requesting'?'Связь закрыта; ждём подтверждение остановки. Проверить: garik daemon status.':'Команда остановки принята; связь закрыта. Этот запуск не прислал итоговую квитанцию. Проверить: garik daemon status.');
+}
+function saveDraft(){if(state)try{sessionStorage.setItem('garik-draft:'+state.database_id,$('message-input').value);}catch{}}
+function adopt(value){
+ if(state?.instance===value.instance&&value.revision<state.revision)return;
+ const first=!state;
+ if(stopFlow&&stopFlow.instance!==value.instance){rememberStop(null);banner('');}
+ state=value;revision=value.revision;
+ if(first&&!$('message-input').value)try{$('message-input').value=sessionStorage.getItem('garik-draft:'+state.database_id)||'';}catch{}
+ if(value.mode==='stopped')rememberStop('stopped');
+ else if(value.mode==='stopping')rememberStop('accepted');
+ else if(first&&stopFlow?.phase==='requesting')rememberStop('uncertain');
+ render();
+}
 try{pendingSend=JSON.parse(localStorage.getItem(storageKey));}catch{}
 function node(tag,text,className){const n=document.createElement(tag);if(text!=null)n.textContent=text;if(className)n.className=className;return n;}
 function set(id,text){$(id).textContent=text;}
@@ -18,7 +53,7 @@ async function post(path,data){
  if(!result.ok)throw Error('Запрос не принят ('+result.status+')');
  return result.json();
 }
-function metric(total,key){return total.coverage[key]?fmt(total[key]):'—';}
+function metric(total,key){return total.coverage[key]?(total.coverage[key]<total.attempts?'≥':'')+fmt(total[key]):'—';}
 function details(target,items){clear(target);for(const [name,value] of items){const row=node('div',null,'detail');row.append(node('span',name),node('strong',value));$(target).append(row);}}
 function renderMessages(){
  const box=$('messages'),bottom=box.scrollHeight-box.scrollTop-box.clientHeight<70;
@@ -34,7 +69,7 @@ function renderMessages(){
   }
   if(bottom||!oldIds)box.scrollTop=box.scrollHeight;
  }
- if(!document.hidden){
+ if(!document.hidden&&connected&&!stopping()){
   const ids=state.messages.filter(x=>x.role==='garik'&&x.status==='delivered').map(x=>x.id).slice(-100);
   if(ids.length)post('/api/seen',{ids}).catch(()=>{});
  }
@@ -85,7 +120,7 @@ function renderContext(){
  const max=Math.max(...Object.values(report.parts),1);
  for(const [key,value] of Object.entries(report.parts)){const row=node('div',null,'part'),head=node('div',null,'part-head');head.append(node('span',names[key]||key),node('strong','~'+fmt(value)));const bar=node('progress');bar.max=max;bar.value=value;row.append(head,bar);$('context-parts').append(row);}
  set('context-note','Подготовлено ~'+fmt(report.total)+' · '+report.counter+'. Это не токенизатор модели. Внутренние инструкции CLI и результаты native web вне этой оценки.');
- details('context-limits',[['Память',fmt(report.memory_used)+' / '+fmt(report.memory_budget)+' оценочных токенов'],['История',report.history_entries+' реплик; '+report.history_excerpted+' сокращено'],['Состояние',report.state_chars_included+' / '+report.state_chars_available+' символов'],['Суммаризация','Снимок состояния модели; отдельного суммаризатора нет']]);
+ details('context-limits',[['Память',fmt(report.memory_used)+' / '+fmt(report.memory_budget)+' оценочных токенов'],['История',report.history_entries+' реплик; '+report.history_excerpted+' сокращено'],['Состояние',report.state_chars_included+' / '+report.state_chars_available+' символов'],['Убрано повторов диалога',fmt(report.duplicate_episode_chunks_removed)],['Суммаризация','Снимок состояния модели; отдельного суммаризатора нет']]);
  for(const m of state.memory){const card=node('div',(m.kind||m.type)+' · '+m.basis);card.append(node('small','Источник '+m.source_event+' · '+date(m.created)+(m.excerpted?' · сокращено':'')+(m.historical_dialogue?' · прежний диалог':'')));$('memory-sources').append(card);}
  clear('sources');
  for(const source of state.sources){const item=node('div');if(source.url){const a=node('a',source.title);a.href=source.url;a.target='_blank';a.rel='noopener noreferrer';item.append(a);}else item.append(node('span',source.title));item.append(node('small','Источник хода '+source.source_event+' · '+date(source.created)));$('sources').append(item);}
@@ -100,6 +135,7 @@ function renderChannels(){
 }
 function clocks(){
  if(!state)return;
+ if(stopping()){if(state.ended)set('uptime','Проработал '+duration(state.ended-state.started)+' · остановлен в '+date(state.ended));return;}
  set('uptime','В работе '+duration(Date.now()/1000-state.started)+' · с '+date(state.started));
  const due=state.effective_wake;
  set('wake',state.mode==='budget'?'Лимит достигнут':state.autonomy!=='включена'?state.autonomy:due==null?'Первое пробуждение':due>Date.now()/1000?'через '+duration(due-Date.now()/1000):state.current?'после текущего хода':'готово к пробуждению');
@@ -118,15 +154,15 @@ function render(){
  $('typing').classList.toggle('hidden',!state.current);set('typing',state.current?.category==='search'?'Ищет источник…':state.current?.category==='wake'?'Занимается своим':'Пишет…');
  set('process-info','PID '+state.pid+' · запуск '+date(state.started)+' · localhost');
  set('connection','На связи');$('connection').classList.remove('muted');
- renderMessages();renderFeed();renderUsage();renderContext();renderChannels();clocks();
+ renderMessages();renderFeed();renderUsage();renderContext();renderChannels();clocks();renderStop();
 }
 async function sendPending(){
- if(!pendingSend||sending||!connected)return;
+ if(!pendingSend||sending||!connected||stopping())return;
  if(pendingSend.database_id&&pendingSend.database_id!==state.database_id){banner('Открыта другая база. Черновик сохранён и автоматически не отправляется.');return;}
  sending=true;$('send').disabled=true;
  try{await post('/api/message',{id:pendingSend.id,text:pendingSend.text});pendingSend=null;localStorage.removeItem(storageKey);banner('');}
  catch{banner('Отправка пока не подтверждена. При восстановлении связи повторим тот же ID, без дубля.');}
- finally{sending=false;$('send').disabled=false;}
+ finally{sending=false;controls();if(stopping())renderStop();}
 }
 async function connect(){
  while(true){
@@ -134,15 +170,28 @@ async function connect(){
    const response=await fetch('/api/state'+(revision===null?'':'?since='+revision),{cache:'no-store'});
    if(response.status===401){await fetch('/session',{cache:'no-store'});revision=null;continue;}
    if(!response.ok)throw Error();
-   const value=await response.json();connected=true;
-   if(value.revision!==revision||value.instance!==state?.instance){state=value;revision=value.revision;render();}
+   const value=await response.json(),wasConnected=connected;connected=true;
+   if(!wasConnected||value.revision!==revision||value.instance!==state?.instance)adopt(value);
    if(pendingSend)await sendPending();
-  }catch{connected=false;set('connection','Связь прервана');$('connection').classList.add('muted');banner('Панель переподключается. Закрытие вкладки не останавливает runtime. Если процесс остановлен, запусти garik daemon start.');revision=null;await new Promise(resolve=>setTimeout(resolve,1500));}
+   if(stopping())await new Promise(resolve=>setTimeout(resolve,1500));
+  }catch{connected=false;controls();if(stopping())renderStop();else{set('connection','Связь прервана');$('connection').classList.add('muted');banner('Панель переподключается. Закрытие вкладки не останавливает runtime. Если процесс остановлен, запусти garik daemon start.');}revision=null;await new Promise(resolve=>setTimeout(resolve,1500));}
  }
 }
-$('chat-form').addEventListener('submit',event=>{event.preventDefault();const text=$('message-input').value.trim();if(!text||!state)return;if(pendingSend){banner('Сначала подтвердим предыдущую отправку.');return;}pendingSend={id:crypto.randomUUID(),text,database_id:state.database_id};localStorage.setItem(storageKey,JSON.stringify(pendingSend));$('message-input').value='';sendPending();});
+$('chat-form').addEventListener('submit',event=>{event.preventDefault();const text=$('message-input').value.trim();if(!text||!state||stopping())return;if(pendingSend){banner('Сначала подтвердим предыдущую отправку.');return;}pendingSend={id:crypto.randomUUID(),text,database_id:state.database_id};localStorage.setItem(storageKey,JSON.stringify(pendingSend));$('message-input').value='';saveDraft();sendPending();});
+$('message-input').addEventListener('input',saveDraft);
 $('message-input').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('chat-form').requestSubmit();}});
-for(const [id,action] of [['cancel','cancel'],['stop','stop'],['pause',null]])$(id).addEventListener('click',async()=>{if(!connected)return;const selected=action||(state.autonomy==='на паузе'?'resume':'pause');if(selected==='stop'&&!confirm('Остановить фоновый runtime? Память и локальный чат сохранятся.'))return;try{await post('/api/action',{action:selected});if(selected==='stop')banner('Остановка запрошена. Новый запуск — garik daemon start.');}catch{banner('Команда пока не подтверждена. Проверь связь.');}});
+$('stop').addEventListener('click',async()=>{
+ if(!connected||stopping()&&stopFlow?.phase!=='uncertain')return;
+ if(!confirm('Остановить демон? Текущий ответ будет отменён. Память, чат и черновик сохранятся.'))return;
+ saveDraft();const instance=state.instance;rememberStop('requesting');renderStop();
+ try{
+  const result=await post('/api/action',{action:'stop'});
+  if(state.instance!==instance)return;
+  if(result.state?.instance===instance&&result.state.mode==='stopped')adopt(result.state);
+  else{rememberStop('accepted');renderStop();}
+ }catch{if(state.instance===instance&&state.mode!=='stopped'){rememberStop('uncertain');renderStop();}}
+});
+for(const [id,action] of [['cancel','cancel'],['pause',null]])$(id).addEventListener('click',async()=>{if(!connected||stopping())return;const selected=action||(state.autonomy==='на паузе'?'resume':'pause');try{await post('/api/action',{action:selected});}catch{banner('Команда пока не подтверждена. Проверь связь.');}});
 for(const button of document.querySelectorAll('[data-page]'))button.addEventListener('click',()=>{for(const n of document.querySelectorAll('[data-page]'))n.classList.toggle('active',n===button);for(const p of document.querySelectorAll('.page'))p.classList.toggle('hidden',p.id!=='page-'+button.dataset.page);});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state)renderMessages();});
 setInterval(clocks,1000);connect();

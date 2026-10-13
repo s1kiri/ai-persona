@@ -41,6 +41,20 @@ class LedgerTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.store=Store(self.temp.name);self.store.memory.dense=False
     def tearDown(self):self.store.close();self.temp.cleanup()
+    def test_cumulative_receipts_replace_and_missing_cache_stays_unknown(self):
+        ledger=Ledger(self.store);engine=Engine(self.store,Backend())
+        self.store.enqueue('Synthetic');turn=engine.begin();engine.dispatch(turn)
+        observer=ledger.open_call(turn,'session','synthetic',engine.last_prompt_report)
+        observer({'type':'usage','usage':{'input_tokens':100,'output_tokens':10}})
+        ledger.ingest()
+        self.assertIsNone(ledger.calls()[0]['usage']['cached_input_tokens'])
+        self.assertEqual(ledger.totals()['coverage']['cached_input_tokens'],0)
+        observer({'type':'usage','usage':{'input_tokens':180,'output_tokens':20,'cached_input_tokens':0}})
+        observer({'type':'usage','usage':{'input_tokens':180,'output_tokens':20,'cached_input_tokens':0}})
+        ledger.ingest()
+        self.assertEqual(ledger.totals()['total_tokens'],200)
+        self.assertEqual(ledger.calls()[0]['usage']['cached_input_tokens'],0)
+        self.assertEqual(ledger.totals()['coverage']['cached_input_tokens'],1)
     def test_usage_spool_recovery_survives_failed_attempt_and_replay_without_double_cache(self):
         ledger=Ledger(self.store);engine=Engine(self.store,Backend())
         self.store.enqueue('Synthetic');turn=engine.begin();engine.dispatch(turn)
@@ -179,7 +193,11 @@ class PanelTests(unittest.TestCase):
 
     def test_stop_during_generation_retains_receipt_and_starts_no_followup(self):
         self.message('slow');self.wait(lambda s:s['usage']['session']['known_calls']==1)
-        control(self.directory,'/api/action',{'action':'stop'})
+        receipt=control(self.directory,'/api/action',{'action':'stop'})
+        self.assertEqual(receipt['state']['mode'],'stopped')
+        self.assertEqual(receipt['state']['calls'][0]['status'],'cancelled')
+        self.assertEqual(receipt['state']['usage']['session']['total_tokens'],110)
+        self.assertIsNotNone(receipt['state']['ended'])
         self.thread.join(5);self.assertFalse(self.thread.is_alive())
         self.assertEqual(self.backend.calls,1)
         store=Store(self.directory)
@@ -188,6 +206,22 @@ class PanelTests(unittest.TestCase):
             self.assertEqual(ledger.totals()['total_tokens'],110)
             self.assertEqual(ledger.calls()[0]['status'],'cancelled')
         finally:store.close()
+    def test_stop_receipt_preserves_chat_and_usage_across_fresh_runtime(self):
+        self.message('hello');before=self.wait(lambda s:s['messages'] and s['mode']=='idle')
+        receipt=control(self.directory,'/api/action',{'action':'stop'})
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(receipt['state']['messages'],before['messages'])
+        previous_id=self.runtime.id
+        self.runtime=Runtime(self.directory,port=0,limits=Limits(autonomy=False),backend_factory=lambda:self.backend)
+        self.thread=threading.Thread(target=self.runtime.run,daemon=True);self.thread.start()
+        self.assertTrue(self.runtime.ready.wait(5))
+        after=control(self.directory)
+        self.assertNotEqual(after['instance'],previous_id)
+        self.assertEqual(after['messages'],before['messages'])
+        self.assertEqual(after['usage']['all']['total_tokens'],110)
+        self.assertEqual(after['usage']['session']['attempts'],0)
+        self.assertEqual(self.backend.calls,1)
     def test_loopback_origin_auth_csrf_and_static_path_are_enforced(self):
         origin=self.runtime.origin
         def get(path,headers=None):

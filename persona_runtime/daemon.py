@@ -60,12 +60,13 @@ class Runtime:
         self.backend_factory=backend_factory or CodexBackend
         self.commands=queue.Queue();self.condition=threading.Condition()
         self.payload='{}';self.revision=0;self.stopping=threading.Event()
-        self.ready=threading.Event();self.failure=None
+        self.ready=threading.Event();self.failure=None;self.ended=None
         self.control=secrets.token_urlsafe(32);self.cookie=secrets.token_urlsafe(32);self.csrf=secrets.token_urlsafe(32)
         self.id=str(uuid.uuid4());self.started=time.time()
     @property
     def origin(self):return 'http://127.0.0.1:'+str(self.port)
     def request(self,kind,data):
+        if self.stopping.is_set():raise RuntimeError('runtime is stopping')
         answer=queue.Queue(maxsize=1);self.commands.put((kind,data,answer))
         try:success,result=answer.get(timeout=8)
         except queue.Empty:raise RuntimeError('runtime is busy or stopping')
@@ -93,13 +94,13 @@ class Runtime:
         next_wake=float(store.get('next_wake')) if store.get('next_wake') else None
         last_wake=float(store.get('daemon_last_wake','0'))
         effective=max(next_wake or 0,last_wake+self.limits.min_wake_seconds) if next_wake is not None else None
-        mode='stopping' if self.stopping.is_set() else ('budget' if session.stopped else ('generating' if session.future else ('paused' if session.paused else 'idle')))
+        mode='stopped' if self.ended else ('stopping' if self.stopping.is_set() else ('budget' if session.stopped else ('generating' if session.future else ('paused' if session.paused else 'idle'))))
         current={'event':session.turn.event['id'],'category':'search' if session.turn.web_turn else session.turn.event['kind'],'started':calls[0]['started'] if calls else None} if session.turn else None
         activities=[{k:row[k] for k in ('key','title','kind','status','next_step','updated')} for row in store.activity_context()]
         memory=calls[0]['context'].get('selected_records',[]) if calls else []
         sources=[{**dict(row),**safe_action({'url':row['url']})} for row in store.db.execute('SELECT id,url,title,source_event,created FROM web_sources ORDER BY created DESC LIMIT 12')]
         for source in sources:source['url']=safe_action({'url':source['url']}).get('url')
-        value={'instance':self.id,'database_id':store.get('panel_database_id'),'pid':os.getpid(),'started':self.started,'mode':mode,
+        value={'instance':self.id,'database_id':store.get('panel_database_id'),'pid':os.getpid(),'started':self.started,'ended':self.ended,'mode':mode,
             'test_backend':not isinstance(self.backend,CodexBackend),
             'revision':0,'csrf':self.csrf,'model':self.backend.model,'limits':asdict(self.limits),
             'reasoning_effort':getattr(self.backend,'reasoning_effort',None),
@@ -123,7 +124,7 @@ class Runtime:
     def run(self):
         self.directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         store=session=server=server_thread=None
-        resources_closed=False
+        resources_closed=False;stop_answer=None
         try:
             with worker_lock(self.directory):
                 store=Store(self.directory,locked=True)
@@ -175,6 +176,9 @@ class Runtime:
                                     ledger.emit('runtime.control',{'action':action});result={'ok':True}
                                 else:raise ValueError('unsupported request')
                                 self.publish(store,session,ledger)
+                                if kind=='action' and data['action']=='stop':
+                                    stop_answer=answer
+                                    break
                                 answer.put((True,result))
                             except Exception:answer.put((False,'Запрос отклонён. Проверь текст, ID и доступные команды.'))
                         if self.stopping.is_set():break
@@ -191,8 +195,13 @@ class Runtime:
                 finally:
                     session.close();ledger.sync()
                     ledger.emit('runtime.stopped',{})
-                    with store.db:store.db.execute('UPDATE daemon_sessions SET ended=? WHERE id=?',(time.time(),self.id))
+                    ended=time.time()
+                    with store.db:store.db.execute('UPDATE daemon_sessions SET ended=? WHERE id=?',(ended,self.id))
+                    self.ended=ended
                     self.publish(store,session,ledger)
+                    # A stop receipt confirms the worker is closed and state committed,
+                    # not merely that the command reached the queue. HTTP drains next.
+                    if stop_answer:stop_answer.put((True,{'ok':True,'state':json.loads(self.payload)}))
                     server.shutdown();server.server_close()
                     store.close()
                     resources_closed=True

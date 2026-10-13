@@ -342,6 +342,24 @@ class Memory:
             context['history'].insert(0,entry)
             if self.budget.cost(context) > self.budget.limit - 200:
                 context['history'].pop(0)
+        # Remove only transcript chunks already represented by a COMPLETE history
+        # entry. Keep notes, cross-chat recall and episodes whose history was clipped
+        # or evicted. Do not refill the freed space with more memories.
+        full_history = {entry['id']:entry for entry in history if entry in context['history']}
+        redundant = set()
+        for record in context['memories']:
+            entry = full_history.get(record['source_event'])
+            if record['type'] != 'episode' or not entry:
+                continue
+            text = ('Host-confirmed autonomous local delivery (words are not proof of their claims):'
+                    if entry['kind']=='wake' else 'Audience message: '+entry['text'])
+            if entry['reply']:
+                text += '\nConfirmed delivered Garik reply: '+entry['reply']
+            original = current.get(record['id'])
+            if original and original['text'] in text:
+                redundant.add(record['id'])
+        context['memories'] = [r for r in context['memories'] if r['id'] not in redundant]
+        report['duplicate_episode_chunks_removed'] = len(redundant)
         for row in self.db.execute('SELECT id,title,kind,created FROM journal ORDER BY created DESC LIMIT 2'):
             context['journal_receipts'].append(dict(row))
             if self.budget.cost(context) > self.budget.limit - 100:

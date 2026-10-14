@@ -225,11 +225,12 @@ class AppServerBackend(CodexBackend):
     supports_sessions = True
     supports_research = True
 
-    def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000):
+    def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000, transport_factory=None):
         super().__init__(binary, model, timeout)
         if type(max_known_tokens) is not int or not 1000 <= max_known_tokens <= 10_000_000:
             raise ValueError('invalid persistent token budget')
         self.max_known_tokens = max_known_tokens
+        self.transport_factory = transport_factory
         self.directory = Path(directory).resolve() / 'codex-session'
         self.path = self.directory / 'sessions.json'
         self.client, self.stack = None, None
@@ -280,7 +281,7 @@ class AppServerBackend(CodexBackend):
             if not k.startswith('CODEX_') or k == 'CODEX_HOME'}
         stack = ExitStack()
         try:
-            environment, bridge = stack.enter_context(transport(environment, timeout=self.timeout))
+            environment, bridge = stack.enter_context((self.transport_factory or transport)(environment, timeout=self.timeout))
             self._proxy_bridge = bridge
             client = StdioClient(child_command(command, bridge), environment, str(self.workspace))
             stack.callback(client.close)
@@ -527,5 +528,7 @@ class AppServerBackend(CodexBackend):
             if pending.get('turn') and self.client:
                 try: self.client.rpc('turn/interrupt', {'threadId':entry['thread'],'turnId':pending['turn']}, timeout=2)
                 except Exception: pass
-            self.close()  # Also stops the bridge and any uncertain in-flight turn.
+            # Stops this client/turn. An owned bridge closes here; a borrowed
+            # suite bridge is closed by its owner when the failed suite exits.
+            self.close()
             raise

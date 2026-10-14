@@ -70,17 +70,20 @@ class TextBackend(AppServerBackend):
         with patch.object(app_server,'StdioClient',speech_client):
             return super()._start()
 
-    def respond(self, persona, text):
+    def respond(self, persona, text, developer_instructions=MINIMAL_DEVELOPER):
         self._start()
         if not hasattr(self, 'speech_thread'):
             result = self.client.rpc('thread/start', {
                 'model':self.model, 'cwd':str(self.workspace), 'approvalPolicy':'never',
                 'sandbox':'read-only', 'baseInstructions':persona,
-                'developerInstructions':MINIMAL_DEVELOPER,
+                'developerInstructions':developer_instructions,
                 'config':{**self.overrides, 'web_search':'disabled', 'features.code_mode_host':False},
                 'ephemeral':True, 'historyMode':'legacy'})
             self.speech_thread=result['thread']['id']
             self.speech_total={}
+            self.speech_developer=developer_instructions
+        elif self.speech_developer!=developer_instructions:
+            raise CodexError('Speech thread instructions cannot change mid-conversation')
         baseline=dict(self.speech_total)
         result=self.client.rpc('turn/start', {
             'threadId':self.speech_thread, 'input':[{'type':'text','text':text}],
@@ -192,7 +195,7 @@ def make_blind_review(directory,manifest):
     for row in manifest['rows']:
         if row['status']=='completed':pairs.setdefault(row['scene'],{}).setdefault(row['arm'],[]).append(row)
     rng=random.Random(14102026);key={};lines=['# Сравнение речи · шаг 1','',
-        'Реальные ответы модели на новые вымышленные сцены. В каждой сцене два варианта одной беседы. Оцени сходство с авторской речью, юмор, естественность, самостоятельность и связность. Метки конфигураций скрыты.','']
+        'Реальные ответы модели на новые вымышленные сцены. В каждой сцене два варианта одной беседы. На первом шаге оцени, остаётся ли модель участником в роли Гарика: нет ли перехода в кодового помощника, служебных объяснений, утечки формата или потери разговора. Сходство с авторской манерой проверяется после изменения личности. Метки конфигураций скрыты.','']
     for scene,arms in pairs.items():
         if set(arms)!={'current','minimal'}:continue
         common=set(r['turn'] for r in arms['current'])&set(r['turn'] for r in arms['minimal'])

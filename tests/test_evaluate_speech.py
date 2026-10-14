@@ -59,6 +59,14 @@ class SpeechExperimentTests(unittest.TestCase):
             with self.assertRaises(CodexError):backend.respond('persona','input')
             self.assertEqual([method for method,_ in client.calls],['thread/start','turn/start','turn/interrupt'])
 
+    def test_shared_role_contract_is_sent_once_and_cannot_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client=Client();backend=self.backend(directory,client)
+            backend.respond('persona','first',developer_instructions='shared role rules')
+            self.assertEqual(client.calls[0][1]['developerInstructions'],'shared role rules')
+            with self.assertRaises(CodexError):backend.respond('persona','second',developer_instructions='changed rules')
+            self.assertEqual(client.turn,1)
+
     def test_no_answer_aborts_without_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             client=Client(empty=True);backend=self.backend(directory,client)

@@ -3,7 +3,7 @@
 A loopback HTTP CONNECT bridge gives Codex one uniform HTTP proxy transport,
 including HTTPS upgrades. Only the bridge speaks authenticated SOCKS5.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import ctypes
 import getpass
 import ipaddress
@@ -401,6 +401,34 @@ class Tunnel(socketserver.BaseRequestHandler):
                     self.server.active.discard(remote)
             if remote:
                 remote.close()
+
+
+class SharedTransport:
+    """One lazy bridge per daemon; borrowers never own its credential lifetime."""
+    def __init__(self):
+        self.stack=ExitStack();self.connection=None;self.lock=threading.Lock()
+        self.closed=False;self.failed=False
+
+    @contextmanager
+    def borrow(self,environment,timeout=180):
+        with self.lock:
+            if self.closed or self.failed:
+                raise ProxyError('Shared transport unavailable; explicit restart required.')
+            if self.connection is None:
+                try:self.connection=self.stack.enter_context(transport({},timeout=timeout))
+                except Exception:
+                    self.failed=True
+                    raise
+            proxy_environment,bridge=self.connection
+        if bridge is None:
+            yield environment,None
+        else:
+            clean={k:v for k,v in environment.items() if k.lower() not in PROXY_NAMES and not k.lower().endswith('_proxy')}
+            yield {**clean,**proxy_environment},bridge
+
+    def close(self):
+        with self.lock:
+            self.closed=True;self.stack.close();self.connection=None
 
 
 @contextmanager

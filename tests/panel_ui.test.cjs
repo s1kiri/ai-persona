@@ -81,3 +81,20 @@ test('stopping blocks pending delivery without deleting its durable ID',async()=
  await t.run('sendPending()');
  assert.equal(t.posts.length,0);assert.equal(t.storage.get('garik-pending-message'),pending);
 });
+
+test('zero budgets hide progress without hiding measured usage; positive caps restore it',()=>{
+ const t=setup();
+ t.run("Object.assign(sample.limits,{max_hourly_calls:0,max_hourly_known_tokens:0,max_daily_calls:0,max_daily_known_tokens:0});adopt({...sample,revision:2})");
+ assert.equal(t.el('calls-progress').hidden,true);
+ assert.match(t.el('token-budget').textContent,/бюджеты отключены/);
+ t.run("sample.limits.max_daily_calls=100;adopt({...sample,revision:3})");
+ assert.equal(t.el('calls-progress').hidden,false);
+ assert.match(t.el('token-budget').textContent,/100/);
+});
+
+test('background research does not imply a blocked conversation or typing',()=>{
+ const t=setup();
+ t.run("adopt({...sample,revision:2,research:[{status:'running'}]})");
+ assert.match(t.el('runtime-copy').textContent,/Разговор можно продолжать/);
+ assert.equal(t.el('send').disabled,false);
+});

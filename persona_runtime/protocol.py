@@ -41,6 +41,7 @@ SCHEMA = obj({'reply':{'type':['string','null']},'state':text(),'goals':text(),
               'journal':{'type':'array','items':JOURNAL},
               'memory_query':{'type':['string','null'],'minLength':1,'maxLength':MEMORY_QUERY_LIMIT},
               'web_query':{'type':['string','null'],'minLength':1,'maxLength':WEB_QUERY_LIMIT},
+              'background_query':{'type':['string','null'],'minLength':1,'maxLength':WEB_QUERY_LIMIT},
               'web_sources':{'type':'array','items':SOURCE},
               'messages':{'type':'array','items':MESSAGE,'maxItems':3},
               'activity':{'anyOf':[ACTIVITY,{'type':'null'}]},
@@ -137,10 +138,10 @@ def validate(value):
         parsed=urlsplit(source['url'])
         if parsed.scheme not in ('https','http') or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('source must be a plain HTTP(S) URL without credentials')
-    for field,limit in (('memory_query',MEMORY_QUERY_LIMIT),('web_query',WEB_QUERY_LIMIT)):
+    for field,limit in (('memory_query',MEMORY_QUERY_LIMIT),('web_query',WEB_QUERY_LIMIT),('background_query',WEB_QUERY_LIMIT)):
         if value.get(field) is not None:
             bounded_text(value[field],field.replace('_',' '),limit)
-    if value.get('memory_query') and value.get('web_query'):
+    if sum(bool(value.get(k)) for k in ('memory_query','web_query','background_query'))>1:
         raise ValueError('request only one intermediate query at a time')
     query=value.get('memory_query') or value.get('web_query')
     if query is not None:

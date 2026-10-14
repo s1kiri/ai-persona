@@ -1,6 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const fmt=x=>x==null?'—':new Intl.NumberFormat('ru-RU').format(x);
+const budgetLabel=x=>x===0?'Без лимита':fmt(x);
 const labels={message:'Общение',wake:'Пробуждение',search:'Поиск',recall:'Память',legacy_message:'Архив · ход',legacy_wake:'Архив · пробуждение'};
 const statuses={running:'В процессе',completed:'Завершён',failed:'Ошибка',cancelled:'Отменён',interrupted:'Прерван'};
 let state=null,revision=null,connected=false,sending=false;
@@ -98,9 +99,12 @@ function renderUsage(){
  set('session-total',u.known_token_calls?(u.unknown_calls?'≥':'')+fmt(u.total_tokens):u.attempts?'—':'0');
  set('input-total',metric(u,'input_tokens'));set('output-total',metric(u,'output_tokens'));set('cache-total',metric(u,'cached_input_tokens'));set('uncached-total',metric(u,'uncached_input_tokens'));
  set('usage-status',u.unknown_calls?'Итог известной части. Без usage: '+u.unknown_calls+' вызов(а). Точный счётчик обновится после завершения.':'Точный итог полученных usage. Обновляется ступенями, не во время генерации.');
- $('calls-progress').max=state.limits.max_daily_calls||100;$('calls-progress').value=state.usage.day.attempts;
+ $('calls-progress').hidden=state.limits.max_daily_calls===0;
+ $('calls-progress').classList.toggle('hidden',state.limits.max_daily_calls===0);
+ $('calls-progress').max=state.limits.max_daily_calls||1;$('calls-progress').value=state.usage.day.attempts;
  set('budget-line',state.calls_used+' попыток · '+state.wakes_used+' пробуждений за запуск · '+(state.limits.max_calls?'предел '+state.limits.max_calls:'без общего предела шагов'));
- set('token-budget','В час: до '+fmt(state.limits.max_hourly_calls)+' попыток / '+fmt(state.limits.max_hourly_known_tokens)+' известных токенов; затем ожидание. Суточный предел: '+fmt(state.limits.max_daily_calls)+' попыток.');
+ const budgets=['max_hourly_calls','max_hourly_known_tokens','max_daily_calls','max_daily_known_tokens'];
+ set('token-budget',budgets.every(k=>state.limits[k]===0)?'Локальные часовые и суточные бюджеты отключены. Ограничения Codex продолжают действовать.':'Попытки / час: '+budgetLabel(state.limits.max_hourly_calls)+' · токены / час: '+budgetLabel(state.limits.max_hourly_known_tokens)+' · попытки / день: '+budgetLabel(state.limits.max_daily_calls)+' · токены / день: '+budgetLabel(state.limits.max_daily_known_tokens));
  clear('usage-summary');
  for(const [key,name] of [['session','Этот запуск'],['day','Сегодня · UTC'],['all','Вся сохранённая история']]){
   const t=state.usage[key],card=node('article',null,'card summary');card.append(node('div',name,'eyebrow'),node('strong',t.known_token_calls?(t.unknown_calls?'≥':'')+fmt(t.total_tokens):t.attempts?'—':'0'),node('small',(t.unknown_attempt_groups?'≥':'')+fmt(t.attempts)+' попыток · '+fmt(t.unknown_calls)+' без полного usage'),node('small','Весь вход: '+metric(t,'input_tokens')+' · выход: '+metric(t,'output_tokens')),node('small','Кэш: '+metric(t,'cached_input_tokens')+' · без кэша: '+metric(t,'uncached_input_tokens')));
@@ -138,7 +142,7 @@ function renderChannels(){
  for(const c of [...state.channels,...state.capabilities]){
   const on=c.connected??c.enabled,card=node('article',null,'card summary');card.append(node('div',c.title,'eyebrow'),node('strong',on?'Подключено':'Не подключено'),node('small',on?'Реально доступно в этом запуске':'Возможность не симулируется'));$('channel-cards').append(card);
  }
- details('limits-list',[['Попытки на запуск',state.limits.max_calls?fmt(state.limits.max_calls):'Без общего предела'],['Самостоятельные пробуждения',state.limits.max_wakes?fmt(state.limits.max_wakes):'Без общего предела'],['Время инициативы',state.limits.max_minutes?state.limits.max_minutes+' мин':'Пока работает демон'],['Минимальный интервал wake',state.limits.min_wake_seconds/60+' мин'],['Known tokens / один ход',fmt(state.limits.max_known_tokens)],['Попытки / час',fmt(state.limits.max_hourly_calls)],['Known tokens / час',fmt(state.limits.max_hourly_known_tokens)],['Known tokens / день UTC',fmt(state.limits.max_daily_known_tokens)],['Попытки / день UTC',fmt(state.limits.max_daily_calls)],['Native web / этап',fmt(state.limits.max_web_calls)]]);
+ details('limits-list',[['Попытки на запуск',state.limits.max_calls?fmt(state.limits.max_calls):'Без общего предела'],['Самостоятельные пробуждения',state.limits.max_wakes?fmt(state.limits.max_wakes):'Без общего предела'],['Время инициативы',state.limits.max_minutes?state.limits.max_minutes+' мин':'Пока работает демон'],['Минимальный интервал wake',state.limits.min_wake_seconds/60+' мин'],['Known tokens / один ход',fmt(state.limits.max_known_tokens)],['Попытки / час',budgetLabel(state.limits.max_hourly_calls)],['Known tokens / час',budgetLabel(state.limits.max_hourly_known_tokens)],['Known tokens / день UTC',budgetLabel(state.limits.max_daily_known_tokens)],['Попытки / день UTC',budgetLabel(state.limits.max_daily_calls)],['Native web / этап',fmt(state.limits.max_web_calls)]]);
 }
 function clocks(){
  if(!state)return;
@@ -153,7 +157,7 @@ function clocks(){
 function render(){
  const titles={idle:'Занимается своим',generating:state.current?.category==='search'?'Пошёл искать':'Сейчас в движении',paused:'Инициатива на паузе',budget:'Ожидает освобождения бюджета',stopping:'Завершает работу'};
  set('runtime-title',titles[state.mode]||'Гарик локально');
- set('runtime-copy',state.test_backend?'Тестовый исполнитель · синтетические данные.':'Вкладку можно закрыть. Гарик продолжит в пределах лимитов.');
+ set('runtime-copy',state.test_backend?'Тестовый исполнитель · синтетические данные.':(state.research||[]).some(job=>['queued','running'].includes(job.status))?'Исследует в фоне. Разговор можно продолжать.':'Вкладку можно закрыть. Гарик продолжит свои дела.');
  set('model',(state.model||'Модель CLI · не указана')+(state.reasoning_effort?' · '+state.reasoning_effort:''));
  const active=state.activities.find(x=>['active','waiting'].includes(x.status)),recent=active||state.activities[0];
  set('activity',recent?.title||'Выбирает своё дело');set('next-step',recent?.next_step||'Можно исследовать, записать что-нибудь или спокойно ждать.');

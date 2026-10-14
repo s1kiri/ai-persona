@@ -86,11 +86,23 @@ class ContinuityTests(unittest.TestCase):
                 (str(n),None,'synthetic','s','wake','synthetic',now-10,None,'failed','{}','{}',0,1))
         self.store.db.commit()
         with patch('persona_runtime.telemetry.time.time',return_value=now):
-            self.assertFalse(budget_available(ledger,Limits(),now))
+            self.assertFalse(budget_available(ledger,Limits(max_hourly_calls=12),now))
         with patch('persona_runtime.telemetry.time.time',return_value=now+3601):
-            self.assertTrue(budget_available(ledger,Limits(),now+3601))
+            self.assertTrue(budget_available(ledger,Limits(max_hourly_calls=12),now+3601))
         with patch('persona_runtime.telemetry.time.time',return_value=now):
             self.assertFalse(budget_available(ledger,Limits(max_daily_calls=10),now+3601))
+
+    def test_disabled_budgets_do_not_block_or_erase_usage(self):
+        limits=Limits().validate()
+        class LargeLedger:
+            def totals(self,**kwargs):return {'total_tokens':99999999,'attempts':9999}
+        ledger=LargeLedger()
+        self.assertTrue(budget_available(ledger,limits))
+        self.assertFalse(budget_available(ledger,Limits(max_daily_calls=10)))
+        self.assertFalse(budget_available(ledger,Limits(max_hourly_known_tokens=1000)))
+        self.assertEqual(ledger.totals()['attempts'],9999)
+        for value in (-1,True,999):
+            with self.assertRaises(ValueError):Limits(max_daily_known_tokens=value).validate()
 
     def test_continuous_session_passes_twenty_turns_and_hundreds_of_idle_ticks_call_no_model(self):
         backend=Backend(*[decision(reply=None)]*25)

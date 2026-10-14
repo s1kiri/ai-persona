@@ -29,6 +29,8 @@ class Session:
         self.last_input=-float('inf')
         self.on_dispatch=None
         self.dispatch_guard=None
+        self.research=None
+        self.on_research_dispatch=None
 
     def autonomy_status(self):
         if self.paused:return 'на паузе'
@@ -83,6 +85,11 @@ class Session:
         return True
 
     def submit(self):
+        if self.remaining_calls()<=0:
+            self.engine.cancel(self.turn,'session model call limit reached')
+            self.turn=None
+            self.check_limit()
+            return False
         if self.dispatch_guard and not self.dispatch_guard():
             self.dispatch_blocked=True
             self.stopped=True
@@ -97,6 +104,9 @@ class Session:
         return True
 
     def poll(self):
+        if self.research:
+            self.research.poll()
+            self.research.start(self)
         if self.future is None:
             return False
         if not self.future.done():
@@ -156,6 +166,7 @@ class Session:
                 self.store.db.execute("UPDATE events SET status='superseded',error='initiative paused' WHERE kind='wake' AND status='pending'")
                 self.store.db.execute("UPDATE outbox SET status='cancelled' WHERE status='queued' AND event_id IN (SELECT id FROM events WHERE kind='wake')")
             self.interrupt('initiative paused',wakes_only=True)
+            if self.research:self.research.cancel(wakes_only=True)
             self.output('Самостоятельные пробуждения на паузе. Разговаривать можно.')
         elif text=='/resume':
             self.paused=False;self.autonomy=True
@@ -163,6 +174,7 @@ class Session:
             self.output('Самостоятельные пробуждения включены в пределах лимитов сеанса.')
         elif text=='/cancel':
             self.interrupt('operator cancelled generation')
+            if self.research:self.research.cancel()
             self.store.supersede_pending(self.person,self.conversation)
             self.output('Текущий ответ и ещё не доставленные продолжения отменены.')
         elif text=='/status':
@@ -200,6 +212,7 @@ class Session:
     def close(self):
         if self.turn:
             self.interrupt('session stopped')
+        if self.research:self.research.close()
         if self.future:
             try:
                 self.future.result(timeout=5)

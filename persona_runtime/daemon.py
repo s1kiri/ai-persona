@@ -25,6 +25,8 @@ from .memory import Budget
 from .session import Session
 from .store import Store,worker_lock
 from .telemetry import Ledger,safe_action
+from .background import ResearchWorker
+from .proxy import SharedTransport
 
 @dataclass
 class Limits:
@@ -32,10 +34,10 @@ class Limits:
     max_wakes:int=0
     max_minutes:int=0
     max_known_tokens:int=500000
-    max_daily_calls:int=100
-    max_daily_known_tokens:int=1000000
-    max_hourly_calls:int=12
-    max_hourly_known_tokens:int=250000
+    max_daily_calls:int=0
+    max_daily_known_tokens:int=0
+    max_hourly_calls:int=0
+    max_hourly_known_tokens:int=0
     min_wake_seconds:int=60
     autonomy:bool=True
     web:bool=True
@@ -43,11 +45,13 @@ class Limits:
     max_web_calls:int=2
     def validate(self):
         ranges={'max_calls':(0,100),'max_wakes':(0,100),'max_minutes':(0,1440),
-                'max_known_tokens':(1000,10000000),'max_daily_calls':(1,500),
-                'max_daily_known_tokens':(1000,10000000),'max_hourly_calls':(1,100),
-                'max_hourly_known_tokens':(1000,10000000),'min_wake_seconds':(60,86400),'memory_budget':(1000,12000),'max_web_calls':(1,3)}
+                'max_known_tokens':(1000,10000000),'max_daily_calls':(0,500),
+                'max_daily_known_tokens':(0,10000000),'max_hourly_calls':(0,100),
+                'max_hourly_known_tokens':(0,10000000),'min_wake_seconds':(60,86400),'memory_budget':(1000,12000),'max_web_calls':(1,3)}
         for key,(low,high) in ranges.items():
             if type(getattr(self,key)) is not int or not low<=getattr(self,key)<=high:raise ValueError('invalid '+key)
+        for key in ('max_daily_known_tokens','max_hourly_known_tokens'):
+            if 0<getattr(self,key)<1000:raise ValueError('invalid '+key)
         return self
 
 def private_json(path,value):
@@ -59,9 +63,12 @@ def private_json(path,value):
 
 def budget_available(ledger,limits,now=None):
     now=time.time() if now is None else now
+    if not any((limits.max_hourly_calls,limits.max_hourly_known_tokens,limits.max_daily_calls,limits.max_daily_known_tokens)):
+        return True
     hourly,daily=ledger.totals(since=now-3600),ledger.totals(day=True)
-    return (hourly['total_tokens']<limits.max_hourly_known_tokens and hourly['attempts']<limits.max_hourly_calls
-        and daily['total_tokens']<limits.max_daily_known_tokens and daily['attempts']<limits.max_daily_calls)
+    return all(not limit or value<limit for value,limit in (
+        (hourly['total_tokens'],limits.max_hourly_known_tokens),(hourly['attempts'],limits.max_hourly_calls),
+        (daily['total_tokens'],limits.max_daily_known_tokens),(daily['attempts'],limits.max_daily_calls)))
 
 class Runtime:
     def __init__(self,directory,port=8765,limits=None,backend_factory=None):
@@ -117,6 +124,7 @@ class Runtime:
             'calls_used':session.calls,'wakes_used':session.wakes,'autonomy':session.autonomy_status(),
             'autonomy_until':self.started+self.limits.max_minutes*60 if self.limits.max_minutes else None,'next_wake':next_wake,'effective_wake':effective,
             'current':current,'activities':activities,'messages':messages,'pending':queue_info,
+            'research':store.research.context({'kind':'wake','person':'self','conversation':'local'}),
             'feed':feed,'calls':calls,'usage':usage,'memory':memory,'sources':sources,
             'channels':[{'id':'local','title':'Локальный чат','connected':True},
                         {'id':'telegram','title':'Telegram','connected':False}],
@@ -134,12 +142,18 @@ class Runtime:
     def run(self):
         self.directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         store=session=server=server_thread=None
-        resources_closed=False;stop_answer=None
+        resources_closed=False;stop_answer=None;transport_owner=None
         try:
             with worker_lock(self.directory):
                 store=Store(self.directory,locked=True)
                 ledger=Ledger(store)
                 self.backend=self.backend_factory()
+                research_backend=None
+                if type(self.backend) is AppServerBackend:
+                    transport_owner=SharedTransport()
+                    self.backend.transport_factory=transport_owner.borrow
+                    research_backend=AppServerBackend(self.directory/'research-backend',self.backend.binary,
+                        self.backend.model,self.backend.timeout,self.limits.max_known_tokens,transport_owner.borrow)
                 if getattr(self.backend,'supports_sessions',False):self.backend.recover_store(store)
                 else:store.recover()
                 ledger.sync()
@@ -156,6 +170,12 @@ class Runtime:
                 session.dispatch_guard=guard
                 def dispatch(turn):turn.observer=ledger.open_call(turn,self.id,self.backend.model,engine.last_prompt_report)
                 session.on_dispatch=dispatch
+                if research_backend and self.limits.web:
+                    engine.background_enabled=True
+                    session.research=ResearchWorker(store,research_backend,self.limits.max_web_calls)
+                    session.on_research_dispatch=lambda turn:setattr(turn,'observer',ledger.open_call(
+                        turn,self.id,research_backend.model,{'research':True,'estimated':True,
+                        'note':'Background research: bounded question only; conversation continues independently.'}))
                 with store.db:
                     heartbeat=float(store.get('runtime_heartbeat','0'))
                     store.put('offline_gap_seconds',max(0,self.started-heartbeat) if heartbeat else '')
@@ -249,6 +269,7 @@ class Runtime:
                     if server_thread and server_thread.is_alive():server.shutdown()
                     server.server_close()
                 if store:store.close()
+            if transport_owner:transport_owner.close()
     def deliver(self,store,ledger):
         for item in store.pending_output('operator','local'):
             with store.db:

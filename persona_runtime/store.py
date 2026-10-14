@@ -60,6 +60,8 @@ class Store:
                     self.backup(self.directory / 'backups' / ('before-memory-v2-' + str(uuid.uuid4()) + '.sqlite3'))
                 self.memory.migrate()
         self.migrate_life()
+        from .background import ResearchJobs
+        self.research=ResearchJobs(self)
         self.sync_journal()
 
     def migrate_life(self):
@@ -253,7 +255,7 @@ class Store:
         # JSON tuple avoids collisions in user-supplied identifiers.
         return json.dumps([event['conversation'], event['person']], ensure_ascii=False)
 
-    def complete(self, event, decision, usage, now=None, retrieval=None, web_receipts=None):
+    def complete(self, event, decision, usage, now=None, retrieval=None, web_receipts=None, research_job=None):
         validate(decision)
         if decision.get('memory_query') or decision.get('web_query'):
             raise ValueError('intermediate recall decisions cannot be committed')
@@ -264,6 +266,9 @@ class Store:
                 raise ValueError('event is not processing')
             if self.is_stale(event):
                 raise StaleTurn('new audience input superseded this generation')
+            if research_job:self.research.consume(research_job,event)
+            if decision.get('background_query'):
+                self.research.enqueue(event,decision['background_query'],now)
             if decision.get('web_sources') and not any(r.get('events') for r in (web_receipts or [])):
                 raise ValueError('web sources require a completed native search receipt')
             for memory in decision['memories']:

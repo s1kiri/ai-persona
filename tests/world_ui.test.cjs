@@ -1,0 +1,46 @@
+// Synthetic controller state only. No browser, server or model connection.
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const vm=require('node:vm');
+const fs=require('node:fs');
+function setup(){
+ const elements=new Map(),posts=[];
+ function element(){return {textContent:'',className:'',value:'',disabled:false,children:[],handlers:{},classList:{add(){},remove(){},toggle(){}},append(...v){this.children.push(...v)},replaceChildren(){this.children=[]},addEventListener(k,f){this.handlers[k]=f}};}
+ const document={hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},createElement:element};
+ const ctx=vm.createContext({document,console,Intl,Date,setInterval(){},fetch(path,options){if(!options?.method)return new Promise(()=>{});return new Promise((resolve,reject)=>posts.push({path,options,reject,resolve:(value,ok=true)=>resolve({ok,json:async()=>value})}));}});
+ vm.runInContext(fs.readFileSync('persona_runtime/world_panel/world.js','utf8'),ctx);
+ const sample={csrf:'synthetic',model_enabled:false,paused:true,busy:false,failure:null,minute:0,settings_revision:0,settings:{events_per_hour:2,surprise:45,continuity:70,quiet:30,max_threads:4},actors:[{id:'garik',name:'Гарик'}],threads:[],entities:[],history:[],notes:[],cycles:[],calls:[],call_count:0,max_calls:24};
+ ctx.sample=sample;vm.runInContext('render(sample)',ctx);
+ return {ctx,sample,posts,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
+}
+test('preparation panel clearly disables model stage and updates slider labels',()=>{
+ const t=setup();assert.equal(t.el('step').disabled,true);assert.match(t.el('mode').textContent,/без модели/);
+ t.el('surprise').value='15';t.el('surprise').handlers.input();
+ assert.equal(t.el('surprise-value').textContent,'15');assert.equal(t.el('save-settings').disabled,false);
+});
+test('polling does not overwrite unsaved slider and saves with its original revision',async()=>{
+ const t=setup();t.el('surprise').value='15';t.el('surprise').handlers.input();
+ t.run('render({...sample,settings_revision:1,settings:{...sample.settings,surprise:90}})');
+ assert.equal(t.el('surprise').value,'15');
+ const promise=t.el('settings-form').handlers.submit({preventDefault(){}});
+ const body=JSON.parse(t.posts[0].options.body);assert.equal(body.revision,0);assert.equal(body.settings.surprise,15);
+ t.posts[0].resolve({error:'Conflict'},false);await promise;
+ assert.equal(t.el('surprise').value,'15');assert.equal(t.run('dirty'),true);
+});
+test('successful slider save adopts current persisted controls',async()=>{
+ const t=setup();t.el('surprise').value='15';t.el('surprise').handlers.input();
+ const promise=t.el('settings-form').handlers.submit({preventDefault(){}});
+ t.posts[0].resolve({...t.sample,settings_revision:1,settings:{...t.sample.settings,surprise:15}});await promise;
+ assert.equal(t.run('dirty'),false);assert.equal(t.el('save-settings').disabled,true);assert.equal(t.run('settingsRevision'),1);
+});
+test('double click and lost reply never trigger automatic repeat',async()=>{
+ const t=setup();t.el('minutes').value='30';
+ const promise=t.el('prepare').handlers.click();await t.el('prepare').handlers.click();assert.equal(t.posts.length,1);
+ t.posts[0].reject(Error('Synthetic disconnect'));await promise;
+ assert.equal(t.posts.length,1);assert.match(t.el('banner').textContent,/Synthetic disconnect/);
+});
+test('model-written markup remains literal text in the monitor',()=>{
+ const t=setup();const text='<img src=x onerror=alert(1)>';
+ t.ctx.markup=text;t.run('render({...sample,entities:[{name:markup,condition:markup}]})');
+ const card=t.el('entities').children[0];assert.equal(card.children[0].textContent,text);assert.equal(card.children[1].textContent,text);
+});

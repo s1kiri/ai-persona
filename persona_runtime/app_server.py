@@ -225,8 +225,11 @@ class AppServerBackend(CodexBackend):
     supports_sessions = True
     supports_research = True
 
-    def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000, transport_factory=None):
+    def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000, transport_factory=None, minimal_tools=False):
         super().__init__(binary, model, timeout)
+        if type(minimal_tools) is not bool:
+            raise ValueError('invalid minimal tool setting')
+        self.minimal_tools = minimal_tools
         if type(max_known_tokens) is not int or not 1000 <= max_known_tokens <= 10_000_000:
             raise ValueError('invalid persistent token budget')
         self.max_known_tokens = max_known_tokens
@@ -261,7 +264,7 @@ class AppServerBackend(CodexBackend):
             'sqlite_home':str(self.directory / 'state'), 'log_dir':str(self.directory / 'logs'),
             'thread_unload_delay_secs':0, 'agents.enabled':False,
             'tools.experimental_request_user_input.enabled':False, 'tools.update_plan.enabled':False,
-            'features.skip_host_skill_discovery':True, 'features.code_mode_host':True,
+            'features.skip_host_skill_discovery':True, 'features.code_mode_host':not self.minimal_tools,
             # This is enforced inside Codex, before another tool-loop iteration.
             # It counts uncached input + output, so the host still accounts for
             # all input/cached tokens independently and imposes a wall deadline.
@@ -277,6 +280,10 @@ class AppServerBackend(CodexBackend):
         # Startup config is strict: ignored/unknown safety switches are a failure.
         command = [self.binary, '--no-daemon', 'app-server', '--strict-config', '--listen', 'stdio://']
         for key, value in flags.items(): command += ['-c', key+'='+json.dumps(value)]
+        if self.minimal_tools:
+            skills = '[' + ','.join('{path=' + json.dumps(str(path)) + ',enabled=false}'
+                for path in (Path.home() / '.codex/skills').rglob('SKILL.md')) + ']'
+            command += ['-c', 'skills.config=' + skills]
         environment = {k:v for k,v in cli_environment().items()
             if not k.startswith('CODEX_') or k == 'CODEX_HOME'}
         stack = ExitStack()

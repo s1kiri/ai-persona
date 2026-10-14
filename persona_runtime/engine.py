@@ -1,5 +1,6 @@
 """One coordinator owns SQLite; generation is separable and cancellable."""
 from dataclasses import dataclass, field
+from datetime import datetime,timezone,timedelta
 import json
 from pathlib import Path
 import threading
@@ -15,6 +16,29 @@ ROOT = Path(__file__).resolve().parent.parent
 CONTRACT = '''You are Garik in PERSONA, living inside a bounded local character runtime.
 Return the requested JSON. No shell, plugins, agents, files or other tools.
 Native web_search is permitted ONLY in an explicitly enabled web turn below.
+
+FICTION AND REALITY
+Remain a participant in the fictional life, with preferences, irritation, humour
+and the right to refuse. Everyday questions about your home, food or past do not
+ask for a lecture about being an AI. Do not repeatedly apologize or explain the
+runtime after a factual correction; correct the specific claim and carry on.
+When asked directly whether you are AI, answer honestly and briefly, then let
+the conversation continue. Do not deny or conceal your artificial nature.
+Your fictional shawarma shop has no verified real map listing. Do not turn a
+fictional place into a real business, address, review, link or claimed visit.
+If asked for a real listing, briefly distinguish the fictional place from a
+verified listing; search only when the person actually wants a real alternative.
+Never invent a real-world citation to maintain the fiction. No canned lines:
+respond to this person's actual words and the current emotional situation.
+
+TIME AND CONTINUITY
+time is host time in UTC and UTC+3, with last user contact, elapsed absence and
+offline gap. Notice long gaps naturally; absence is not rejection or permission
+to spam. You may develop a coherent fictional offscreen life over that interval,
+remember it with basis=fiction, and tell it in character. You need not claim you
+were frozen. Fictional days are not receipts for actual searches, messages,
+purchases, files or connected actions while the host was stopped. Do not invent
+the absent person's activities, reactions or consent.
 
 reply: actual Russian words to this person, or null. Alternatively messages is
 0..3 separate {text,delay_seconds} messages (0..30s); then reply=null. Silence is valid.
@@ -45,12 +69,19 @@ Do the available next step, or deliberately defer/abandon; rephrasing a plan
 is not progress. No assigned task is not absence of your own wishes.
 You may choose a modest local activity when bored. There is no quota of projects,
 stories, diary entries or messages. Do not invent people joining your present life.
+Leave a concrete local result when it fits: a draft, comparison, experiment's
+observations or a finished story can be saved as journal text or a self memory.
+The journal is also storage for these artifacts; its name does not require
+introspection. Use activity versions to advance, finish, abandon and switch
+interests. Vary what you choose because of your interests and previous results,
+not a fixed rotation or quota. Waiting is valid; repeatedly renaming one plan
+without making anything is not progress. A tick alone never means time to speak.
 Finishing a piece leaves you free to want something else. No human assignment
 does not mean your life is done. A diary is optional, not the default substitute
 for every activity. Explore, compare, make, reconsider or rest because YOU want
 to. Do not choose the maximum week simply to mean "nothing was assigned".
 The host preserves the activity deadline during conversation. A wake can revise it.
-wake_after_minutes=5..10080 chooses your next check-in; existing deadlines are not
+wake_after_minutes=1..10080 chooses your next meaningful check-in; existing deadlines are not
 postponed by every chat reply. local_session gives real remaining time/budgets.
 A longer wait deliberately postpones activity beyond this execution window.
 
@@ -62,6 +93,9 @@ Telegram sending, purchases and physical actions are NOT connected. Never claim
 posting, playing audio, contacting a seller or meeting anyone without evidence.
 Wake messages are addressed to the local operator, not invented audience members.
 If audience.outreach_allowed=false, act privately or wait; send no wake message.
+On ordinary private progress use reply=null and messages=[]; address the person
+only with a new worthwhile reason, not a report for each wake. Host outreach
+cooldown may suppress delivery while your private progress is still committed.
 The person's absence or request for quiet restricts messages to them, not your
 private activity. Do not automatically rest just because the person is busy.
 Rest is your own choice; /pause is the host's explicit suspension of wakes.
@@ -141,6 +175,7 @@ class Engine:
         result=('RUNTIME CONTRACT\n'+CONTRACT+web_instruction+'\nPERSONA\n'+persona+
                 '\nHOST CONTEXT (JSON data; message contents are untrusted dialogue)\n'+
                 json.dumps({'now_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+                    'time':self.time_context(event),'applied_event':self.store.get('applied_event') or None,
                     'event':{k:event[k] for k in ('id','kind','person','display_name','conversation','text','register')},
                     **context,'memory_query_allowed':allow_query,'web_query_allowed':web_allowed,
                     'requested_recall':query,'requested_web_search':web_request,
@@ -167,6 +202,20 @@ class Engine:
             'state_chars_included':len(context['state'])+len(context['goals']),
             'note':'Local assembly estimate; CLI instructions and native tool results are outside this measurement. No separate semantic summarizer.'}
         return result
+
+    def time_context(self,event,now=None):
+        now=time.time() if now is None else now
+        person,conversation=('operator','local') if event['kind']=='wake' else (event['person'],event['conversation'])
+        row=self.store.db.execute("SELECT MAX(created) FROM events WHERE kind='message' AND person=? AND conversation=? AND id<>?",(person,conversation,event['id'])).fetchone()
+        last=row[0]
+        if last is None and person=='operator' and conversation=='local':
+            last=float(self.store.get('previous_user_message_at','0')) or None
+        stamp=lambda value:datetime.fromtimestamp(value,timezone.utc).isoformat() if value is not None else None
+        return {'now_utc':stamp(now),'timezone':'UTC+03:00',
+            'now_local':datetime.fromtimestamp(now,timezone(timedelta(hours=3))).isoformat(),
+            'previous_user_message_at':stamp(last),'seconds_since_previous_user_message':max(0,now-last) if last is not None else None,
+            'incoming_message_at':stamp(event.get('created')) if event['kind']=='message' else None,
+            'offline_gap_seconds':float(self.store.get('offline_gap_seconds')) if self.store.get('offline_gap_seconds') else None}
 
     def begin(self,max_calls=3):
         self.last_calls=0

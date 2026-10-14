@@ -28,21 +28,24 @@ from .telemetry import Ledger,safe_action
 
 @dataclass
 class Limits:
-    max_calls:int=20
-    max_wakes:int=3
-    max_minutes:int=60
+    max_calls:int=0
+    max_wakes:int=0
+    max_minutes:int=0
     max_known_tokens:int=500000
     max_daily_calls:int=100
     max_daily_known_tokens:int=1000000
-    min_wake_seconds:int=300
+    max_hourly_calls:int=12
+    max_hourly_known_tokens:int=250000
+    min_wake_seconds:int=60
     autonomy:bool=True
     web:bool=True
     memory_budget:int=4000
     max_web_calls:int=2
     def validate(self):
-        ranges={'max_calls':(1,100),'max_wakes':(0,100),'max_minutes':(1,1440),
+        ranges={'max_calls':(0,100),'max_wakes':(0,100),'max_minutes':(0,1440),
                 'max_known_tokens':(1000,10000000),'max_daily_calls':(1,500),
-                'max_daily_known_tokens':(1000,10000000),'min_wake_seconds':(300,86400),'memory_budget':(1000,12000),'max_web_calls':(1,3)}
+                'max_daily_known_tokens':(1000,10000000),'max_hourly_calls':(1,100),
+                'max_hourly_known_tokens':(1000,10000000),'min_wake_seconds':(60,86400),'memory_budget':(1000,12000),'max_web_calls':(1,3)}
         for key,(low,high) in ranges.items():
             if type(getattr(self,key)) is not int or not low<=getattr(self,key)<=high:raise ValueError('invalid '+key)
         return self
@@ -53,6 +56,12 @@ def private_json(path,value):
     with os.fdopen(fd,'w',encoding='utf-8') as output:
         json.dump(value,output);output.flush();os.fsync(output.fileno())
     temporary.replace(path)
+
+def budget_available(ledger,limits,now=None):
+    now=time.time() if now is None else now
+    hourly,daily=ledger.totals(since=now-3600),ledger.totals(day=True)
+    return (hourly['total_tokens']<limits.max_hourly_known_tokens and hourly['attempts']<limits.max_hourly_calls
+        and daily['total_tokens']<limits.max_daily_known_tokens and daily['attempts']<limits.max_daily_calls)
 
 class Runtime:
     def __init__(self,directory,port=8765,limits=None,backend_factory=None):
@@ -102,11 +111,11 @@ class Runtime:
         sources=[{**dict(row),**safe_action({'url':row['url']})} for row in store.db.execute('SELECT id,url,title,source_event,created FROM web_sources ORDER BY created DESC LIMIT 12')]
         for source in sources:source['url']=safe_action({'url':source['url']}).get('url')
         value={'instance':self.id,'database_id':store.get('panel_database_id'),'pid':os.getpid(),'started':self.started,'ended':self.ended,'mode':mode,
-            'test_backend':not isinstance(self.backend,CodexBackend),
+            'test_backend':not isinstance(self.backend,(CodexBackend,AppServerBackend)),
             'revision':0,'csrf':self.csrf,'model':self.backend.model,'limits':asdict(self.limits),
             'reasoning_effort':getattr(self.backend,'reasoning_effort',None),
             'calls_used':session.calls,'wakes_used':session.wakes,'autonomy':session.autonomy_status(),
-            'autonomy_until':self.started+self.limits.max_minutes*60,'next_wake':next_wake,'effective_wake':effective,
+            'autonomy_until':self.started+self.limits.max_minutes*60 if self.limits.max_minutes else None,'next_wake':next_wake,'effective_wake':effective,
             'current':current,'activities':activities,'messages':messages,'pending':queue_info,
             'feed':feed,'calls':calls,'usage':usage,'memory':memory,'sources':sources,
             'channels':[{'id':'local','title':'Локальный чат','connected':True},
@@ -137,17 +146,20 @@ class Runtime:
                 engine=Engine(store,self.backend,web_enabled=self.limits.web,max_web_calls=self.limits.max_web_calls)
                 store.memory.budget=Budget(self.limits.memory_budget)
                 session=Session(store,engine,max_calls=self.limits.max_calls,max_wakes=self.limits.max_wakes,
-                    max_minutes=self.limits.max_minutes,autonomy=self.limits.autonomy,
+                    max_minutes=self.limits.max_minutes,autonomy=self.limits.autonomy,continuous=True,
                     output=lambda text:ledger.emit('runtime.notice',{'text':'Ошибка хода; результат не применён. Нужен явный retry.' if text.startswith('Ошибка') else text}))
                 session.async_mode=True;session.executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='garik-model')
                 session.deliver=lambda:self.deliver(store,ledger)
                 def guard():
-                    ledger.sync();a=ledger.totals(self.id);b=ledger.totals(day=True)
-                    return not self.stopping.is_set() and a['total_tokens']<self.limits.max_known_tokens and b['total_tokens']<self.limits.max_daily_known_tokens and b['attempts']<self.limits.max_daily_calls
+                    ledger.sync()
+                    return not self.stopping.is_set() and budget_available(ledger,self.limits)
                 session.dispatch_guard=guard
                 def dispatch(turn):turn.observer=ledger.open_call(turn,self.id,self.backend.model,engine.last_prompt_report)
                 session.on_dispatch=dispatch
                 with store.db:
+                    heartbeat=float(store.get('runtime_heartbeat','0'))
+                    store.put('offline_gap_seconds',max(0,self.started-heartbeat) if heartbeat else '')
+                    store.put('runtime_heartbeat',self.started)
                     if not store.get('panel_database_id'):store.put('panel_database_id',str(uuid.uuid4()))
                     store.db.execute('INSERT INTO daemon_sessions VALUES (?,?,?,?,?)',(self.id,self.started,None,os.getpid(),json.dumps(asdict(self.limits))))
                 ledger.emit('runtime.started',{'recovered':True})
@@ -187,7 +199,12 @@ class Runtime:
                             except Exception:answer.put((False,'Запрос отклонён. Проверь текст, ID и доступные команды.'))
                         if self.stopping.is_set():break
                         session.poll();self.deliver(store,ledger);ledger.sync()
-                        if not guard():session.stopped=True
+                        permitted=guard()
+                        if not permitted:
+                            session.stopped=True;session.dispatch_blocked=True
+                        elif session.dispatch_blocked:
+                            session.dispatch_blocked=False
+                            session.stopped=bool(session.max_calls and session.calls>=session.max_calls)
                         if not session.stopped:
                             session.start_pending()
                             last=float(store.get('daemon_last_wake','0'))
@@ -195,12 +212,16 @@ class Runtime:
                                 previous=session.wakes;session.tick()
                                 if session.wakes>previous:
                                     with store.db:store.put('daemon_last_wake',time.time())
-                        self.publish(store,session,ledger);time.sleep(.05)
+                        if time.time()-float(store.get('runtime_heartbeat','0'))>=30:
+                            with store.db:store.put('runtime_heartbeat',time.time())
+                        self.publish(store,session,ledger);time.sleep(.1)
                 finally:
                     session.close();ledger.sync()
                     ledger.emit('runtime.stopped',{})
                     ended=time.time()
-                    with store.db:store.db.execute('UPDATE daemon_sessions SET ended=? WHERE id=?',(ended,self.id))
+                    with store.db:
+                        store.db.execute('UPDATE daemon_sessions SET ended=? WHERE id=?',(ended,self.id))
+                        store.put('runtime_heartbeat',ended)
                     self.ended=ended
                     self.publish(store,session,ledger)
                     # A stop receipt confirms the worker is closed and state committed,

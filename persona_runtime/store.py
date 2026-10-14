@@ -93,8 +93,11 @@ class Store:
     def audience(self,event):
         target={**event,'person':'operator','conversation':'local'} if event['kind']=='wake' else event
         row=self.db.execute('SELECT * FROM audience_preferences WHERE scope=?',(self.scope(target),)).fetchone()
+        latest=self.db.execute("SELECT MAX(o.delivered) FROM outbox o JOIN events e ON e.id=o.event_id WHERE e.kind='wake' AND o.status='delivered'").fetchone()[0]
+        cooldown=max(0,1800-(time.time()-latest)) if latest is not None and event['kind']=='wake' else 0
         return {'surface':event.get('surface','unknown'),'speech_preference':row['speech_preference'] if row else 'contextual',
-                'outreach_allowed':bool(row['outreach']) if row else True}
+                'outreach_allowed':(bool(row['outreach']) if row else True) and not cooldown,
+                'outreach_cooldown_seconds':round(cooldown)}
 
     def update_preferences(self,event,decision,now):
         speech=decision.get('speech_preference');outreach=decision.get('outreach')
@@ -289,6 +292,7 @@ class Store:
                                  piece['delay_seconds'] if ordinal else 0,now))
             self.put('state', decision['state'])
             self.put('goals', decision['goals'])
+            self.put('applied_event',event['id'])
             # Conversation cannot postpone an existing autonomous deadline indefinitely.
             if event['kind'] == 'wake' or not self.get('next_wake'):
                 self.put('next_wake',now+decision['wake_after_minutes']*60)

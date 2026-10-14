@@ -12,14 +12,16 @@ from .store import StaleTurn
 class Session:
     def __init__(self,store,engine,person='operator',name='Кирилл',conversation='local',
                  register='auto',autonomy=True,max_calls=20,max_wakes=3,max_minutes=60,
-                 deliver=None,output=print,clock=time.monotonic,surface=None):
+                 deliver=None,output=print,clock=time.monotonic,surface=None,continuous=False):
         self.store,self.engine=store,engine
         self.person,self.name,self.conversation,self.register=person,name,conversation,register
         self.surface=surface or ('private' if person=='operator' and conversation=='local' else 'unknown')
         self.autonomy,self.paused=autonomy,store.get('initiative_paused')=='1'
         self.max_calls,self.max_wakes=max_calls,max_wakes
+        self.continuous=continuous
+        self.dispatch_blocked=False
         self.calls,self.wakes=0,0
-        self.clock,self.deadline=clock,clock()+max_minutes*60
+        self.clock,self.deadline=clock,clock()+max_minutes*60 if max_minutes else float('inf')
         self.deliver,self.output=deliver or (lambda:None),output
         self.stopped,self.exit_requested=False,False
         self.async_mode=False
@@ -31,20 +33,25 @@ class Session:
     def autonomy_status(self):
         if self.paused:return 'на паузе'
         if not self.autonomy:return 'выключена'
-        if self.wakes>=self.max_wakes:return 'лимит пробуждений достигнут'
+        if self.max_wakes and self.wakes>=self.max_wakes:return 'лимит пробуждений достигнут'
+        if not self.max_wakes and not self.continuous:return 'лимит пробуждений достигнут'
         if self.clock()>=self.deadline:return 'время самостоятельной работы истекло'
         return 'включена'
 
     def limits(self):
         self.engine.runtime_limits={'autonomy_enabled':self.autonomy_status()=='включена',
-            'autonomous_minutes_remaining':max(0,int((self.deadline-self.clock())/60)),
-            'scheduled_wakes_remaining':max(0,self.max_wakes-self.wakes),
-            'model_calls_remaining':max(0,self.max_calls-self.calls)}
+            'autonomous_minutes_remaining':None if self.deadline==float('inf') else max(0,int((self.deadline-self.clock())/60)),
+            'scheduled_wakes_remaining':None if self.continuous and not self.max_wakes else max(0,self.max_wakes-self.wakes),
+            'model_calls_remaining':None if self.continuous and not self.max_calls else max(0,self.max_calls-self.calls),
+            'continuous':self.continuous}
+
+    def remaining_calls(self):
+        return 3 if self.continuous and not self.max_calls else self.max_calls-self.calls
 
     def process(self):
         if self.async_mode:
             return self.start_pending()
-        remaining=self.max_calls-self.calls
+        remaining=self.remaining_calls()
         if remaining<=0:
             self.stopped=True
             return False
@@ -58,14 +65,14 @@ class Session:
         return done is not None
 
     def check_limit(self):
-        if self.calls>=self.max_calls and not self.stopped:
+        if self.max_calls and self.calls>=self.max_calls and not self.stopped:
             self.output('Достигнут лимит вызовов. Новые ходы остановлены; готовые сообщения ещё могут прийти.')
             self.stopped=True
 
     def start_pending(self):
         if self.future is not None or self.stopped or self.exit_requested:
             return False
-        remaining=self.max_calls-self.calls
+        remaining=self.remaining_calls()
         if remaining<=0:
             self.check_limit()
             return False
@@ -77,10 +84,11 @@ class Session:
 
     def submit(self):
         if self.dispatch_guard and not self.dispatch_guard():
+            self.dispatch_blocked=True
             self.stopped=True
             self.engine.cancel(self.turn,'known usage or daily attempt limit reached')
             self.turn=None
-            self.output('Лимит известного расхода или дневных попыток достигнут. Новые вызовы остановлены.')
+            self.output('Достигнут временный предел расхода. Ожидаем освобождения бюджета.')
             return False
         self.engine.dispatch(self.turn)
         self.calls+=1
@@ -99,6 +107,7 @@ class Session:
         self.future=None
         try:
             if self.engine.accept(turn,future.result()):
+                with self.store.db:self.store.put('consecutive_failures','0')
                 self.turn=None
                 self.deliver()
                 self.check_limit()
@@ -109,6 +118,10 @@ class Session:
             self.engine.failed(turn,exc)
             self.turn=None
             if not isinstance(exc,(CodexCancelled,StaleTurn)):
+                failures=int(self.store.get('consecutive_failures','0'))+1
+                with self.store.db:
+                    self.store.put('consecutive_failures',failures)
+                    self.store.put('next_wake',time.time()+min(3600,60*2**min(failures,6)))
                 self.output('Ошибка хода: '+str(exc)+'. Событие сохранено для явного retry.')
             self.check_limit()
         self.start_pending()
@@ -119,7 +132,7 @@ class Session:
             self.engine.cancel(self.turn,reason)
 
     def tick(self,now=None):
-        if self.stopped or not self.autonomy or self.paused or self.wakes>=self.max_wakes or self.clock()>=self.deadline:
+        if self.stopped or self.autonomy_status()!='включена':
             return False
         if self.async_mode and (self.future is not None or self.clock()-self.last_input<30 or
                 self.store.pending_output(self.person,self.conversation,include_future=True)):

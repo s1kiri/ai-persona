@@ -8,6 +8,14 @@ from urllib.parse import urlsplit,urlunsplit,parse_qsl,urlencode
 
 FIELDS=('input_tokens','output_tokens','cached_input_tokens','cache_write_input_tokens','reasoning_output_tokens')
 
+def usage_metrics(value):
+    """Derived counters require both operands from the SAME receipt."""
+    result=usage_values(value)
+    incoming,cached,outgoing=(result[k] for k in ('input_tokens','cached_input_tokens','output_tokens'))
+    result['uncached_input_tokens']=incoming-cached if incoming is not None and cached is not None and cached<=incoming else None
+    result['processed_tokens']=incoming+outgoing if incoming is not None and outgoing is not None else None
+    return result
+
 def usage_values(value):
     return {key:value[key] if type(value.get(key)) is int and value[key]>=0 else None for key in FIELDS}
 
@@ -98,7 +106,7 @@ class Ledger:
             elif kind=='cli.result':
                 data={k:v for k,v in event.items() if k in ('turn_completed','turn_failed','exit_code','answer_present','answer_valid','retry_recovered','startup_ms','first_delta_ms','elapsed_ms','persistent_session','recovered_without_inference')}
             elif kind=='session.input':
-                data={k:v for k,v in event.items() if k in ('startup_ms','sent_chars','new_thread')}
+                data={k:v for k,v in event.items() if k in ('startup_ms','sent_chars','assembled_chars','new_thread')}
             elif kind=='web.tool':data={'id':str(event.get('id',''))[:160],'stage':event.get('stage'),'failed':bool(event.get('failed')),'action':safe_action(event.get('action',{}))}
             else:return
             value={'id':str(uuid.uuid4()),'call_id':call_id,'kind':kind,'data':data,'created':time.time()}
@@ -153,25 +161,27 @@ class Ledger:
                     self.db.execute('UPDATE call_ledger SET status=?,finished=CASE WHEN ? THEN COALESCE(finished,?) ELSE finished END WHERE id=?',(status,status!='running',time.time(),row['id']))
                     self.db.execute('INSERT INTO observations VALUES (?,?,?,?,?)',(str(uuid.uuid4()),row['id'],'call.finished',json.dumps({'status':status}),time.time()))
 
-    def totals(self,session_id=None,day=False):
+    def totals(self,session_id=None,day=False,since=None):
         query='SELECT * FROM call_ledger';args=[]
         if session_id:query+=' WHERE session_id=?';args=[session_id]
         elif day:query+=' WHERE started>=?';args=[int(time.time()//86400)*86400]
-        rows=list(self.db.execute(query,args));result={'attempts':sum(row['call_count'] if row['call_count'] is not None else 1 for row in rows),'unknown_attempt_groups':sum(row['call_count'] is None for row in rows),'known_calls':0,'known_token_calls':0,'unknown_calls':0,'total_tokens':0,**{k:0 for k in FIELDS},'coverage':{k:0 for k in FIELDS}}
+        elif since is not None:query+=' WHERE started>=?';args=[since]
+        fields=(*FIELDS,'uncached_input_tokens','processed_tokens')
+        rows=list(self.db.execute(query,args));result={'attempts':sum(row['call_count'] if row['call_count'] is not None else 1 for row in rows),'unknown_attempt_groups':sum(row['call_count'] is None for row in rows),'known_calls':0,'known_token_calls':0,'unknown_calls':0,'total_tokens':0,**{k:0 for k in fields},'coverage':{k:0 for k in fields}}
         for row in rows:
             if row['call_count']==0:continue
-            values=json.loads(row['usage'])
+            values=usage_metrics(json.loads(row['usage']))
             known=values.get('input_tokens') is not None and values.get('output_tokens') is not None
             result['known_calls' if known else 'unknown_calls']+=row['call_count'] or 1
             if values.get('input_tokens') is not None or values.get('output_tokens') is not None:
                 result['known_token_calls']+=row['call_count'] or 1
                 result['total_tokens']+=(values.get('input_tokens') or 0)+(values.get('output_tokens') or 0)
-            for key in FIELDS:
+            for key in fields:
                 if values.get(key) is not None:result[key]+=values[key];result['coverage'][key]+=row['call_count'] or 1
         return result
 
     def calls(self):
         result=[]
         for row in self.db.execute('SELECT * FROM call_ledger ORDER BY started DESC LIMIT 60'):
-            item=dict(row);item['usage']=json.loads(item['usage']);item['context']=json.loads(item['context']);result.append(item)
+            item=dict(row);item['usage']=usage_metrics(json.loads(item['usage']));item['context']=json.loads(item['context']);result.append(item)
         return result

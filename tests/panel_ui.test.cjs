@@ -56,6 +56,19 @@ test('unknown cache, reported zero and partial aggregate have different labels',
  assert.equal(t.run("metric({attempts:2,coverage:{cached:1},cached:0},'cached')"),'≥0');
 });
 
+test('processed, cached, uncached and output remain separate including partial coverage',()=>{
+ const t=setup();
+ t.run(`sample.usage.session={attempts:1,known_token_calls:1,unknown_calls:0,total_tokens:26692,input_tokens:26463,output_tokens:229,cached_input_tokens:23808,uncached_input_tokens:2655,coverage:{input_tokens:1,output_tokens:1,cached_input_tokens:1,uncached_input_tokens:1}};adopt({...sample,revision:2})`);
+ const number=x=>x.replace(/\s/g,'');
+ assert.equal(number(t.el('session-total').textContent),'26692');
+ assert.equal(number(t.el('cache-total').textContent),'23808');
+ assert.equal(number(t.el('uncached-total').textContent),'2655');
+ assert.equal(number(t.el('output-total').textContent),'229');
+ t.run(`sample.usage.session.attempts=2;sample.usage.session.unknown_calls=1;adopt({...sample,revision:3})`);
+ assert.equal(number(t.el('uncached-total').textContent),'≥2655');
+ assert.equal(number(t.el('session-total').textContent),'≥26692');
+});
+
 test('reload restores a draft and lost in-flight stop permits explicit retry',()=>{
  const t=setup([['garik-draft:synthetic','retained draft'],['garik-stop',JSON.stringify({instance:'first',phase:'requesting'})]]);
  assert.equal(t.el('message-input').value,'retained draft');

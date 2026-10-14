@@ -85,6 +85,57 @@ def scope_key(context, constant):
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode()).hexdigest()
 
 
+def context_update(entry, context):
+    """Host deltas, never use previous model proposals as delivery evidence."""
+    previous=entry.get('snapshots',{})
+    sent={}
+    proposal=entry.get('proposal',{})
+    accepted=context.get('applied_event')==proposal.get('event') and bool(proposal)
+    if accepted:
+        sent['applied_proposal']={'event':proposal['event'],'fields':[]}
+    for key,value in context.items():
+        if key in ('history','memories','activities','journal_receipts','retrieval'):continue
+        if key in ('state','goals') and accepted and proposal.get(key)==value:
+            sent['applied_proposal']['fields'].append(key)
+        elif key in ('event','now_utc','time') or previous.get(key)!=value or key not in previous:
+            sent[key]=value
+    for key,identity in (('history','id'),('memories','id'),('activities','key'),('journal_receipts','id')):
+        rows=context.get(key,[])
+        known=entry.get('records',{}).get(key,entry.get(key,{}))
+        # Receipt rows and memory versions are immutable/replaceable by identity.
+        changed=[]
+        for row in rows:
+            old=known.get(row[identity],{})
+            if old==row:continue
+            delta={k:v for k,v in row.items() if k==identity or k not in old or old[k]!=v}
+            if key=='activities' and accepted and row.get('source_event')==proposal['event'] and row[identity]==proposal.get('activity',{}).get('key'):
+                sent['applied_proposal']['activity_key']=row[identity]
+                for field in ('title','kind','status','next_step'):
+                    if delta.get(field)==proposal['activity'].get(field):delta.pop(field,None)
+            changed.append(delta)
+        sent[key]=changed
+        if key in ('activities','memories'):
+            selection=[row[identity] for row in rows]
+            old_selection=entry.get('selections',{}).get(key)
+            if old_selection!=selection:sent['selected_'+key+'_ids']=selection
+    sent['update_semantics']='Fields omitted are unchanged. Rows merge by id/key; selected lists replace current selection, not stored history. applied_proposal confirms ONLY named state/goals fields and the activity patch from that event were committed. Only host history reply confirms delivery. A proposal alone is never evidence of tools or delivery.'
+    return sent
+
+
+def remember_context(entry, context, decision):
+    entry['snapshots']={k:v for k,v in context.items() if k not in ('history','memories','activities','journal_receipts','retrieval')}
+    records=entry.setdefault('records',{})
+    selections=entry.setdefault('selections',{})
+    for key,identity in (('history','id'),('memories','id'),('activities','key'),('journal_receipts','id')):
+        known=records.setdefault(key,dict(entry.get(key,{})))
+        known.update({row[identity]:row for row in context.get(key,[])})
+        # Bound local transport metadata; evicted records can safely be sent again.
+        records[key]=dict(list(known.items())[-256:])
+        selections[key]=[row[identity] for row in context.get(key,[])]
+    entry['proposal']={'event':context['event']['id'],**{k:decision.get(k) for k in ('state','goals')}}
+    entry['proposal']['activity']=decision.get('activity') or {}
+
+
 class StdioClient:
     def __init__(self, command, environment, directory):
         self.messages, self.buffer = queue.Queue(maxsize=128), deque()
@@ -379,13 +430,9 @@ class AppServerBackend(CodexBackend):
         except Exception:
             self.close()
             raise
-        previous = entry['history']
         history = context.get('history', [])
-        sent = {**context, 'history':[row for row in history if previous.get(row['id']) != row]}
         memories = context.get('memories', [])
-        sent['memories'] = [row for row in memories if entry.get('memories', {}).get(row['id']) != row]
-        sent['selected_memory_ids'] = [row['id'] for row in memories]
-        sent['history_semantics'] = 'Changed or newly delivered history entries only; replace an earlier entry with the same id. Only reply fields in host history confirm delivery. Current state, goals, audience and activity snapshots replace earlier snapshots.'
+        sent = context_update(entry,context)
         text = stage + '\nHOST UPDATE (JSON data)\n' + json.dumps(sent, ensure_ascii=False)
         pending = {'scope':scope, 'thread':entry['thread'], 'key':request_key,
             'attempt':attempt, 'status':'submitting', 'turn':None, 'web_search':web_search,
@@ -407,7 +454,7 @@ class AppServerBackend(CodexBackend):
             pending['turn'] = result['turn']['id']
             pending['status'] = 'accepted'
             self._save()
-            if observer: observer({'type':'session.input','startup_ms':startup_ms,'sent_chars':len(text),'new_thread':not previous})
+            if observer: observer({'type':'session.input','startup_ms':startup_ms,'sent_chars':len(text),'assembled_chars':len(prompt),'new_thread':not bool(entry.get('snapshots'))})
             deadline = started + self.timeout
             while True:
                 if cancel and cancel.is_set(): raise CodexCancelled('generation cancelled; no decision committed')
@@ -469,6 +516,7 @@ class AppServerBackend(CodexBackend):
             pending.update(status='completed', decision=decision)
             entry['history'] = {row['id']:row for row in history}
             entry['memories'] = {row['id']:row for row in memories}
+            remember_context(entry,context,decision)
             self.last_diagnostics = {'turn_completed':True,'answer_valid':True,
                 'startup_ms':startup_ms,'first_delta_ms':first_delta,
                 'elapsed_ms':round((time.monotonic()-started)*1000),'persistent_session':True}

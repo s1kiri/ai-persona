@@ -76,7 +76,7 @@ function renderMessages(){
 }
 function renderFeed(){
  clear('feed');
- const names={'runtime.started':'Runtime запущен','runtime.stopped':'Runtime остановлен','runtime.control':'Управление','runtime.notice':'Состояние','call.started':'Вызов Codex','call.finished':'Вызов окончен','usage':'Получен точный usage','web.tool':'Нативный веб-инструмент','chat.delivered':'Сообщение в локальном чате','cli.diagnostic':'Диагностика Codex','cli.result':'Завершение CLI'};
+ const names={'runtime.started':'Runtime запущен','runtime.stopped':'Runtime остановлен','runtime.control':'Управление','runtime.notice':'Состояние','call.started':'Вызов Codex','call.finished':'Вызов окончен','usage':'Получен usage','web.tool':'Нативный веб-инструмент','chat.delivered':'Сообщение в локальном чате','cli.diagnostic':'Диагностика Codex','cli.result':'Завершение CLI','session.input':'Передано в сессию'};
  for(const e of state.feed){
   const row=node('div',null,'event');row.append(node('i'));const body=node('div');
   body.append(node('div',names[e.kind]||e.kind,'event-title'));
@@ -86,6 +86,7 @@ function renderFeed(){
   if(e.kind==='runtime.notice')text=e.data.text;
   if(e.kind==='runtime.control')text={pause:'Пауза инициативы',resume:'Продолжить инициативу',cancel:'Отмена текущего хода',stop:'Остановка'}[e.data.action];
   if(e.kind==='web.tool'){const a=e.data.action;text=(e.data.failed?'Ошибка инструмента · ':e.data.stage==='completed'?'Завершён · ':'Начат · ')+(a.query||(a.queries||[]).join(' / ')||a.url||a.type||'');}
+  if(e.kind==='session.input')text=fmt(e.data.sent_chars)+' символов нового ввода · '+(e.data.new_thread?'новая сессия':'продолжение сессии');
   if(e.kind==='usage'){const u=e.data.usage;text='Input '+fmt(u.input_tokens)+' · output '+fmt(u.output_tokens)+' · cached '+fmt(u.cached_input_tokens);}
   if(e.kind==='cli.diagnostic'){const descriptions={capacity:'Модель перегружена',reconnecting:'Переподключение',stream_disconnected:'Поток прерван',timeout:'Истекло ожидание',connection_reset:'Соединение сброшено',rate_limit:'Лимит запросов',authentication:'Ошибка авторизации',workspace_routing:'Ошибка маршрутизации',configuration:'Предупреждение настройки',invalid_response:'Ошибка формата ответа',unclassified:'Неизвестная ошибка; сырой текст скрыт'};text=e.data.event+' · '+e.data.categories.map(x=>descriptions[x]||x).join(' · ');}
   if(e.kind==='cli.result')text=e.data.retry_recovered?'Переподключение восстановлено; итоговый ответ проверен.':'Код '+fmt(e.data.exit_code)+' · '+(e.data.turn_failed?'Ход завершился ошибкой':e.data.turn_completed?'Получено завершение хода':'Завершение хода не получено');
@@ -95,20 +96,20 @@ function renderFeed(){
 function renderUsage(){
  const u=state.usage.session;
  set('session-total',u.known_token_calls?(u.unknown_calls?'≥':'')+fmt(u.total_tokens):u.attempts?'—':'0');
- set('input-total',metric(u,'input_tokens'));set('output-total',metric(u,'output_tokens'));set('cache-total',metric(u,'cached_input_tokens'));
+ set('input-total',metric(u,'input_tokens'));set('output-total',metric(u,'output_tokens'));set('cache-total',metric(u,'cached_input_tokens'));set('uncached-total',metric(u,'uncached_input_tokens'));
  set('usage-status',u.unknown_calls?'Итог известной части. Без usage: '+u.unknown_calls+' вызов(а). Точный счётчик обновится после завершения.':'Точный итог полученных usage. Обновляется ступенями, не во время генерации.');
- $('calls-progress').max=state.limits.max_calls;$('calls-progress').value=state.calls_used;
- set('budget-line',state.calls_used+' / '+state.limits.max_calls+' попыток · '+state.wakes_used+' / '+state.limits.max_wakes+' пробуждений');
- set('token-budget','Известно '+fmt(u.total_tokens)+' / '+fmt(state.limits.max_known_tokens)+' токенов. Порог post-hoc: новый вызов остановится после достижения.');
+ $('calls-progress').max=state.limits.max_daily_calls||100;$('calls-progress').value=state.usage.day.attempts;
+ set('budget-line',state.calls_used+' попыток · '+state.wakes_used+' пробуждений за запуск · '+(state.limits.max_calls?'предел '+state.limits.max_calls:'без общего предела шагов'));
+ set('token-budget','В час: до '+fmt(state.limits.max_hourly_calls)+' попыток / '+fmt(state.limits.max_hourly_known_tokens)+' известных токенов; затем ожидание. Суточный предел: '+fmt(state.limits.max_daily_calls)+' попыток.');
  clear('usage-summary');
  for(const [key,name] of [['session','Этот запуск'],['day','Сегодня · UTC'],['all','Вся сохранённая история']]){
-  const t=state.usage[key],card=node('article',null,'card summary');card.append(node('div',name,'eyebrow'),node('strong',t.known_token_calls?(t.unknown_calls?'≥':'')+fmt(t.total_tokens):t.attempts?'—':'0'),node('small',(t.unknown_attempt_groups?'≥':'')+fmt(t.attempts)+' попыток · '+fmt(t.unknown_calls)+' без полного usage'),node('small','Кэш внутри input: '+metric(t,'cached_input_tokens')));
+  const t=state.usage[key],card=node('article',null,'card summary');card.append(node('div',name,'eyebrow'),node('strong',t.known_token_calls?(t.unknown_calls?'≥':'')+fmt(t.total_tokens):t.attempts?'—':'0'),node('small',(t.unknown_attempt_groups?'≥':'')+fmt(t.attempts)+' попыток · '+fmt(t.unknown_calls)+' без полного usage'),node('small','Весь вход: '+metric(t,'input_tokens')+' · выход: '+metric(t,'output_tokens')),node('small','Кэш: '+metric(t,'cached_input_tokens')+' · без кэша: '+metric(t,'uncached_input_tokens')));
   $('usage-summary').append(card);
  }
  clear('calls-table');
  for(const c of state.calls){
   const row=node('tr'),type=node('td',date(c.started));type.append(node('small',labels[c.category]||c.category));row.append(type,node('td',statuses[c.status]||c.status),node('td',c.model||'Неизвестна / CLI default'));
-  for(const key of ['input_tokens','output_tokens','cached_input_tokens','cache_write_input_tokens','reasoning_output_tokens'])row.append(node('td',fmt(c.usage[key])));
+  for(const key of ['processed_tokens','input_tokens','output_tokens','cached_input_tokens','uncached_input_tokens','cache_write_input_tokens','reasoning_output_tokens'])row.append(node('td',fmt(c.usage[key])));
   $('calls-table').append(row);
  }
 }
@@ -124,7 +125,7 @@ function renderContext(){
  const names={canon:'Личность и лексика',contract:'Контракт среды',input:'Новая реплика',state:'Состояние и намерения',history:'История',memory:'Память',activity:'Занятия',sources:'Квитанции источников'};
  const max=Math.max(...Object.values(report.parts),1);
  for(const [key,value] of Object.entries(report.parts)){const row=node('div',null,'part'),head=node('div',null,'part-head');head.append(node('span',names[key]||key),node('strong','~'+fmt(value)));const bar=node('progress');bar.max=max;bar.value=value;row.append(head,bar);$('context-parts').append(row);}
- set('context-note','Подготовлено ~'+fmt(report.total)+' · '+report.counter+'. Это не токенизатор модели. Внутренние инструкции CLI и результаты native web вне этой оценки.');
+ set('context-note','Полная локальная сборка ~'+fmt(report.total)+' · '+report.counter+'. В постоянную сессию уходит только изменение; это не измерение model input. Внутренние инструкции CLI и результаты native web вне оценки.');
  details('context-limits',[['Память',fmt(report.memory_used)+' / '+fmt(report.memory_budget)+' оценочных токенов'],['История',report.history_entries+' реплик; '+report.history_excerpted+' сокращено'],['Состояние',report.state_chars_included+' / '+report.state_chars_available+' символов'],['Убрано повторов диалога',fmt(report.duplicate_episode_chunks_removed)],['Суммаризация','Снимок состояния модели; отдельного суммаризатора нет']]);
  for(const m of state.memory){const card=node('div',(m.kind||m.type)+' · '+m.basis);card.append(node('small','Источник '+m.source_event+' · '+date(m.created)+(m.excerpted?' · сокращено':'')+(m.historical_dialogue?' · прежний диалог':'')));$('memory-sources').append(card);}
  }
@@ -137,7 +138,7 @@ function renderChannels(){
  for(const c of [...state.channels,...state.capabilities]){
   const on=c.connected??c.enabled,card=node('article',null,'card summary');card.append(node('div',c.title,'eyebrow'),node('strong',on?'Подключено':'Не подключено'),node('small',on?'Реально доступно в этом запуске':'Возможность не симулируется'));$('channel-cards').append(card);
  }
- details('limits-list',[['Попытки на запуск',fmt(state.limits.max_calls)],['Самостоятельные пробуждения',fmt(state.limits.max_wakes)],['Время инициативы',state.limits.max_minutes+' мин'],['Минимальный интервал wake',state.limits.min_wake_seconds/60+' мин'],['Known tokens / запуск',fmt(state.limits.max_known_tokens)],['Known tokens / день UTC',fmt(state.limits.max_daily_known_tokens)],['Попытки / день UTC',fmt(state.limits.max_daily_calls)],['Native web / этап',fmt(state.limits.max_web_calls)]]);
+ details('limits-list',[['Попытки на запуск',state.limits.max_calls?fmt(state.limits.max_calls):'Без общего предела'],['Самостоятельные пробуждения',state.limits.max_wakes?fmt(state.limits.max_wakes):'Без общего предела'],['Время инициативы',state.limits.max_minutes?state.limits.max_minutes+' мин':'Пока работает демон'],['Минимальный интервал wake',state.limits.min_wake_seconds/60+' мин'],['Known tokens / один ход',fmt(state.limits.max_known_tokens)],['Попытки / час',fmt(state.limits.max_hourly_calls)],['Known tokens / час',fmt(state.limits.max_hourly_known_tokens)],['Known tokens / день UTC',fmt(state.limits.max_daily_known_tokens)],['Попытки / день UTC',fmt(state.limits.max_daily_calls)],['Native web / этап',fmt(state.limits.max_web_calls)]]);
 }
 function clocks(){
  if(!state)return;
@@ -150,7 +151,7 @@ function clocks(){
  if(state.pending.length){const first=state.pending[0];set('pending',first.due?'Следующая часть через '+duration(first.due-Date.now()/1000):'Готовятся отдельные сообщения · '+state.pending.length);}
 }
 function render(){
- const titles={idle:'Занимается своим',generating:state.current?.category==='search'?'Пошёл искать':'Сейчас в движении',paused:'Инициатива на паузе',budget:'Лимит этого запуска достигнут',stopping:'Завершает работу'};
+ const titles={idle:'Занимается своим',generating:state.current?.category==='search'?'Пошёл искать':'Сейчас в движении',paused:'Инициатива на паузе',budget:'Ожидает освобождения бюджета',stopping:'Завершает работу'};
  set('runtime-title',titles[state.mode]||'Гарик локально');
  set('runtime-copy',state.test_backend?'Тестовый исполнитель · синтетические данные.':'Вкладку можно закрыть. Гарик продолжит в пределах лимитов.');
  set('model',(state.model||'Модель CLI · не указана')+(state.reasoning_effort?' · '+state.reasoning_effort:''));

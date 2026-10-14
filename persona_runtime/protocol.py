@@ -21,10 +21,10 @@ JOURNAL = obj({'kind':{'type':'string','enum':['reflection','plan','story']},'ti
 MESSAGE = obj({'text':text(),'delay_seconds':{'type':'integer','minimum':0,'maximum':30}})
 ACTIVITY = obj({'key':text(),'title':text(),'kind':{'type':'string','enum':['research','journal','reflection','fiction','conversation']},
                 'status':{'type':'string','enum':['active','waiting','done','abandoned']},
-                'next_step':text(),'reason':text(),'due_after_minutes':{'type':'integer','minimum':5,'maximum':10080}})
+                'next_step':text(),'reason':text(),'due_after_minutes':{'type':'integer','minimum':1,'maximum':10080}})
 SOURCE = obj({'url':text(),'title':text(),'claim':text()})
 SCHEMA = obj({'reply':{'type':['string','null']},'state':text(),'goals':text(),
-              'wake_after_minutes':{'type':'integer','minimum':5,'maximum':10080},
+              'wake_after_minutes':{'type':'integer','minimum':1,'maximum':10080},
               'memories':{'type':'array','items':NOTE},
               'relations':{'type':'array','items':RELATION},
               'journal':{'type':'array','items':JOURNAL},
@@ -53,8 +53,8 @@ def validate(value):
     bounded_text(value['state'],'state',6000)
     bounded_text(value['goals'],'goals',6000)
     wake=value['wake_after_minutes']
-    if type(wake) is not int or not 5<=wake<=10080:
-        raise ValueError('wake_after_minutes must be an integer between 5 and 10080')
+    if type(wake) is not int or not 1<=wake<=10080:
+        raise ValueError('wake_after_minutes must be an integer between 1 and 10080')
     for field,limit in (('memories',8),('relations',8),('journal',2)):
         entries=value.get(field,[])
         if not isinstance(entries,list) or len(entries)>limit:
@@ -110,7 +110,7 @@ def validate(value):
             bounded_text(activity[key],'activity '+key,limit,allow_empty=key=='next_step')
         if activity['kind'] not in ACTIVITY['properties']['kind']['enum'] or activity['status'] not in ACTIVITY['properties']['status']['enum']:
             raise ValueError('invalid activity kind/status')
-        if type(activity['due_after_minutes']) is not int or not 5<=activity['due_after_minutes']<=10080:
+        if type(activity['due_after_minutes']) is not int or not 1<=activity['due_after_minutes']<=10080:
             raise ValueError('invalid activity deadline')
     if value.get('speech_preference') not in (None,'clean','contextual') or (value.get('outreach') is not None and type(value['outreach']) is not bool):
         raise ValueError('invalid audience preference')

@@ -226,6 +226,45 @@ class PersistentTests(unittest.TestCase):
         self.assertEqual(len([1 for m,_ in self.backend.fake.calls if m=='turn/start']),1)
         self.assertEqual(store.db.execute('SELECT count(*) FROM outbox').fetchone()[0],0)
 
+    def test_research_handoff_above_old_400_character_limit_completes_three_stages(self):
+        store,engine=self.research_engine()
+        question='Найди открытые учебные материалы о ритме и мелодии. '+('Уточни источник и доступность. '*16)
+        self.assertGreater(len(question),400)
+        self.assertLess(len(question),1024)
+        self.backend.fake.answers[0]=decision(reply=None,web_query=question)
+        engine.step(max_calls=3)
+        turns=[p for m,p in self.backend.fake.calls if m=='turn/start']
+        self.assertEqual(len(turns),3)
+        self.assertEqual(turns[0]['outputSchema']['properties']['web_query']['maxLength'],1024)
+        self.assertIn(question,turns[1]['input'][0]['text'])
+        self.assertEqual(store.db.execute('SELECT count(*) FROM turns').fetchone()[0],1)
+        self.assertEqual(store.db.execute('SELECT count(*) FROM outbox').fetchone()[0],1)
+
+    def test_oversized_query_reports_only_field_and_length_and_runs_no_search(self):
+        store,engine=self.research_engine()
+        secret='PRIVATE_QUERY_VALUE'
+        question=secret+'x'*1024
+        self.backend.fake.answers[0]=decision(reply=None,web_query=question)
+        with self.assertRaises(CodexError) as failure:engine.step(max_calls=3)
+        message=str(failure.exception)
+        self.assertIn('web query',message)
+        self.assertIn('1024',message)
+        self.assertNotIn(secret,message)
+        self.assertEqual(len([1 for m,_ in self.backend.fake.calls if m=='turn/start']),1)
+        self.assertEqual(store.db.execute('SELECT count(*) FROM turns').fetchone()[0],0)
+        self.assertEqual(store.db.execute('SELECT count(*) FROM outbox').fetchone()[0],0)
+
+    def test_new_intent_after_rejected_output_opens_transport_only_once(self):
+        self.backend.fake.answers.append(decision(reply=None,web_query='x'*1025))
+        with self.assertRaises(CodexError):self.backend.decide(prompt('failed'),attempt=1)
+        self.assertEqual(self.backend.starts,1)
+        self.assertIsNone(self.backend.client)
+        old_scope=self.backend.state['pending']['scope']
+        old_thread=self.backend.state['scopes'][old_scope]['thread']
+        self.backend.decide(prompt('new-intent'),attempt=2)
+        self.assertEqual(self.backend.starts,2)
+        self.assertNotEqual(self.backend.state['scopes'][old_scope]['thread'],old_thread)
+
     def test_research_result_stale_after_new_input_cannot_commit(self):
         store,engine=self.research_engine()
         turn=engine.begin(3);engine.dispatch(turn);engine.accept(turn,engine.generate(turn))

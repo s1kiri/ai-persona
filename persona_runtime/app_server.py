@@ -19,7 +19,7 @@ import time
 import uuid
 
 from .codex import CodexBackend, CodexCancelled, CodexError, cli_environment, safe_cli_error
-from .protocol import SCHEMA, decode
+from .protocol import SCHEMA, decode, TextValidationError
 from .proxy import child_command, transport
 from .telemetry import safe_action
 from . import research
@@ -403,8 +403,17 @@ class AppServerBackend(CodexBackend):
         scope = scope_key(context, constant)
         request_key = [context['event']['id'], context.get('requested_recall'), context.get('requested_web_search'),
                        context.get('research_result',{}).get('task_id')]
-        startup_ms = self._start()
         pending = self.state.get('pending')
+        if pending and pending['key'][0] != request_key[0]:
+            # Superseding intent needs a fresh scope, but must not open a proxy,
+            # close it immediately, then read Keychain again to reopen it.
+            self.state['scopes'].pop(pending['scope'], None)
+            self.loaded.pop(pending['scope'], None)
+            self.state['pending'] = None
+            self._save()
+            self.close()
+            pending = None
+        startup_ms = self._start()
         if pending:
             if pending['key'] == request_key and pending['scope'] == scope:
                 self._reconcile(pending)
@@ -419,14 +428,6 @@ class AppServerBackend(CodexBackend):
             if pending['key'][0] == request_key[0]:
                 self._reconcile(pending)
                 raise CodexError('Interrupted multi-stage event requires receipt review; automatic replay is blocked')
-            # New audience intent supersedes an old proposal. Never reuse that
-            # possibly unfinished history in another model turn.
-            self.state['scopes'].pop(pending['scope'], None)
-            self.loaded.pop(pending['scope'], None)
-            self.state['pending'] = None
-            self._save()
-            self.close()
-            startup_ms += self._start()
         try:entry = self._thread(scope, constant, web_search)
         except Exception:
             self.close()
@@ -513,6 +514,8 @@ class AppServerBackend(CodexBackend):
             try:
                 decision = decoder(list(answers.values())[-1])
                 if research_task and decision['task_id'] != research_task: raise ValueError()
+            except TextValidationError as exc:
+                raise CodexError('Invalid structured decision: '+str(exc)+'; raw output suppressed') from None
             except (ValueError, TypeError): raise CodexError('Invalid structured decision; raw output suppressed') from None
             pending.update(status='completed', decision=decision)
             entry['history'] = {row['id']:row for row in history}

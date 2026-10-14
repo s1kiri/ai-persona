@@ -1,6 +1,17 @@
 """Structured decisions; the host alone applies memory and journal actions."""
 import json
 
+MEMORY_QUERY_LIMIT = 400
+WEB_QUERY_LIMIT = 1024
+
+
+class TextValidationError(ValueError):
+    """Only field metadata, never rejected text, may cross the diagnostic boundary."""
+    def __init__(self,field,limit,value):
+        self.field,self.limit=field,limit
+        self.length=len(value) if isinstance(value,str) else None
+        super().__init__('invalid %s (text limit %d; length %s)' % (field,limit,self.length))
+
 
 def obj(properties):
     return {'type':'object','additionalProperties':False,'properties':properties,'required':list(properties)}
@@ -28,8 +39,8 @@ SCHEMA = obj({'reply':{'type':['string','null']},'state':text(),'goals':text(),
               'memories':{'type':'array','items':NOTE},
               'relations':{'type':'array','items':RELATION},
               'journal':{'type':'array','items':JOURNAL},
-              'memory_query':{'type':['string','null']},
-              'web_query':{'type':['string','null']},
+              'memory_query':{'type':['string','null'],'minLength':1,'maxLength':MEMORY_QUERY_LIMIT},
+              'web_query':{'type':['string','null'],'minLength':1,'maxLength':WEB_QUERY_LIMIT},
               'web_sources':{'type':'array','items':SOURCE},
               'messages':{'type':'array','items':MESSAGE,'maxItems':3},
               'activity':{'anyOf':[ACTIVITY,{'type':'null'}]},
@@ -40,7 +51,7 @@ BASE_FIELDS = {'reply','state','goals','wake_after_minutes','memories'}
 
 def bounded_text(value, field, limit, allow_empty=False):
     if not isinstance(value,str) or len(value)>limit or (not allow_empty and not value.strip()):
-        raise ValueError('invalid %s (text limit %d)' % (field,limit))
+        raise TextValidationError(field,limit,value)
     return value
 
 
@@ -126,13 +137,13 @@ def validate(value):
         parsed=urlsplit(source['url'])
         if parsed.scheme not in ('https','http') or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('source must be a plain HTTP(S) URL without credentials')
-    if value.get('web_query') is not None:
-        bounded_text(value['web_query'],'web query',400)
+    for field,limit in (('memory_query',MEMORY_QUERY_LIMIT),('web_query',WEB_QUERY_LIMIT)):
+        if value.get(field) is not None:
+            bounded_text(value[field],field.replace('_',' '),limit)
     if value.get('memory_query') and value.get('web_query'):
         raise ValueError('request only one intermediate query at a time')
     query=value.get('memory_query') or value.get('web_query')
     if query is not None:
-        bounded_text(query,'memory query',400)
         if value['reply'] is not None or messages or value['memories'] or value.get('relations') or value.get('journal') or activity or sources or value.get('speech_preference') is not None or value.get('outreach') is not None:
             raise ValueError('memory query must not also speak or write actions')
     return value

@@ -98,7 +98,7 @@ def locked(method):
 
 
 class WorldStore:
-    def __init__(self, directory):
+    def __init__(self, directory, *, seed_garik=True):
         self.directory = Path(directory).expanduser().resolve()
         # Cannot accidentally attach the laboratory to the production Store.
         if any((self.directory / name).exists() for name in ('runtime.sqlite3', 'daemon.json')):
@@ -153,16 +153,18 @@ class WorldStore:
                 self.put('settings', DEFAULT_SETTINGS)
                 self.put('settings_revision', 0)
                 self.put('paused', True)
-                self.put('basis', {'garik': 'Гарик, Гар, Гарыч; на Орте Гарр. 3427 земных лет, 2791 год на Земле. Долгоживущий, не неуязвимый и не всеведущий. Орта сухая и каменистая. Живёт в крупном городе России, город не выбран. Снимает квартиру над круглосуточной шаурмичной. Ест человеческую еду, мягкий известняк и мел, гранит слишком твёрдый. Спит раз в семнадцать дней по восемнадцать часов. Происхождению и возрасту обычно не верят. Его любимый пёс встречался ему однажды; имени и судьбы не знает.'})
-                self.register_actor('garik', 'Гарик')
-                for item in [
-                    {'id': 'home', 'kind': 'place', 'name': 'Съёмная квартира',
-                     'description': 'Квартира над круглосуточной шаурмичной в крупном городе России. Город не выбран.',
-                     'condition': 'Обычная квартира.', 'known_to': ['garik'], 'world_note': ''},
-                    {'id': 'shawarma', 'kind': 'place', 'name': 'Шаурмичная внизу',
-                     'description': 'Обычная круглосуточная шаурмичная под квартирой.',
-                     'condition': 'Работает.', 'known_to': ['garik'], 'world_note': ''}]:
-                    self.db.execute('INSERT INTO world_entities VALUES(?,?,?)', (item['id'], json.dumps(item, ensure_ascii=False), 'author-basis'))
+                self.put('basis', {})
+                if seed_garik:
+                    self.put('basis', {'garik': 'Гарик, Гар, Гарыч; на Орте Гарр. 3427 земных лет, 2791 год на Земле. Долгоживущий, не неуязвимый и не всеведущий. Орта сухая и каменистая. Живёт в крупном городе России, город не выбран. Снимает квартиру над круглосуточной шаурмичной. Ест человеческую еду, мягкий известняк и мел, гранит слишком твёрдый. Спит раз в семнадцать дней по восемнадцать часов. Происхождению и возрасту обычно не верят. Его любимый пёс встречался ему однажды; имени и судьбы не знает.'})
+                    self.register_actor('garik', 'Гарик')
+                    for item in [
+                        {'id': 'home', 'kind': 'place', 'name': 'Съёмная квартира',
+                         'description': 'Квартира над круглосуточной шаурмичной в крупном городе России. Город не выбран.',
+                         'condition': 'Обычная квартира.', 'known_to': ['garik'], 'world_note': ''},
+                        {'id': 'shawarma', 'kind': 'place', 'name': 'Шаурмичная внизу',
+                         'description': 'Обычная круглосуточная шаурмичная под квартирой.',
+                         'condition': 'Работает.', 'known_to': ['garik'], 'world_note': ''}]:
+                        self.db.execute('INSERT INTO world_entities VALUES(?,?,?)', (item['id'], json.dumps(item, ensure_ascii=False), 'author-basis'))
                 self.snapshot()
             elif self.get('version') != 1:
                 raise ValueError('unknown world database version')

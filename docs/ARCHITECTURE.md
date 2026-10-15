@@ -1,81 +1,103 @@
-# Architecture
+# Архитектура текущей системы
 
-## The boundary
+Актуально15 октября2026. [Архитектура исходного файлового шаблона](history/template-architecture.md)
+сохранена отдельно; она не описывает нынешний процесс Telegram.
 
-```mermaid
-flowchart LR
-    subgraph RW["writable by the character"]
-        A["agent/&lt;name&gt;/"]
-    end
-    subgraph RO["read-only to the character"]
-        B["agent/shared/"]
-        C["agent/scripts/"]
-        D["everything else"]
-    end
-    RW -.->|reads| RO
-    RW -->|writes| RW
+## Два исполнения
 
-    style RW fill:#22303f,stroke:#5b8dd9,color:#e8ecf5
-    style RO fill:#2a2320,stroke:#c98b3f,color:#f2e9df
-```
+`engine.py`/`background.py`/`daemon.py` — более ранний личный чат, память,
+самостоятельные пробуждения и панель. Его база отличается от базы мира.
 
-One rule: a character writes inside its own directory and nowhere else. Everything outside is
-readable and unwritable.
-
-This is not distrust. A character that can reach everything eventually breaks something at three
-in the morning while nobody is reading, and the failure looks like the character behaving oddly
-rather than like a permission being wrong. Narrow write access turns a whole class of mystery into
-a script that says no.
-
-## A session, start to finish
-
-```mermaid
-sequenceDiagram
-    participant L as session loop
-    participant F as files
-    participant M as model
-    participant W as world
-
-    L->>F: read PERSONA, GOALS, state, inbox
-    L->>L: gather live context (time, new operator messages)
-    L->>M: one prompt: character + rules + plan + what is new
-    Note over M: reasons for itself.<br/>No decision tree.
-    M->>W: acts through scripts only
-    W-->>M: plain text results
-    M->>F: writes memory, goals, outbox
-    M->>F: sets its own next wake
-    L->>L: sleeps for that long, then repeats
-```
-
-The loop assembles and hands over. It contains no rule about any character and no special case for
-any situation. When the output is wrong, a file is wrong, and that property is the reason the
-design is worth having.
-
-## What arrives exactly once
-
-Operator messages are injected at the top of the prompt and never repeated. That is deliberate:
-an inbox the character re-reads every session replays old orders forever, and the character ends
-up spamming somebody with a task from last Tuesday.
-
-The consequence is a rule: the first thing done with a once-delivered message is to write it into
-`GOALS.md`. A plan file survives sessions; a prompt does not.
+`world.py`/`channel_life.py` — вымышленная жизнь и текущий самостоятельный
+Telegram-канал. Не запускать старый daemon и новый цикл на одних данных.
 
 ```mermaid
 flowchart LR
-    OP["operator message"] -->|once, at the top| PR["session prompt"]
-    PR -->|first action| G["GOALS.md · item 0 · OPEN"]
-    G -->|read every session| PR2["next session"]
-    G -->|closed only when actually done| DONE["DONE"]
-
-    style OP fill:#2c3b26,stroke:#7aa35c,color:#eaf2e4
-    style G fill:#22303f,stroke:#5b8dd9,color:#e8ecf5
+    P[Пакет личности] --> A[Решения персонажа]
+    W[Мир и жители] -->|наблюдение| A
+    A -->|выбранная попытка| O[Исход и время]
+    O --> M[Личная память]
+    M --> A
+    A --> C[Добровольный пост]
+    C --> T[Очередь Telegram и квитанция]
+    T -->|комментарии| A
+    A --> I[Добровольное фото]
+    I --> T
 ```
 
-## Adding a second character
+## Цикл и источники истины
 
-Copy the directory and change the name. Nothing else. Shared rules stay shared, scripts stay
-shared, and the two characters cannot read each other's memory because neither can write or read
-outside its own directory.
+Обычный путь: `horizon → world → impulse → choice → outcome → experience → share`.
+Некоторые этапы отсутствуют по настройкам/условиям. `horizon` хранит планы
+жителей, `world` — доступное наблюдение. `impulse` — свободная записка героя;
+`choice` переносит её без переписывания намерения. `research` добавляется
+только для реального поиска отдельным инструментом с квитанциями.
 
-Two characters that must know about each other do it the way people do: by talking, through the
-outbox, and by writing what they learned into their own notes.
+`outcome` подтверждает физический вымышленный поступок и затраченное время.
+`experience` — личная запись и продолжающиеся темы. После этого отдельный
+выбор записи канала, затем при необходимости короткий заход к читателям.
+`post/keep` не вытесняется ответом в ветке. Готовый текст не редактируется хостом.
+
+| Данные | Что подтверждают |
+| --- | --- |
+| Канон | Устойчивые авторские определения, не выполненные нынешние планы |
+| impulse/choice | Собственное намерение, не его результат |
+| world/outcome | Наблюдаемое/состоявшееся в вымышленном мире |
+| experience | Отношение, личный вывод и незаконченные темы |
+| post/comment | Слова говорящего, не патч физического мира |
+| Telegram receipt | Настоящую отправку в конкретное место |
+| Research receipt | Фактически выполненный инструментальный поиск |
+
+## Хранение и изоляция
+
+SQLite хранит циклы, вызовы, события, сущности, истории, связи, личные заметки,
+намерения, читателей, задания доставки и ремонты. Этап помечается начатым
+перед вызовом. Новое состояние принимается транзакционно после проверки.
+У мира один владелец и общий `revision`; второй процесс блокируется.
+
+`actor_view(actor_id)` возвращает только известные сущности/истории,
+наблюдаемые события и собственные личные записи. `world_note` не попадает
+персонажу. Канон мира раздельный по actor_id; планы NPC не становятся тайным
+знанием героя. Короткий `director_signal` может подсказать миру интерес
+участника, не давая NPC телепатию. Имена владельцев не задают иерархию отношений.
+
+Читатели запоминаются по аккаунту, с впечатлениями и основаниями. Анонимный
+автор остаётся анонимным голосом. Короткие ссылки на источники выбираются из
+допустимой схемы; хост проверяет существование и область. Это не автоматическое
+доказательство истинности любой интерпретации. Принятое обещание привязывается
+к точным собственным словам; завершение записи требует доставки.
+
+## Время, публикации и инструменты
+
+В лаборатории время виртуальное. В живом канале оно привязано к московским
+часам: герой ожидает фактическую длительность рассчитанного дела перед
+личной реакцией/публикацией результата. UI может заранее показывать уже
+рассчитанный исход; отдельного события прогресса во время ожидания ещё нет.
+
+Ориентир длины эпизода, пауза между ними, обстоятельства, разнообразие,
+внимание и готовность делиться настраиваются. Это не принудительный график
+постов. Чат не переносит бесконечно срок собственных дел.
+
+Транспорт модели — изолированные процессы Codex app-server. Обычные роли
+не имеют инструментов; research имеет только нативный web. Фото выбирает
+сам герой, отдельный нативный инструмент создаёт файл с проверкой квитанций.
+Визуальные референсы принадлежат участнику/сущности, новое фото не заменяется
+старым по ID предмета. Telegram-права и токен остаются вне промпта.
+
+## Остановка и восстановление
+
+Ошибочный/прерванный этап и неопределённая доставка не повторяются автоматически.
+Рабочий результат сохраняется. Для некоторых ошибок есть явный разбор
+того же сохранённого текста под исправленным контрактом без нового вызова;
+failed и usage остаются в истории. Отсутствие поста после неопределённой
+доставки должен явно подтвердить владелец, а не угадать модель.
+
+Caffeinate на Mac относится к процессу, а не к глобальным настройкам питания.
+Данные и секреты находятся в игнорируемой локальной папке. Блокировка экрана
+допустима; потеря питания/сети всё равно может остановить исполнение.
+
+## Второй участник
+
+Пакеты и ядро нескольких actor_id проверены офлайн. Telegram-планировщик,
+передача сообщений героев и независимое ожидание двух дел ещё не реализованы.
+Точная следующая работа — [добавление персонажа](adding-character.md).

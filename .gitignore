@@ -15,3 +15,21 @@ tickets/
 
 # Internal planning stays local until the independent private project exists.
 .local/
+
+# Keep per-character live state separate from portable source packages.
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.log
+auth.json
+bot-token.json
+*.pem
+*.p12
+characters/*/memory/
+characters/*/state/
+characters/*/inbox.jsonl
+characters/*/outbox.jsonl

@@ -33,14 +33,22 @@ class Laboratory:
         value = self.store.monitor()
         value.update(csrf=self.csrf, model_enabled=self.session is not None,
                      pid=os.getpid(),
-                     busy=self.busy, failure=self.failure,
+                     busy=self.busy, failure=self.failure or self.store.get('review_notice'),
                      max_calls=self.session.max_calls if self.session else 24,
                      mode='model-review' if self.session else 'preparation',
                      model=getattr(self.session.backend, 'model', None) if self.session else None)
         value['autonomous_posts'] = bool(self.session and self.session.autonomous_posts)
         value['free_intentions'] = bool(self.session and self.session.free_intentions)
+        value['personal_life'] = bool(self.session.personal_life if self.session else
+                                      value['cycles'] and value['cycles'][0]['value'].get('personal_life'))
+        value['research_enabled'] = bool(self.session and self.session.research_enabled)
         value['night'] = self.store.get('night')
         return value
+
+    def prepare(self, actor_id, minutes):
+        if self.session and self.session.personal_life:
+            return self.session.prepare(actor_id, minutes)
+        return self.store.prepare(actor_id, minutes)
 
     def step(self, cycle_id, phase, revision):
         with self.lock:
@@ -123,7 +131,7 @@ def handler(lab):
                 if self.path == '/api/settings' and set(value) == {'settings', 'revision'}:
                     lab.store.set_settings(value['settings'], value['revision'])
                 elif self.path == '/api/prepare' and set(value) == {'actor_id', 'minutes'}:
-                    lab.store.prepare(value['actor_id'], value['minutes'])
+                    lab.prepare(value['actor_id'], value['minutes'])
                 elif self.path == '/api/action' and set(value) == {'paused'}:
                     lab.store.pause(value['paused'])
                 elif self.path == '/api/step' and set(value) == {'cycle_id', 'phase', 'revision'}:
@@ -158,6 +166,8 @@ def main(argv=None):
     parser.add_argument('--background', action='store_true', help='detach the laboratory from the terminal and wait for readiness')
     parser.add_argument('--autonomous-posts', action='store_true', help='let the character choose local channel drafts after outcomes')
     parser.add_argument('--free-intentions', action='store_true', help='write a private intention before extracting world action metadata')
+    parser.add_argument('--personal-life', action='store_true', help='choose before the world event and update lasting personal matters after the outcome')
+    parser.add_argument('--research', action='store_true', help='allow character-chosen bounded native web research')
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
@@ -177,6 +187,10 @@ def main(argv=None):
             command += ['--autonomous-posts']
         if args.free_intentions:
             command += ['--free-intentions']
+        if args.personal_life:
+            command += ['--personal-life']
+        if args.research:
+            command += ['--research']
         fd = os.open(destination / 'lab.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
@@ -209,20 +223,28 @@ def main(argv=None):
             raise
     store = WorldStore(destination)
     backend = None
+    research_backend = None
+    transport_owner = None
     server = None
     try:
         session = None
         if args.live:
-            from .proxy import status
+            from .proxy import status, SharedTransport
             from .world_backend import WorldBackend
             if not status()['enabled']:
                 raise ValueError('configured proxy required for model review')
             persona, contract = args.persona.read_text(), args.speech_contract.read_text()
             if not persona.strip() or not contract.strip():
                 raise ValueError('empty personality/contract')
-            backend = WorldBackend(destination / 'transport')
+            transport_owner = SharedTransport()
+            backend = WorldBackend(destination / 'transport', transport_factory=transport_owner.borrow)
+            if args.research:
+                research_backend = WorldBackend(destination / 'research-transport', research_host=True,
+                                                transport_factory=transport_owner.borrow, max_known_tokens=50000)
             session = WorldSession(store, backend, {'garik': persona}, contract, args.max_calls,
-                                   autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions)
+                                   autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
+                                   personal_life=args.personal_life, research_enabled=args.research,
+                                   research_backend=research_backend)
         lab = Laboratory(store, session)
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)
@@ -249,6 +271,10 @@ def main(argv=None):
             server.server_close()
         if backend:
             backend.close()
+        if research_backend:
+            research_backend.close()
+        if transport_owner:
+            transport_owner.close()
         store.close()
 
 

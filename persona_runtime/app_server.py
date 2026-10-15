@@ -225,11 +225,15 @@ class AppServerBackend(CodexBackend):
     supports_sessions = True
     supports_research = True
 
-    def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000, transport_factory=None, minimal_tools=False):
+    def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000, transport_factory=None, minimal_tools=False,
+                 code_mode_host=None):
         super().__init__(binary, model, timeout)
         if type(minimal_tools) is not bool:
             raise ValueError('invalid minimal tool setting')
         self.minimal_tools = minimal_tools
+        if code_mode_host is not None and type(code_mode_host) is not bool:
+            raise ValueError('invalid code-mode host setting')
+        self.code_mode_host = not minimal_tools if code_mode_host is None else code_mode_host
         if type(max_known_tokens) is not int or not 1000 <= max_known_tokens <= 10_000_000:
             raise ValueError('invalid persistent token budget')
         self.max_known_tokens = max_known_tokens
@@ -264,7 +268,7 @@ class AppServerBackend(CodexBackend):
             'sqlite_home':str(self.directory / 'state'), 'log_dir':str(self.directory / 'logs'),
             'thread_unload_delay_secs':0, 'agents.enabled':False,
             'tools.experimental_request_user_input.enabled':False, 'tools.update_plan.enabled':False,
-            'features.skip_host_skill_discovery':True, 'features.code_mode_host':not self.minimal_tools,
+            'features.skip_host_skill_discovery':True, 'features.code_mode_host':self.code_mode_host,
             # This is enforced inside Codex, before another tool-loop iteration.
             # It counts uncached input + output, so the host still accounts for
             # all input/cached tokens independently and imposes a wall deadline.

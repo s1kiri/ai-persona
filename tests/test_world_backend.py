@@ -16,8 +16,9 @@ from test_world import event
 
 
 class Client:
-    def __init__(self, answer, unexpected=False):
+    def __init__(self, answer, unexpected=False, web_calls=0):
         self.answer, self.unexpected = answer, unexpected
+        self.web_calls = web_calls
         self.events, self.calls = deque(), []
         self.serial = 0
 
@@ -34,6 +35,9 @@ class Client:
                 'type': 'reasoning', 'id': 'reasoning', 'text': 'PRIVATE-CHAIN-MUST-NOT-BE-EXPORTED'}}})
             if self.unexpected:
                 self.events.append({'method': 'item/started', 'params': {**common, 'item': {'type': 'functionCall'}}})
+            for i in range(self.web_calls):
+                self.events.append({'method': 'item/completed', 'params': {**common, 'item': {
+                    'type': 'webSearch', 'id': 'web-'+str(i), 'action': {'type': 'search', 'query': 'Synthetic'}}}})
             text = json.dumps(self.answer) if isinstance(self.answer, dict) else self.answer
             self.events.append({'method': 'item/completed', 'params': {**common, 'item': {'type': 'agentMessage', 'id': 'answer', 'text': text}}})
             self.events.append({'method': 'turn/completed', 'params': {**common, 'turn': {'id': 'synthetic-turn', 'status': 'completed'}}})
@@ -111,14 +115,60 @@ class BackendTests(unittest.TestCase):
         def local_only(environment, **kwargs):
             yield environment, None
         with patch('persona_runtime.app_server.StdioClient', Startup), patch('persona_runtime.app_server.transport', local_only), patch('persona_runtime.app_server.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='codex-cli '+PINNED_VERSION)):
-            for cls, suffix in [(WorldBackend, 'minimal'), (AppServerBackend, 'production')]:
-                backend = cls(Path(self.temp.name)/suffix)
+            for cls, suffix in [(WorldBackend, 'minimal'), (AppServerBackend, 'production'), (WorldBackend, 'search')]:
+                backend = cls(Path(self.temp.name)/suffix, **({'research_host': True} if suffix == 'search' else {}))
                 backend._start()
                 backend.close()
         self.assertIn('features.code_mode_host=false', commands[0])
         self.assertTrue(any(v.startswith('skills.config=') for v in commands[0]))
         self.assertIn('features.code_mode_host=true', commands[1])
         self.assertFalse(any(v.startswith('skills.config=') for v in commands[1]))
+        self.assertIn('features.code_mode_host=true', commands[2])
+        self.assertTrue(any(v.startswith('skills.config=') for v in commands[2]))
+
+    def test_research_enables_only_native_web_and_requires_completed_receipts(self):
+        self.backend.research_host = True
+        value = {'task_id': 'synthetic', 'facts': [], 'caveats': ['Synthetic inconclusive search.']}
+        self.backend.client = Client(value, web_calls=1)
+        answer, _ = self.backend.generate('research', 'Synthetic research', {'task_id': 'synthetic', 'question': 'Synthetic'})
+        self.assertEqual(len(answer['tool_events']), 1)
+        start = next(p for m, p in self.backend.client.calls if m == 'thread/start')
+        self.assertEqual(start['config']['web_search'], 'live')
+        self.assertTrue(start['config']['features.code_mode_host'])
+        self.assertNotIn('PRIVATE-CHAIN', json.dumps(answer))
+        for count in (0, 3):
+            self.backend.client = Client(value, web_calls=count)
+            with self.assertRaises(CodexError):
+                self.backend.generate('research', 'Synthetic research', {'task_id': 'synthetic', 'question': 'Synthetic'})
+            self.assertEqual(sum(m == 'turn/start' for m, _ in self.backend.client.calls), 1)
+
+    def test_search_cannot_accidentally_run_in_the_character_process(self):
+        self.backend.client = Client({'task_id': 'synthetic', 'facts': [], 'caveats': []}, web_calls=1)
+        with self.assertRaises(ValueError):
+            self.backend.generate('research', 'Research', {'task_id': 'synthetic'})
+        self.assertFalse(self.backend.client.calls)
+
+    def test_character_and_search_borrow_one_transport_without_reopening_keychain(self):
+        from persona_runtime.proxy import SharedTransport, ProxyError
+        opened, closed = [], []
+        @contextmanager
+        def transport(environment, timeout):
+            opened.append(True)
+            try: yield {'HTTPS_PROXY': 'http://127.0.0.1:1'}, object()
+            finally: closed.append(True)
+        owner = SharedTransport()
+        a = WorldBackend(Path(self.temp.name)/'voice', transport_factory=owner.borrow)
+        b = WorldBackend(Path(self.temp.name)/'web', research_host=True, transport_factory=owner.borrow)
+        with patch('persona_runtime.proxy.transport', transport):
+            with a.transport_factory({}, timeout=10) as first:
+                with b.transport_factory({}, timeout=10) as second:
+                    self.assertIs(first[1], second[1])
+            self.assertEqual(len(opened), 1)
+            self.assertEqual(closed, [])
+            owner.close()
+            self.assertEqual(len(closed), 1)
+            with self.assertRaises(ProxyError):
+                with owner.borrow({}): pass
 
 
 if __name__ == '__main__':

@@ -36,7 +36,7 @@ EVENT_SCHEMA = obj({'beat': enum(BEATS), 'domain': enum(DOMAINS),
                     'visible_to': array(string(80), 8),
                     'surprise': {'type': 'integer', 'minimum': 0, 'maximum': 100},
                     **PATCH})
-CHOICE_SCHEMA = obj({'desire': string(500), 'kind': enum(('act', 'wait', 'rest')),
+CHOICE_SCHEMA = obj({'desire': string(500), 'kind': enum(('act', 'wait', 'rest', 'research')),
                      'action': string(900), 'entity_ids': array(string(80), 6),
                      'note': string(800), 'reaction': string(600),
                      'undertakings': array(obj({'id': string(80), 'want': string(500),
@@ -51,7 +51,13 @@ OUTCOME_SCHEMA = obj({'status': enum(('succeeded', 'partial', 'failed', 'pending
                       **PATCH})
 SHARE_SCHEMA = obj({'decision': enum(('post', 'keep')), 'focus': string(600),
                     'source_ids': array(string(80), 6)})
-SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA, 'share': SHARE_SCHEMA}
+CONCERN = obj({'id': string(80), 'text': string(500), 'stake': string(300),
+               'next_hint': string(300), 'status': enum(('active', 'waiting', 'closed')),
+               'source_ids': array(string(80), 4)})
+EXPERIENCE_SCHEMA = obj({'note': string(800), 'concerns': array(CONCERN, 3),
+                          'director_signal': string(300)})
+SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA,
+           'share': SHARE_SCHEMA, 'experience': EXPERIENCE_SCHEMA}
 
 
 def clock_at(minute):
@@ -157,8 +163,18 @@ def validate_patch(value, state, settings):
 
 def validate_result(stage, value, state, brief):
     validate_shape(value, SCHEMAS[stage])
+    if stage == 'experience':
+        ids = set()
+        for concern in value['concerns']:
+            identifier(concern['id'])
+            if concern['id'] in ids or not concern['text'].strip() or not concern['source_ids']:
+                raise ValueError('personal concern needs identity, text and evidence')
+            ids.add(concern['id'])
+            if not set(concern['source_ids']) <= set(state.get('personal_evidence_ids', [])):
+                raise ValueError('personal concern refers to an unobserved source')
+        return value
     if stage == 'share':
-        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome') and
+        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome', 'research') and
                      brief['actor_id'] in e['value'].get('visible_to', [e['actor_id']])}
         if not set(value['source_ids']) <= available:
             raise ValueError('post source must be an observed world event')

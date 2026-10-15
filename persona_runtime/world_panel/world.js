@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
-const fields=['events_per_hour','surprise','continuity','quiet','max_threads','post_cooldown_minutes'];
-const phaseNames={world:'Обстоятельства',impulse:'Записка перед поступком',choice:'Выбор Гарика',outcome:'Последствия',speech:'Речь Гарика',share:'Решение о посте',post:'Пост Гарика',done:'Эпизод завершён'};
+const fields=['events_per_hour','surprise','continuity','quiet','max_threads','post_cooldown_minutes','director_empathy'];
+const phaseNames={experience:'Что осталось важным',research:'Поиск и чтение',world:'Обстоятельства',impulse:'Записка перед поступком',choice:'Выбор Гарика',outcome:'Последствия',speech:'Речь Гарика',share:'Решение о посте',post:'Пост Гарика',done:'Эпизод завершён'};
 const domainNames={home:'Дом',work:'Работа',food:'Еда',people:'Отношения',leisure:'Увлечения',city:'Город',learning:'Находки',money:'Деньги',rest:'Отдых'};
 let state=null,dirty=false,settingsRevision=null,pending=false;
 const nightFields=['hours','interval_minutes','virtual_minutes','max_calls','speech_every'];
@@ -56,12 +56,17 @@ function render(value){
  for(const t of [...value.threads].sort((a,b)=>(a.status==='closed')-(b.status==='closed'))){const card=el('article',undefined,'story'+(t.status==='closed'?' closed':''));card.append(el('strong',t.title),el('p',t.situation),el('small',`${domainNames[t.domain]} · ${t.status==='closed'?'Завершена':t.status==='waiting'?'Ожидание':'Продолжается'}${t.due_minute!==null?' · '+clock(t.due_minute):''}`));if(t.open_question)card.append(el('p',t.open_question));threads.append(card);}
  const timeline=$('timeline');timeline.replaceChildren();
  if(!value.history.length)timeline.append(el('p','Пока нет событий. Это пустая лаборатория, не пример ответа модели.','empty'));
- for(const event of [...value.history].reverse()){const card=el('article',undefined,'timeline-item'),row=event.value;const text=event.stage==='choice'?row.action:['speech','post','impulse'].includes(event.stage)?row.text:event.stage==='share'?(row.decision==='post'?'Хочу рассказать: '+row.focus:'Оставлю при себе'):row.observation;card.append(el('div',`${clock(event.minute)} · ${phaseNames[event.stage]}${event.stage==='speech'?' · черновик':''}`,'meta'),el('p',text));if(row.world_note){const details=el('details');details.append(el('summary','Заметка мира · ненаблюдаемая деталь вымысла'),el('p',row.world_note));card.append(details);}timeline.append(card);}
+ for(const event of [...value.history].reverse()){const card=el('article',undefined,'timeline-item'),row=event.value;const text=event.stage==='choice'?row.action:['speech','post','impulse'].includes(event.stage)?row.text:event.stage==='share'?(row.decision==='post'?'Хочу рассказать: '+row.focus:'Оставлю при себе'):event.stage==='experience'?(row.note||'Без новой личной записи.'):event.stage==='research'?row.facts.map(f=>f.claim+' ('+f.url+')').join('\n')||'Надёжных сведений не найдено.':row.observation;card.append(el('div',`${clock(event.minute)} · ${phaseNames[event.stage]}${event.stage==='speech'?' · черновик':''}`,'meta'),el('p',text));if(row.world_note){const details=el('details');details.append(el('summary','Заметка мира · ненаблюдаемая деталь вымысла'),el('p',row.world_note));card.append(details);}timeline.append(card);}
  const feed=$('post-feed');feed.replaceChildren();$('posts-mode').textContent=value.autonomous_posts?'Гарик сам выбирает повод. Сохранено локально, внешней отправки нет.':'Самостоятельный выбор постов сейчас выключен. Прежние черновики сохранены.';
  for(const p of value.posts||[]){const card=el('article',undefined,'saved-note');card.append(el('small',clock(p.minute)+' · самостоятельный черновик'),el('p',p.value.text));feed.append(card);}
  if(!(value.posts||[]).length)feed.append(el('p','Самостоятельных черновиков пока нет. Можно прожить событие и оставить его при себе.','empty'));
  const undertakings=$('undertakings');undertakings.replaceChildren();for(const u of value.undertakings||[]){const card=el('article',undefined,'saved-note');card.append(el('small',u.status==='closed'?'Завершил или отпустил':u.status==='waiting'?'На потом':'Хочу продолжить'),el('p',u.want));undertakings.append(card);}
  if(!(value.undertakings||[]).length)undertakings.append(el('p','Пока без сохранённых затей.','empty'));
+ const concerns=$('concerns');concerns.replaceChildren();
+ for(const c of value.concerns||[]){const card=el('article',undefined,'saved-note');card.append(el('small',c.status==='closed'?'Отпустил или завершил':c.status==='waiting'?'Вернётся позже':'Занимает сейчас'),el('p',c.text));if(c.stake)card.append(el('p',c.stake));if(c.next_hint)card.append(el('small','Возможное продолжение: '+c.next_hint));concerns.append(card);}
+ if(!(value.concerns||[]).length)concerns.append(el('p','Пока без личных незаконченных тем.','empty'));
+ const signals=$('director-signals');signals.replaceChildren();for(const signal of value.director_signals||[]){signals.append(el('p',signal.signal||'Без сигнала режиссёру.'));}
+ $('cycle-flow').textContent=value.personal_life?'Своё намерение → обстоятельства → поступок и результат → личный опыт':'Обстоятельства → выбор → последствия';
  const notes=$('notes');notes.replaceChildren();if(!value.notes.length)notes.append(el('p','Пока без заметок.','empty'));
  for(const n of value.notes){const card=el('article',undefined,'saved-note');card.append(el('small',`${clock(n.minute)} · ${value.actors.find(a=>a.id===n.actor_id)?.name||n.actor_id}`),el('p',n.text));notes.append(card);}
  const entities=$('entities');entities.replaceChildren();for(const e of value.entities){const card=el('article',undefined,'entity');card.append(el('strong',e.name),el('p',e.condition));entities.append(card);}

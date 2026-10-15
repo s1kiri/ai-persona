@@ -9,7 +9,7 @@ function setup(){
  const document={hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},createElement:element};
  const ctx=vm.createContext({document,console,Intl,Date,setInterval(){},fetch(path,options){if(!options?.method)return new Promise(()=>{});return new Promise((resolve,reject)=>posts.push({path,options,reject,resolve:(value,ok=true)=>resolve({ok,json:async()=>value})}));}});
  vm.runInContext(fs.readFileSync('persona_runtime/world_panel/world.js','utf8'),ctx);
- const sample={csrf:'synthetic',model_enabled:false,paused:true,busy:false,failure:null,minute:0,settings_revision:0,settings:{events_per_hour:2,surprise:45,continuity:70,quiet:30,max_threads:4,post_cooldown_minutes:90},actors:[{id:'garik',name:'Гарик'}],threads:[],entities:[],history:[],notes:[],cycles:[],calls:[],call_count:0,max_calls:24};
+ const sample={csrf:'synthetic',model_enabled:false,paused:true,busy:false,failure:null,minute:0,settings_revision:0,settings:{events_per_hour:2,surprise:45,continuity:70,quiet:30,max_threads:4,post_cooldown_minutes:90,director_empathy:50},actors:[{id:'garik',name:'Гарик'}],threads:[],entities:[],history:[],notes:[],cycles:[],calls:[],call_count:0,max_calls:24};
  ctx.sample=sample;vm.runInContext('render(sample)',ctx);
  return {ctx,sample,posts,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
 }
@@ -52,4 +52,12 @@ test('autonomous drafts and personal reactions are rendered as literal text',()=
  assert.equal(t.el('undertakings').children[0].children[1].textContent,text);
  assert.equal(t.el('reaction').textContent,text);
  assert.match(t.el('posts-mode').textContent,/сам выбирает/);
+});
+
+test('personal matters and director signal stay literal and distinct in the console',()=>{
+ const t=setup();const text='<script>private</script>';t.ctx.markup=text;
+ t.run('render({...sample,personal_life:true,concerns:[{text:markup,stake:markup,next_hint:markup,status:"active"}],director_signals:[{signal:"Brief interest"}]})');
+ assert.equal(t.el('concerns').children[0].children[1].textContent,text);
+ assert.equal(t.el('director-signals').children[0].textContent,'Brief interest');
+ assert.match(t.el('cycle-flow').textContent,/Своё намерение/);
 });

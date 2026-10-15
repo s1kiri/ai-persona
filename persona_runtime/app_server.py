@@ -137,7 +137,8 @@ def remember_context(entry, context, decision):
 
 
 class StdioClient:
-    def __init__(self, command, environment, directory):
+    def __init__(self, command, environment, directory, max_message_chars=2_000_000):
+        self.max_message_chars = max_message_chars
         self.messages, self.buffer = queue.Queue(maxsize=128), deque()
         self.stopping = threading.Event()
         self.serial = 0
@@ -156,9 +157,9 @@ class StdioClient:
     def _read(self):
         try:
             while True:
-                line = self.process.stdout.readline(2_000_001)
+                line = self.process.stdout.readline(self.max_message_chars+1)
                 if not line: break
-                if len(line) > 2_000_000:
+                if len(line) > self.max_message_chars:
                     self._enqueue({'fatal':True}); break
                 try: value = json.loads(line)
                 except ValueError:
@@ -253,6 +254,12 @@ class AppServerBackend(CodexBackend):
 
     def _save(self): save_private(self.path, self.state)
 
+    def _feature_permissions(self):
+        return {name: False for name in DISABLED}
+
+    def _make_client(self, command, environment, workspace):
+        return StdioClient(command, environment, workspace)
+
     def _start(self):
         if self.client: return 0
         started = time.monotonic()
@@ -280,7 +287,7 @@ class AppServerBackend(CodexBackend):
             'web_search':'disabled', 'model_provider':'openai',
             'model_post_turn_compact_threshold_percent':0,
             'model_auto_compact_token_limit':1_000_000_000}
-        flags.update({'features.'+name:False for name in DISABLED})
+        flags.update({'features.'+name:enabled for name, enabled in self._feature_permissions().items()})
         # Startup config is strict: ignored/unknown safety switches are a failure.
         command = [self.binary, '--no-daemon', 'app-server', '--strict-config', '--listen', 'stdio://']
         for key, value in flags.items(): command += ['-c', key+'='+json.dumps(value)]
@@ -294,7 +301,7 @@ class AppServerBackend(CodexBackend):
         try:
             environment, bridge = stack.enter_context((self.transport_factory or transport)(environment, timeout=self.timeout))
             self._proxy_bridge = bridge
-            client = StdioClient(child_command(command, bridge), environment, str(self.workspace))
+            client = self._make_client(child_command(command, bridge), environment, str(self.workspace))
             stack.callback(client.close)
             client.rpc('initialize', {'clientInfo':{'name':'garik_runtime', 'version':'0.2'},
                 'capabilities':{'experimentalApi':True}})
@@ -307,8 +314,8 @@ class AppServerBackend(CodexBackend):
                 raise CodexError('Inherited Codex instruction/provider overrides require an isolated configuration')
             if config.get('model_providers',{}).get('openai'):
                 raise CodexError('Inherited built-in provider override requires an isolated configuration')
-            for name in DISABLED:
-                if config.get('features', {}).get(name) is not False:
+            for name, enabled in self._feature_permissions().items():
+                if config.get('features', {}).get(name) is not enabled:
                     raise CodexError('Codex did not apply the restricted tool configuration')
             # Dotted overrides change only enabled, preserving the transport
             # configuration. Replacing the nested table drops required fields.

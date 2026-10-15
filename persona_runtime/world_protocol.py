@@ -51,6 +51,8 @@ OUTCOME_SCHEMA = obj({'status': enum(('succeeded', 'partial', 'failed', 'pending
                       **PATCH})
 SHARE_SCHEMA = obj({'decision': enum(('post', 'reply', 'keep')), 'focus': string(600),
                     'source_ids': array(string(80), 6)})
+CHANNEL_SCHEMA = obj({'decision': enum(('post', 'reply', 'keep')), 'text': string(12000),
+                      'source_ids': array(string(80), 6)})
 CONCERN = obj({'id': string(80), 'text': string(500), 'stake': string(300),
                'next_hint': string(300), 'status': enum(('active', 'waiting', 'closed')),
                'source_ids': array(string(80), 4)})
@@ -67,7 +69,7 @@ HOOK = obj({'id': string(80), 'anchor_ids': array(string(80), 3),
 HORIZON_SCHEMA = obj({'hooks': {**array(HOOK, 3), 'minItems': 1}})
 SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA,
            'share': SHARE_SCHEMA, 'experience': EXPERIENCE_SCHEMA, 'audience': AUDIENCE_SCHEMA,
-           'horizon': HORIZON_SCHEMA}
+           'horizon': HORIZON_SCHEMA, 'channel': CHANNEL_SCHEMA}
 
 
 def clock_at(minute):
@@ -191,14 +193,15 @@ def validate_result(stage, value, state, brief):
             if not set(concern['source_ids']) <= set(state.get('personal_evidence_ids', [])):
                 raise ValueError('personal concern refers to an unobserved source')
         return value
-    if stage == 'share':
-        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome', 'research', 'audience') and
+    if stage in ('share', 'channel'):
+        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome', 'research', 'audience', 'post') and
                      brief['actor_id'] in e['value'].get('visible_to', [e['actor_id']])}
         available.update(state.get('public_evidence_ids', []))
         if not set(value['source_ids']) <= available:
-            raise ValueError('post source must be an observed world event')
-        if value['decision'] != 'keep' and (not value['focus'].strip() or not value['source_ids']):
-            raise ValueError('post needs a personal focus and a stored event')
+            raise ValueError('channel source must be observed or an own public expression')
+        expression = value['text'] if stage == 'channel' else value['focus']
+        if value['decision'] != 'keep' and not expression.strip():
+            raise ValueError('channel expression must be nonempty')
         return value
     if not value.get('observation', value.get('action', '')).strip():
         raise ValueError('empty observation/action')

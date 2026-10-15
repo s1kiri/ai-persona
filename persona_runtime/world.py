@@ -293,6 +293,8 @@ class WorldStore:
                 entry['simulated_comments'] = value
             elif row['actor_id'] == actor_id and row['stage'] == 'experience':
                 entry['personal_record'] = value
+            elif row['actor_id'] == actor_id and row['stage'] == 'post':
+                entry['public_expression'] = value['text']
             elif row['actor_id'] == actor_id and row['stage'] in ('impulse', 'choice'):
                 entry['text'] = value.get('text', value.get('action', ''))
             else:
@@ -478,6 +480,7 @@ class WorldStore:
                 if stage == 'experience':
                     state['personal_evidence_ids'] = self.personal_evidence_ids(cycle['actor_id'])
                 checked = value
+                direct = stage == 'share' and cycle['value'].get('direct_channel', False)
                 if stage == 'choice' and cycle['value'].get('lossless_intentions'):
                     from .world_intent import adapt
                     checked = {k: v for k, v in value.items() if k not in ('intent_parts', 'recovery')}
@@ -491,7 +494,7 @@ class WorldStore:
                         if (prior['actor_id'] != cycle['actor_id'] or prior['status'] not in ('abandoned', 'blocked') or
                                 'choice' not in prior['value']['results'] or 'outcome' in prior['value']['results']):
                             raise ValueError('recovery must refer to own interrupted attempt')
-                validate_result(stage, checked, state, brief)
+                validate_result('channel' if direct else stage, checked, state, brief)
             event_id = cycle['id'] + '-' + stage
             if stage == 'horizon':
                 for hook in value['hooks']:
@@ -537,23 +540,27 @@ class WorldStore:
             if stage == 'impulse':
                 stored['private'] = True
             if stage == 'post':
-                stored.update(surface='channel_draft', autonomous=True)
                 share = cycle['value']['results']['share']
-                stored['source_ids'] = share['source_ids']
-                if share['decision'] == 'reply':
-                    target = next(e for e in self.channel_context(cycle['actor_id'])
-                                  if e['id'] in share['source_ids'] and e['stage'] == 'audience')
-                    stored.update(surface='comment_reply', reply_to=target['value']['post_id'],
-                                  audience_id=target['id'])
+                stored = self.channel_message(value, share, cycle['actor_id'])
             if stage == 'audience':
                 stored = {**value, 'simulated': True}
             self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
                             (event_id, cycle['id'], cycle['actor_id'], stage, self.get('minute'), json.dumps(stored, ensure_ascii=False)))
             cycle['value']['results'][stage] = value
+            if stage == 'share' and cycle['value'].get('direct_channel') and value['decision'] != 'keep':
+                # The text itself is the character's choice. No editorial
+                # summary or second speech call stands between it and delivery.
+                posted = self.channel_message(value['text'], value, cycle['actor_id'])
+                posted['direct'] = True
+                self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
+                                (cycle['id']+'-post', cycle['id'], cycle['actor_id'], 'post', self.get('minute'), json.dumps(posted, ensure_ascii=False)))
+                cycle['value']['results']['post'] = value['text']
             next_phase = {'horizon': 'world', 'world': after_world, 'impulse': 'choice', 'choice': after_choice, 'outcome': after_outcome,
                           'research': 'outcome', 'experience': after_experience,
                           'speech': 'done', 'post': 'done', 'audience': after_audience,
                           'share': 'post' if stage == 'share' and value['decision'] in ('post', 'reply') else 'done'}[stage]
+            if stage == 'share' and cycle['value'].get('direct_channel'):
+                next_phase = 'done'
             status = 'complete' if next_phase == 'done' else 'ready'
             revision = state['revision'] + 1
             self.put('revision', revision)
@@ -566,6 +573,15 @@ class WorldStore:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
         return True
+
+    def channel_message(self, text, share, actor):
+        posted = {'text': text, 'draft': True, 'surface': 'channel_draft',
+                  'autonomous': True, 'source_ids': share['source_ids']}
+        if share['decision'] == 'reply':
+            target = next(e for e in self.channel_context(actor)
+                          if e['id'] in share['source_ids'] and e['stage'] == 'audience')
+            posted.update(surface='comment_reply', reply_to=target['value']['post_id'], audience_id=target['id'])
+        return posted
 
     def recover_experience(self, cycle_id, after_experience='done'):
         """Explicit host review of a saved note; no action/model replay or usage rewrite."""
@@ -594,7 +610,7 @@ class WorldStore:
             if row['stage'] in ('world', 'outcome'):
                 if actor in value.get('visible_to', [row['actor_id']]):
                     ids.append(row['id'])
-            elif row['actor_id'] == actor and row['stage'] in ('choice', 'impulse', 'research', 'audience', 'experience'):
+            elif row['actor_id'] == actor and row['stage'] in ('choice', 'impulse', 'research', 'audience', 'experience', 'post'):
                 ids.append(row['id'])
         return ids
 
@@ -605,7 +621,7 @@ class WorldStore:
             value = json.loads(row['value'])
             if row['stage'] in ('world', 'outcome') and actor in value.get('visible_to', [row['actor_id']]):
                 ids.append(row['id'])
-            elif row['actor_id'] == actor and row['stage'] in ('research', 'audience'):
+            elif row['actor_id'] == actor and row['stage'] in ('research', 'audience', 'post'):
                 ids.append(row['id'])
         return ids
 
@@ -699,7 +715,7 @@ class WorldSession:
     """One recorded stage per step; optional personal life, research and drafts."""
     def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24, autonomous_posts=False, free_intentions=False,
                  personal_life=False, research_enabled=False, research_backend=None, lossless_intentions=False,
-                 simulated_audience=False, active_world=False):
+                 simulated_audience=False, active_world=False, direct_channel=False):
         if type(max_calls) is not int or not 1 <= max_calls <= 200:
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
@@ -713,6 +729,9 @@ class WorldSession:
         self.lossless_intentions = lossless_intentions
         self.simulated_audience = simulated_audience
         self.active_world = active_world
+        self.direct_channel = direct_channel
+        if direct_channel and not autonomous_posts:
+            raise ValueError('direct channel requires voluntary channel decisions')
         if active_world and not personal_life:
             raise ValueError('active world requires personal continuity')
         if simulated_audience and not personal_life:
@@ -724,6 +743,9 @@ class WorldSession:
         with self.store.lock, self.store.db:
             cycle = self.store.prepare(actor_id, minutes, draw=draw, personal_life=self.personal_life,
                                        lossless_intentions=self.lossless_intentions)
+            cycle['value']['direct_channel'] = self.direct_channel
+            self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',
+                                  (json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if self.active_world:
                 from .world_hooks import pending_hooks
                 state = self.store.state()
@@ -740,7 +762,7 @@ class WorldSession:
 
     def step(self, cycle_id):
         from .world_prompts import (WORLD, CHOICE, OUTCOME, SPEECH_CONTEXT, SHARE, POST,
-                                    IMPULSE, INTENT_ADAPTER, PERSONAL_WAKE, EXPERIENCE, SEARCH_CHOICE, AUDIENCE)
+                                    IMPULSE, INTENT_ADAPTER, PERSONAL_WAKE, EXPERIENCE, SEARCH_CHOICE, AUDIENCE, DIRECT_CHANNEL)
         if self.store.cycle(cycle_id)['actor_id'] not in self.actor_prompts:
             raise WorldConflict('actor has no configured personality')
         call_id, cycle = self.store.claim(cycle_id, self.max_calls)
@@ -761,6 +783,9 @@ class WorldSession:
             if lossless != self.lossless_intentions:
                 raise WorldConflict('intent transfer mode changed during the episode')
             active = cycle['value'].get('active_world', False)
+            direct = cycle['value'].get('direct_channel', False)
+            if direct != self.direct_channel:
+                raise WorldConflict('channel mode changed during the episode')
             if active != self.active_world and stage not in ('experience', 'share', 'post'):
                 raise WorldConflict('world order changed during the episode')
             clock = clock_at(state['minute'])
@@ -827,6 +852,7 @@ class WorldSession:
                            'events': [{'id': e['id'], 'minute': e['minute'],
                                        **({'research': e['value']} if e['stage'] == 'research' else
                                           {'simulated_comments': e['value']} if e['stage'] == 'audience' else
+                                          {'public_expression': e['value']['text']} if e['stage'] == 'post' else
                                           {'observation': e['value']['observation']})}
                                       for e in observed],
                            'channel_context': self.store.channel_context(actor),
@@ -846,6 +872,11 @@ class WorldSession:
                     payload['attempt'] = results['choice']
                 if stage == 'share':
                     payload['previous_posts'] = [e['value']['text'] for e in self.store.monitor()['posts'] if e['actor_id'] == actor][:4]
+                    if direct:
+                        instruction = self.actor_prompts[actor]+'\n\n'+self.speech_contract+'\n\n'+DIRECT_CHANNEL
+                        payload['surface'] = 'own_channel'
+                        payload['personal_voice'] = {'before_act': results.get('impulse', ''),
+                                                     'after_act': results.get('experience', {}).get('note', '')}
                 if stage == 'speech':
                     instruction += '\n\n' + SPEECH_CONTEXT
                     with self.store.lock:
@@ -857,7 +888,8 @@ class WorldSession:
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
             self.store.save_input(cycle_id, payload)
-            answer, usage = active_backend.generate('intent' if stage == 'choice' and lossless else stage, instruction, payload)
+            output_role = 'intent' if stage == 'choice' and lossless else 'channel' if stage == 'share' and direct else stage
+            answer, usage = active_backend.generate(output_role, instruction, payload)
             if stage == 'choice' and lossless:
                 from .world_intent import adapt
                 answer = adapt(answer, results['impulse'])

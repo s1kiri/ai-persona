@@ -38,6 +38,8 @@ class Laboratory:
                      mode='model-review' if self.session else 'preparation',
                      model=getattr(self.session.backend, 'model', None) if self.session else None)
         value['autonomous_posts'] = bool(self.session and self.session.autonomous_posts)
+        value['direct_channel'] = bool(self.session.direct_channel if self.session else
+                                       value['cycles'] and value['cycles'][0]['value'].get('direct_channel'))
         value['free_intentions'] = bool(self.session and self.session.free_intentions)
         value['personal_life'] = bool(self.session.personal_life if self.session else
                                       value['cycles'] and value['cycles'][0]['value'].get('personal_life'))
@@ -169,6 +171,7 @@ def main(argv=None):
     parser.add_argument('--max-calls', type=int, default=24)
     parser.add_argument('--background', action='store_true', help='detach the laboratory from the terminal and wait for readiness')
     parser.add_argument('--autonomous-posts', action='store_true', help='let the character choose local channel drafts after outcomes')
+    parser.add_argument('--direct-channel', action='store_true', help='save the character channel text directly, without a separate editorial step')
     parser.add_argument('--free-intentions', action='store_true', help='write a private intention before extracting world action metadata')
     parser.add_argument('--personal-life', action='store_true', help='choose before the world event and update lasting personal matters after the outcome')
     parser.add_argument('--research', action='store_true', help='allow character-chosen bounded native web research')
@@ -190,6 +193,8 @@ def main(argv=None):
         parser.error('simulated readers require personal life')
     if args.active_world and not args.personal_life:
         parser.error('active world requires personal life')
+    if args.direct_channel and not args.autonomous_posts:
+        parser.error('direct channel requires autonomous posts')
     if args.background:
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         command = [sys.executable, '-m', 'persona_runtime.world_lab', '--data-dir', str(destination),
@@ -198,6 +203,8 @@ def main(argv=None):
             command += ['--live', '--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
         if args.autonomous_posts:
             command += ['--autonomous-posts']
+        if args.direct_channel:
+            command += ['--direct-channel']
         if args.free_intentions:
             command += ['--free-intentions']
         if args.personal_life:
@@ -264,7 +271,8 @@ def main(argv=None):
                                    autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
                                    personal_life=args.personal_life, research_enabled=args.research,
                                    research_backend=research_backend, lossless_intentions=args.lossless_intentions,
-                                   simulated_audience=args.simulated_audience, active_world=args.active_world)
+                                   simulated_audience=args.simulated_audience, active_world=args.active_world,
+                                   direct_channel=args.direct_channel)
         lab = Laboratory(store, session)
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)

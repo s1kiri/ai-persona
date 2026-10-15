@@ -77,3 +77,9 @@ test('fictional reader comments and Garik replies stay attached and literal',()=
  assert.equal(discussion.children[1].textContent,'Reader: <script>claim</script>');
  assert.equal(discussion.children[2].textContent,'Гарик: <b>reply</b>');
 });
+
+test('direct channel decisions show the exact text instead of a missing summary',()=>{
+ const t=setup();t.run('render({...sample,autonomous_posts:true,direct_channel:true,history:[{minute:30,stage:"share",value:{decision:"post",text:"блять",source_ids:[]}}]})');
+ assert.equal(t.el('timeline').children[0].children[1].textContent,'Хочу рассказать: блять');
+ assert.match(t.el('posts-mode').textContent,/без переписывания/);
+});

@@ -38,6 +38,9 @@ class API:
             if self.fail_send:
                 raise RuntimeError('sensitive URL must not escape: ' + TOKEN)
             return {'message_id': 100 + len(self.calls), 'chat': {'id': payload['chat_id']}}
+        if method=='setMessageReaction':
+            if self.fail_send:raise RuntimeError('synthetic reaction timeout')
+            return True
         raise AssertionError(method)
 
 
@@ -201,6 +204,34 @@ class TelegramTests(unittest.TestCase):
     def test_second_owner_cannot_consume_same_update_stream(self):
         with self.assertRaises(TelegramError):
             Connection(self.temp.name, API)
+
+    def test_reaction_targets_known_comment_and_duplicate_does_not_touch_network(self):
+        self.bind();self.receive(comment())
+        first=self.connection.react('reaction:51',51,'🤣')
+        calls=len(self.api.calls)
+        self.assertEqual(self.connection.react('reaction:51',51,'🤣')['status'],'sent')
+        self.assertEqual(calls,len(self.api.calls))
+        self.assertEqual(first['message_id'],51)
+        self.assertEqual(self.api.calls[-1][1]['reaction'],[{'type':'emoji','emoji':'🤣'}])
+        with self.assertRaises(TelegramError):self.connection.react('reaction:999',999,'🤣')
+
+    def test_failed_reaction_does_not_replay_after_restart(self):
+        self.bind();self.receive(comment());self.api.fail_send=True
+        with self.assertRaises(TelegramError):self.connection.react('reaction:51',51,'👍')
+        self.connection.close();self.connection=Connection(self.temp.name,API)
+        with self.assertRaises(TelegramError):self.connection.react('reaction:51',51,'👍')
+        self.assertFalse(self.connection.api.calls)
+
+    def test_unavailable_or_paid_reaction_not_dispatched(self):
+        self.bind();self.receive(comment())
+        original=self.api.call
+        def call(method,payload=None,**kwargs):
+            if method=='getChat':return {**GROUP,'available_reactions':[{'type':'emoji','emoji':'👍'}]}
+            return original(method,payload,**kwargs)
+        self.api.call=call
+        with self.assertRaises(TelegramError):self.connection.react('reaction:51',51,'🤣')
+        with self.assertRaises(TelegramError):self.connection.react('reaction:51',51,'⭐')
+        self.assertFalse([c for c in self.api.calls if c[0]=='setMessageReaction'])
 
 
 class Opener:

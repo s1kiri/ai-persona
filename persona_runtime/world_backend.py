@@ -15,7 +15,7 @@ class WorldBackend(AppServerBackend):
         super().__init__(*args, **kwargs, minimal_tools=True, code_mode_host=research_host)
 
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
@@ -47,6 +47,11 @@ class WorldBackend(AppServerBackend):
         if stage == 'photo_choice':
             from .world_photo import PHOTO_SCHEMA
             params['outputSchema'] = PHOTO_SCHEMA
+        if stage in ('live_channel','live_experience','social_review'):
+            from .channel_social import LIVE_CHANNEL,LIVE_EXPERIENCE,SOCIAL_REVIEW,constrained_io
+            schema={'live_channel':LIVE_CHANNEL,'live_experience':LIVE_EXPERIENCE,'social_review':SOCIAL_REVIEW}[stage]
+            params['outputSchema'],model_payload,source_decode=constrained_io(schema,payload)
+            params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
         turn = None
         try:
             if cancel and cancel.is_set():
@@ -101,6 +106,11 @@ class WorldBackend(AppServerBackend):
                 raise CodexError('world role returned no answer')
             answer = list(answers.values())[-1]
             self.last_output = answer[:12000]
+            if stage in ('live_channel','live_experience','social_review'):
+                from .channel_social import map_sources
+                decoded=map_sources(json.loads(answer),source_decode)
+                self.last_output=json.dumps(decoded,ensure_ascii=False)[:12000]
+                return decoded,self.last_usage
             if web:
                 if not web_events:
                     raise CodexError('research returned no actual native web receipt')

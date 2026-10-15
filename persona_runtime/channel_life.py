@@ -20,13 +20,17 @@ from .telegram_setup import Setup, LocalServer, handler as setup_handler
 
 MOSCOW = ZoneInfo('Europe/Moscow')
 START_DESIRE = 'Хочу завести свой Telegram-канал и делиться там своей жизнью: затеями, находками, мыслями и тем, что происходит. Пока это желание, а не уже написанный пост.'
-DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True}
+DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5}
 
 
 def controls_checked(value):
-    if (not isinstance(value, dict) or set(value) != set(DEFAULT_CONTROLS) or
+    if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),{'wake_minutes','photos'}):
+        raise ValueError('invalid live life controls')
+    value={**DEFAULT_CONTROLS,**value}
+    if (
             type(value['wake_minutes']) is not int or not 5 <= value['wake_minutes'] <= 90 or
-            type(value['photos']) is not bool):
+            type(value['photos']) is not bool or type(value['visit_turns']) is not int or not 1<=value['visit_turns']<=6 or
+            type(value['away_minutes']) is not int or not 1<=value['away_minutes']<=30):
         raise ValueError('invalid live life controls')
     return dict(value)
 
@@ -84,7 +88,7 @@ def split_text(text, limit=3500):
 
 
 class ChannelLife:
-    def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None):
+    def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None, social_enabled=False):
         self.lab, self.store, self.connection = lab, lab.store, connection
         self.persona, self.renderer, self.now = persona, renderer, now
         self.cancel = lab.session.cancel
@@ -92,6 +96,7 @@ class ChannelLife:
         self.worker = None
         self.active_lock = threading.Lock()
         self.current_phase = None
+        self.social = None
         with self.store.lock, self.store.db:
             self.store.db.executescript('''
                 CREATE TABLE IF NOT EXISTS channel_jobs(post_id TEXT PRIMARY KEY,status TEXT NOT NULL,
@@ -101,6 +106,15 @@ class ChannelLife:
                 CREATE TABLE IF NOT EXISTS channel_read_batches(id TEXT PRIMARY KEY,considered INTEGER NOT NULL DEFAULT 0);
             ''')
             self.store.db.execute("UPDATE channel_jobs SET status='unknown',error='process stopped before full delivery; no replay' WHERE status='sending'")
+            columns={r[1] for r in self.store.db.execute('PRAGMA table_info(channel_read_batches)')}
+            if 'deferred_until' not in columns:
+                self.store.db.execute('ALTER TABLE channel_read_batches ADD COLUMN deferred_until REAL')
+            self.store.put('life_controls',{**DEFAULT_CONTROLS,**self.store.get('life_controls')})
+        if social_enabled:
+            from .channel_social import SocialMemory
+            self.social=SocialMemory(self.store,now=self.now)
+            self.lab.session.channel_extension=self.social
+            self.backfill_people()
 
     def state(self):
         with self.store.lock:
@@ -110,13 +124,17 @@ class ChannelLife:
                 job['receipts'] = json.loads(job['receipts'])
                 if job['photo']:
                     job['photo'] = json.loads(job['photo'])
-            return {**status, 'paused': self.store.get('paused'), 'busy': self.lab.busy,
+            value = {**status, 'paused': self.store.get('paused'), 'busy': self.lab.busy,
                     'phase': self.current_phase, 'controls': self.store.get('life_controls'),
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
                     'awake': self.store.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
+            if self.social:
+                value.update(self.social.context())
+                value['attention']=self.store.get('channel_visit')
+            return value
 
     def configure(self, value):
-        checked = controls_checked(value)
+        checked = controls_checked({**self.store.get('life_controls'),**value})
         with self.store.lock, self.store.db:
             self.store.put('life_controls', checked)
 
@@ -167,6 +185,24 @@ class ChannelLife:
         return epoch['minute'] + max(0, int((self.now() - epoch['wall']) // 60))
 
     def channel_cycle(self, *, bootstrap=False):
+        if self.social:
+            import uuid
+            from .world import director
+            with self.store.lock,self.store.db:
+                if self.store.db.execute("SELECT 1 FROM world_cycles WHERE status IN ('ready','running','blocked')").fetchone():
+                    raise WorldConflict('another stage is active')
+                self.store.put('minute',max(self.store.get('minute'),self.minute_now()))
+                self.store.put('revision',self.store.get('revision')+1)
+                cid='cycle-'+uuid.uuid4().hex
+                value={'brief':director(self.store.state(),'garik',1,1),'inputs':{},'results':{},
+                       'personal_life':self.lab.session.personal_life,'lossless_intentions':self.lab.session.lossless_intentions,
+                       'direct_channel':True,'active_world':self.lab.session.active_world,'entry_phase':'share',
+                       'bootstrap':bootstrap,'channel_visit':True}
+                self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
+                                      (cid,'garik','ready','share',self.store.get('revision'),json.dumps(value),self.now()))
+                self.store.put('bootstrap_prepared',True)
+                self.store.snapshot()
+                return self.store.cycle(cid)
         cycle = self.lab.session.prepare('garik', minutes=1, draw=1)
         with self.store.lock, self.store.db:
             value = self.store.cycle(cycle['id'])['value']
@@ -200,6 +236,11 @@ class ChannelLife:
                          'comments': [{'speaker': row['speaker'][:60], 'text': row['text']}],
                          'simulated': False, 'telegram': {'chat_id': group, 'message_id': row['id'],
                                                         'post_id': row['telegram_post'], 'received': row['received']}}
+                if self.social:
+                    from .channel_social import person_key
+                    key=person_key(row,group)
+                    value['person_key']=key
+                    self.social.register(row['speaker'][:60],key,row['user_id'] is None)
                 cycle_value = {'results': {'audience': value}, 'inputs': {}, 'external_receipt': True}
                 self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
                                       (cycle_id, 'garik', 'complete', 'done', self.store.get('revision'), json.dumps(cycle_value, ensure_ascii=False), row['received']))
@@ -292,11 +333,119 @@ class ChannelLife:
             if image:
                 value['photo'] = {'image_path': image['image_path'], 'sha256': image['sha256'], 'subject_ids': image['subject_ids']}
             self.store.db.execute('UPDATE world_events SET value=? WHERE id=?', (json.dumps(value, ensure_ascii=False), post['id']))
+            if self.social:
+                self.social.delivered(post)
             start = self.store.get('channel_start')
             if start and not start.get('fulfilled') and not post['value'].get('reply_to'):
                 self.store.put('channel_start', {**start, 'fulfilled': True,
                                                  'first_post': post['id'], 'delivery': compact})
             self.store.snapshot()
+
+    def backfill_people(self):
+        from .channel_social import person_key
+        with self.connection.lock:
+            messages={(r['chat_id'],r['id']):dict(r) for r in self.connection.db.execute('SELECT * FROM messages')}
+        with self.store.lock,self.store.db:
+            for row in self.store.db.execute("SELECT id,value FROM world_events WHERE stage='audience' AND actor_id='garik'").fetchall():
+                value=json.loads(row['value']);tg=value.get('telegram',{})
+                message=messages.get((tg.get('chat_id'),tg.get('message_id')))
+                if not message:continue
+                key=person_key(message,tg['chat_id']);value['person_key']=key
+                self.social.register(message['speaker'][:60],key,message['user_id'] is None)
+                self.store.db.execute('UPDATE world_events SET value=? WHERE id=?',(json.dumps(value,ensure_ascii=False),row['id']))
+
+    def focus(self, fulfill=None):
+        with self.store.lock:
+            ids=[r[0] for r in self.store.db.execute(
+                'SELECT id FROM channel_read_batches WHERE considered=0 AND (deferred_until IS NULL OR deferred_until<=?) ORDER BY rowid LIMIT 8',(self.now(),))]
+            cache=self.store.get('reaction_capabilities')
+        if not ids and not fulfill:
+            with self.store.lock,self.store.db:
+                if self.store.get('channel_attention')!={'focus_ids':[],'fulfill_intent':None,'allowed_reactions':[]}:
+                    self.store.put('channel_attention',{'focus_ids':[],'fulfill_intent':None,'allowed_reactions':[]})
+            return []
+        if not cache or self.now()-cache['checked']>300:
+            cache={'checked':self.now(),'emojis':self.connection.reaction_options()}
+        with self.store.lock,self.store.db:
+            self.store.put('reaction_capabilities',cache)
+            self.store.put('channel_attention',{'focus_ids':ids,'fulfill_intent':fulfill,'allowed_reactions':cache['emojis']})
+        return ids
+
+    def finish_visit_turn(self):
+        with self.store.lock,self.store.db:
+            visit=self.store.get('channel_visit') or {'started':self.now(),'turns':0,'away_until':0}
+            if visit.get('away_until',0)>self.now():
+                visit={'started':self.now(),'turns':0,'away_until':0}
+            visit['turns']+=1
+            if (self.store.get('visit_leave_requested') or visit['turns']>=self.store.get('life_controls')['visit_turns'] or
+                    self.now()-visit['started']>=120):
+                visit['away_until']=self.now()+self.store.get('life_controls')['away_minutes']*60
+            self.store.put('channel_visit',visit)
+
+    def deliver_reaction(self,row):
+        event=self.social.evidence()[row['audience_id']]
+        if event['value'].get('simulated') is not False:raise TelegramError('Реакции доступны только на реальные комментарии.')
+        with self.store.lock,self.store.db:
+            self.store.db.execute("UPDATE channel_reaction_jobs SET status='sending' WHERE id=?",(row['id'],))
+        self.current_phase='reaction'
+        receipt=self.connection.react('reaction:'+self.store.directory.name+':'+row['id'],event['value']['telegram']['message_id'],row['emoji'])
+        with self.store.lock,self.store.db:
+            self.store.db.execute("UPDATE channel_reaction_jobs SET status='sent',receipt=? WHERE id=?",(json.dumps(receipt),row['id']))
+
+    def tick_social(self,status):
+        if not self.store.get('social_review_complete'):
+            self.current_phase='memory';self.lab.busy=True
+            return self.social.bootstrap(self.lab.session.backend,self.persona,self.cancel)
+        with self.store.lock:
+            uncertain=self.store.db.execute("SELECT 1 FROM channel_jobs WHERE status='unknown' UNION ALL SELECT 1 FROM channel_reaction_jobs WHERE status IN ('sending','unknown')").fetchone()
+            cycles=[self.store.cycle(r[0]) for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid LIMIT 1")]
+            pending=[{**dict(r),'value':json.loads(r['value'])} for r in self.store.db.execute(
+                "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status='sent') ORDER BY rowid LIMIT 1")]
+            reactions=[dict(r) for r in self.store.db.execute("SELECT * FROM channel_reaction_jobs WHERE status='pending' ORDER BY rowid LIMIT 1")]
+        if uncertain or (cycles and cycles[0]['status']=='blocked'):
+            return self.block('Есть незавершённая операция. Автоматического повтора нет.')
+        if self.store.get('minute')>self.minute_now() and not (cycles and cycles[0]['value'].get('bootstrap')):
+            self.current_phase='living';return
+        if pending:
+            self.lab.busy=True;self.deliver(pending[0]);return
+        if reactions:
+            self.lab.busy=True;self.deliver_reaction(reactions[0]);return
+        if cycles:
+            cycle=cycles[0]
+            if cycle['status']!='ready':return
+            self.current_phase=cycle['phase'];self.lab.busy=True
+            if cycle['phase']=='share':self.focus((self.store.get('channel_attention') or {}).get('fulfill_intent') if cycle['value'].get('channel_visit') else None)
+            self.lab.session.step(cycle['id']);updated=self.store.cycle(cycle['id'])
+            if updated['status']=='complete':
+                if cycle['value'].get('channel_visit'):
+                    self.finish_visit_turn()
+                else:
+                    with self.store.lock,self.store.db:
+                        status=self.store.get('life_status')
+                        status.update(last_cycle=cycle['id'],next_wake=self.now()+self.store.get('life_controls')['wake_minutes']*60)
+                        self.store.put('life_status',status)
+            return
+        self.import_comments()
+        # Own life has its own deadline. Chat replies cannot move it into the future.
+        if self.now()>=status['next_wake'] and self.store.get('bootstrap_prepared'):
+            with self.store.lock,self.store.db:self.store.put('channel_attention',{})
+            self.lab.session.prepare('garik',minutes=max(0,min(1440,self.minute_now()-self.store.get('minute'))))
+            return
+        with self.store.lock:
+            goal=self.store.db.execute("SELECT key FROM personal_intentions WHERE actor_id='garik' AND kind='post' AND status='pending' AND due<=? ORDER BY due LIMIT 1",(self.now(),)).fetchone()
+            visit=self.store.get('channel_visit') or {}
+        if goal:
+            self.focus(goal[0]);self.channel_cycle();return
+        if not self.store.get('bootstrap_prepared'):
+            self.focus();self.channel_cycle(bootstrap=True);return
+        if visit.get('away_until',0)>self.now():
+            self.current_phase='away';return
+        ids=self.focus()
+        if ids:
+            with self.store.lock,self.store.db:
+                if not visit or visit.get('away_until',0):self.store.put('channel_visit',{'started':self.now(),'turns':0,'away_until':0})
+            self.channel_cycle()
+        else:self.current_phase='waiting'
 
     def tick(self):
         if not self.active_lock.acquire(blocking=False):
@@ -307,6 +456,8 @@ class ChannelLife:
                 return
             if self.connection.poll_blocked:
                 return self.block('Приём Telegram остановлен. Следующие публикации и вызовы на паузе.')
+            if self.social:
+                return self.tick_social(status)
             with self.store.lock:
                 uncertain = self.store.db.execute("SELECT 1 FROM channel_jobs WHERE status='unknown'").fetchone()
                 cycles = [self.store.cycle(r[0]) for r in self.store.db.execute(
@@ -455,7 +606,7 @@ def main(argv=None):
                            free_intentions=True, research_enabled=True, research_backend=research, lossless_intentions=True,
                            active_world=True, direct_channel=True, continuous=True, external_channel=True, cancel=stopping)
     lab = Laboratory(store, session)
-    life = ChannelLife(lab, connection, persona, renderer)
+    life = ChannelLife(lab, connection, persona, renderer, social_enabled=True)
     setup = Setup(connection, life=life)
     servers, threads, awake = [], [], AwakeGuard(life, args.awake_hours)
     try:

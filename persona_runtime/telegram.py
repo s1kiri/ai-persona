@@ -56,7 +56,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class BotAPI:
-    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto'}
+    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto', 'setMessageReaction'}
 
     def __init__(self, token, opener=None):
         self._token = checked_token(token)
@@ -155,10 +155,13 @@ class TelegramConnection:
             CREATE TABLE IF NOT EXISTS outbox(key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,
                 status TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,error TEXT,created REAL NOT NULL,
                 fingerprint TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS reactions(key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,emoji TEXT NOT NULL,status TEXT NOT NULL,error TEXT);
         ''')
         with self.db:
             self.db.execute("UPDATE outbox SET status='unknown',error=? WHERE status='sending'",
                             ('Процесс остановился до квитанции. Сначала проверь канал; автоматического повтора нет.',))
+            self.db.execute("UPDATE reactions SET status='unknown',error='process stopped before receipt' WHERE status='sending'")
             binding = self.get('binding')
             if binding:
                 # Repair the initial receiver's known Telegram compatibility sender.
@@ -404,6 +407,45 @@ class TelegramConnection:
                     'outbox': [dict(r) for r in self.db.execute('SELECT * FROM outbox ORDER BY created DESC LIMIT 20')],
                     'last_poll': self.get('last_poll'), 'error': self.error, 'receive_blocked': self.poll_blocked,
                     'character_enabled': False, 'autopublish': False}
+
+    def reaction_options(self):
+        binding=self.get('binding')
+        if not self.api or not binding:return []
+        group=self.api.call('getChat',{'chat_id':binding['discussion']['id']})
+        common=['👍','👎','❤','🔥','😁','🤔','🤯','🤬','😢','🤮','💩','🤡','🥱','🤣','🤨','😐','🖕','😈','👀','🤝','😎','😡']
+        if 'available_reactions' not in group:return common
+        return [r['emoji'] for r in group['available_reactions'] if r.get('type')=='emoji' and r.get('emoji') in common]
+
+    def react(self,key,message_id,emoji):
+        if not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,180}',key):
+            raise TelegramError('Некорректный ключ реакции.')
+        with self.lock,self.db:
+            binding=self.get('binding')
+            if not self.api or not binding or type(message_id) is not int:
+                raise TelegramError('Нет подключённого обсуждения или полученного сообщения.')
+            group=binding['discussion']['id']
+            comment=self.db.execute("SELECT root_id FROM messages WHERE chat_id=? AND id=? AND kind='comment'",(group,message_id)).fetchone()
+            if not comment or not comment[0]:raise TelegramError('Реакция доступна только на полученный комментарий канала.')
+            old=self.db.execute('SELECT * FROM reactions WHERE key=?',(key,)).fetchone()
+            if old:
+                if old['chat_id']!=group or old['message_id']!=message_id or old['emoji']!=emoji:raise TelegramError('Ключ реакции уже использован.')
+                if old['status']=='sent':return dict(old)
+                raise TelegramError('Реакция не подтверждена; автоматического повтора нет.')
+        if emoji not in self.reaction_options():raise TelegramError('Эта реакция недоступна в обсуждении.')
+        with self.lock,self.db:
+            # Claim is atomic even if two callers both checked capabilities.
+            if self.db.execute('SELECT 1 FROM reactions WHERE key=?',(key,)).fetchone():
+                raise TelegramError('Реакция уже выполняется.')
+            self.db.execute('INSERT INTO reactions VALUES(?,?,?,?,?,?)',(key,group,message_id,emoji,'sending',None))
+        try:
+            result=self.api.call('setMessageReaction',{'chat_id':group,'message_id':message_id,'reaction':[{'type':'emoji','emoji':emoji}]})
+            if result is not True:raise TelegramError('Telegram не подтвердил реакцию.')
+        except Exception:
+            with self.lock,self.db:self.db.execute("UPDATE reactions SET status='unknown',error='receipt missing; no replay' WHERE key=?",(key,))
+            raise TelegramError('Реакция не подтверждена; автоматического повтора нет.') from None
+        with self.lock,self.db:
+            self.db.execute("UPDATE reactions SET status='sent' WHERE key=?",(key,))
+            return dict(self.db.execute('SELECT * FROM reactions WHERE key=?',(key,)).fetchone())
 
     def close(self):
         self.stopping.set()

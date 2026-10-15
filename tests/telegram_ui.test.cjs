@@ -51,3 +51,24 @@ test('live panel preserves unsaved pace and does not offer technical replies',()
  assert.equal(t.el('wake').value,'30');assert.equal(t.el('life-save').disabled,false);
  assert.equal(t.requests.length,0);
 });
+test('reader impressions and intentions remain literal and are separate from automatic replies',()=>{
+ const t=setup();t.ctx.live={status:'running',paused:false,controls:{wake_minutes:15,photos:true,visit_turns:3,away_minutes:5},world_calls:1,phase:'away',awake:{active:true,until:null},error:null,
+  reader_memory:[{name:'<img onerror=alert(1)>',impression:'<script>impression</script>',facts:[{text:'<b>reported</b>'}],anonymous:false}],own_intentions:[{status:'pending',kind:'life',action:'Eat soup'}]};
+ t.run('render({...sample,configured:true,life:live})');
+ assert.equal(t.el('reader-memory-section').hidden,false);
+ assert.equal(t.el('reader-memory').children[0].children[0].textContent,'<img onerror=alert(1)>');
+ assert.equal(t.el('reader-memory').children[0].children[1].textContent,'<script>impression</script>');
+ assert.equal(t.el('personal-intentions').children[0].children[1].textContent,'Eat soup');
+ assert.match(t.el('awake-status').textContent,/пока работает процесс/);
+ assert.equal(t.requests.length,0);
+});
+test('attention slider saves independently of post timing and polling preserves edits',async()=>{
+ const t=setup();t.ctx.live={paused:false,controls:{wake_minutes:15,photos:true,visit_turns:3,away_minutes:5},world_calls:1,phase:'waiting',awake:null,error:null,reader_memory:[],own_intentions:[]};
+ t.run('render({...sample,configured:true,life:live})');
+ t.el('visit-turns').value='2';t.el('visit-turns').handlers.input();
+ t.run('render({...sample,configured:true,life:{...live,controls:{...live.controls,visit_turns:6}}})');
+ assert.equal(t.el('visit-turns').value,'2');
+ const promise=t.el('life-form').handlers.submit({preventDefault(){}});
+ const body=JSON.parse(t.requests[0].options.body);assert.equal(body.visit_turns,2);assert.equal(body.away_minutes,5);assert.equal(body.post_every,undefined);
+ t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
+});

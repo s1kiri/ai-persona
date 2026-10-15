@@ -308,6 +308,8 @@ class WorldStore:
             state['channel_connection'] = self.get('channel_connection')
         if self.get('channel_start'):
             state['starting_desire'] = self.get('channel_start')
+        if hasattr(self,'social_memory'):
+            state.update(self.social_memory.context(actor_id))
         visible_ids = {e['id'] for e in state['entities']}
         state['actors'] = [a for a in state['actors'] if a['id'] in visible_ids]
         for key in ('settings', 'settings_revision', 'paused', 'revision', 'hooks'):
@@ -317,9 +319,20 @@ class WorldStore:
     @locked
     def channel_context(self, actor):
         """Only public local drafts/replies and simulated reader utterances."""
-        return [{**dict(r), 'value': json.loads(r['value'])} for r in reversed(self.db.execute(
+        recent = [{**dict(r), 'value': json.loads(r['value'])} for r in reversed(self.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND stage IN ('post','audience') ORDER BY rowid DESC LIMIT 12",
             (actor,)).fetchall())]
+        focus=(self.get('channel_attention') or {}).get('focus_ids',[])
+        known={e['id'] for e in recent}
+        for source in focus:
+            row=self.db.execute("SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND id=? AND stage='audience'",(actor,source)).fetchone()
+            if not row:continue
+            entry={**dict(row),'value':json.loads(row['value'])}
+            for eid in (entry['value']['post_id'],source):
+                extra=self.db.execute("SELECT id,actor_id,stage,minute,value FROM world_events WHERE id=? AND actor_id=?",(eid,actor)).fetchone()
+                if extra and eid not in known:
+                    recent.append({**dict(extra),'value':json.loads(extra['value'])});known.add(eid)
+        return recent
 
     @locked
     def pending_audience_post(self, actor):
@@ -364,8 +377,8 @@ class WorldStore:
             raise ValueError('unknown cycle')
         return {**dict(row), 'value': json.loads(row['value'])}
 
-    def prepare(self, actor_id='garik', minutes=30, draw=None, personal_life=False, lossless_intentions=False):
-        if type(minutes) is not int or not 1 <= minutes <= 1440:
+    def prepare(self, actor_id='garik', minutes=30, draw=None, personal_life=False, lossless_intentions=False, allow_zero=False):
+        if type(minutes) is not int or not (0 if allow_zero else 1) <= minutes <= 1440:
             raise ValueError('invalid virtual interval')
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM world_cycles WHERE status IN ('ready','running','blocked')").fetchone():
@@ -429,7 +442,7 @@ class WorldStore:
             return brief
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
-                 after_audience='impulse', _reviewed_experience=False):
+                 after_audience='impulse', _reviewed_experience=False, extra_apply=None):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -566,6 +579,8 @@ class WorldStore:
             if stage == 'share' and cycle['value'].get('direct_channel'):
                 next_phase = 'done'
             status = 'complete' if next_phase == 'done' else 'ready'
+            if extra_apply:
+                extra_apply(cycle)
             revision = state['revision'] + 1
             self.put('revision', revision)
             self.db.execute('UPDATE world_cycles SET status=?,phase=?,revision=?,value=? WHERE id=?',
@@ -719,7 +734,7 @@ class WorldSession:
     """One recorded stage per step; optional personal life, research and drafts."""
     def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24, autonomous_posts=False, free_intentions=False,
                  personal_life=False, research_enabled=False, research_backend=None, lossless_intentions=False,
-                 simulated_audience=False, active_world=False, direct_channel=False, continuous=False, external_channel=False, cancel=None):
+                 simulated_audience=False, active_world=False, direct_channel=False, continuous=False, external_channel=False, cancel=None, channel_extension=None):
         if not continuous and (type(max_calls) is not int or not 1 <= max_calls <= 200):
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
@@ -727,6 +742,7 @@ class WorldSession:
         self.speech_contract, self.max_calls = speech_contract, None if continuous else max_calls
         self.external_channel = external_channel
         self.cancel = cancel
+        self.channel_extension = channel_extension
         self.autonomous_posts = autonomous_posts
         self.free_intentions = free_intentions
         self.personal_life = personal_life
@@ -748,7 +764,7 @@ class WorldSession:
     def prepare(self, actor_id='garik', minutes=30, draw=None):
         with self.store.lock, self.store.db:
             cycle = self.store.prepare(actor_id, minutes, draw=draw, personal_life=self.personal_life,
-                                       lossless_intentions=self.lossless_intentions)
+                                       lossless_intentions=self.lossless_intentions,allow_zero=self.external_channel)
             cycle['value']['direct_channel'] = self.direct_channel
             self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',
                                   (json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
@@ -899,9 +915,23 @@ class WorldSession:
                     spoken = [json.loads(r[0])['text'] for r in rows
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
-            self.store.save_input(cycle_id, payload)
             output_role = 'intent' if stage == 'choice' and lossless else 'channel' if stage == 'share' and direct else stage
+            social_role=self.channel_extension is not None and stage in ('share','experience')
+            if social_role:
+                from .channel_social import LIVE_INSTRUCTIONS
+                if stage=='share':
+                    instruction+='\n'+LIVE_INSTRUCTIONS
+                    payload=self.channel_extension.enrich(payload,actor)
+                    output_role='live_channel'
+                else:
+                    instruction+='\nintent_updates отмечает судьбу твоих собственных незаконченных намерений из life.own_intentions. Выполнение дела требует подтверждённого outcome; реплика о планах им не является. Можно отказаться от затеи, не подменяя это выполнением.'
+                    output_role='live_experience'
+                    payload=self.channel_extension.with_source_ids(payload,actor)
+            self.store.save_input(cycle_id, payload)
             answer, usage = active_backend.generate(output_role, instruction, payload, **({'cancel': self.cancel} if self.cancel is not None else {}))
+            social_answer=answer if social_role else None
+            if social_role:
+                answer=self.channel_extension.validate(stage,answer,payload,actor)
             if stage == 'choice' and lossless:
                 from .world_intent import adapt
                 answer = adapt(answer, results['impulse'])
@@ -921,7 +951,8 @@ class WorldSession:
                 after_choice = 'world' if personal and not active else 'research' if answer.get('kind') == 'research' else 'outcome'
             self.store.complete(call_id, answer, usage, after_outcome=next_stage,
                                 after_world=after_world, after_choice=after_choice, after_experience=share_stage,
-                                after_audience=cycle['value'].get('entry_phase', 'impulse'))
+                                after_audience=cycle['value'].get('entry_phase', 'impulse'),
+                                extra_apply=(lambda committed:self.channel_extension.apply(stage,social_answer,committed)) if social_role else None)
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = answer if answer is not None else getattr(active_backend, 'last_output', None)

@@ -223,8 +223,9 @@ def validate_result(stage, value, state, brief):
     ids, threads = validate_patch(value, state, brief['settings'])
     if stage == 'world':
         exposure = brief.get('exposure')
+        required_anchors = ((set(exposure['anchor_ids']) - known) or set(exposure['anchor_ids'])) if exposure else set()
         if exposure and (value['beat'] == 'quiet' or not value['thread_id'] or
-                         not set(exposure['anchor_ids']) & set(value['entity_ids'])):
+                         not required_anchors & set(value['entity_ids'])):
             raise ValueError('selected opening must become an observable unfinished situation')
         if not brief['new_event_allowed']:
             existing_entities = {e['id'] for e in state['entities']}

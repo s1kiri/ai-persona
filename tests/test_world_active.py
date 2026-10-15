@@ -90,6 +90,14 @@ class ActiveWorldTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.session.step(cid)
         self.assertEqual(self.store.state()['hooks'], [])
 
+    def test_known_delivery_location_cannot_substitute_for_the_unknown_opening(self):
+        cid = self.session.prepare(draw=0)['id']
+        plan = hook(); plan['anchor_ids'].append('home')
+        self.backend.answers = [{'hooks': [plan]}, event()]
+        self.session.step(cid)
+        with self.assertRaises(ValueError): self.session.step(cid)
+        self.assertNotIn('market', [e['id'] for e in self.store.actor_view('garik')['entities']])
+
 
 class PersonalRepairTests(unittest.TestCase):
     def setUp(self):

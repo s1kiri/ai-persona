@@ -79,7 +79,7 @@ function render(value){
  const signals=$('director-signals');signals.replaceChildren();for(const signal of value.director_signals||[]){signals.append(el('p',signal.signal||'Без сигнала режиссёру.'));}
  $('cycle-flow').textContent=value.active_world?'Обстоятельства → своё намерение → поступок и результат → личный опыт':value.personal_life?'Своё намерение → обстоятельства → поступок и результат → личный опыт':'Обстоятельства → выбор → последствия';
  const hooks=$('world-hooks');hooks.replaceChildren();
- for(const h of value.hooks||[]){const card=el('article',undefined,'saved-note');card.append(el('small',h.exposed_to.length?'Повод уже замечен':h.closes_minute<value.minute?'Возможность прошла':'План жителя · ещё не событие'),el('p',h.npc_want),el('p',h.friction),el('small',h.route+' · '+clock(h.opens_minute)+' — '+clock(h.closes_minute)));hooks.append(card);}
+ for(const h of value.hooks||[]){const card=el('article',undefined,'saved-note');card.append(el('small',h.exposed_to.length?'Повод уже замечен':h.closes_minute<value.minute?'Возможность прошла':h.opens_minute>value.minute?'План на позже · ещё не событие':'Доступный повод · ещё не замечен'),el('p',h.npc_want),el('p',h.friction),el('small',h.route+' · '+clock(h.opens_minute)+' — '+clock(h.closes_minute)));hooks.append(card);}
  if(!(value.hooks||[]).length)hooks.append(el('p','Пока без отдельных планов жителей.','empty'));
  const notes=$('notes');notes.replaceChildren();if(!value.notes.length)notes.append(el('p','Пока без заметок.','empty'));
  for(const n of value.notes){const card=el('article',undefined,'saved-note');card.append(el('small',`${clock(n.minute)} · ${value.actors.find(a=>a.id===n.actor_id)?.name||n.actor_id}`),el('p',n.text));notes.append(card);}

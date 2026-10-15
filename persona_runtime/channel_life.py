@@ -20,18 +20,19 @@ from .telegram_setup import Setup, LocalServer, handler as setup_handler
 
 MOSCOW = ZoneInfo('Europe/Moscow')
 START_DESIRE = 'Хочу завести свой Telegram-канал и делиться там своей жизнью: затеями, находками, мыслями и тем, что происходит. Пока это желание, а не уже написанный пост.'
-DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5, 'episode_minutes': 15}
+DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5, 'episode_minutes': 15, 'sharing_appetite': 50}
 
 
 def controls_checked(value):
-    if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),set(DEFAULT_CONTROLS)-{'episode_minutes'},{'wake_minutes','photos'}):
+    if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),set(DEFAULT_CONTROLS)-{'sharing_appetite'},set(DEFAULT_CONTROLS)-{'sharing_appetite','episode_minutes'},{'wake_minutes','photos'}):
         raise ValueError('invalid live life controls')
     value={**DEFAULT_CONTROLS,**value}
     if (
             type(value['wake_minutes']) is not int or not 5 <= value['wake_minutes'] <= 90 or
             type(value['photos']) is not bool or type(value['visit_turns']) is not int or not 1<=value['visit_turns']<=6 or
             type(value['away_minutes']) is not int or not 1<=value['away_minutes']<=30 or
-            type(value['episode_minutes']) is not int or not 5<=value['episode_minutes']<=90):
+            type(value['episode_minutes']) is not int or not 5<=value['episode_minutes']<=90 or
+            type(value['sharing_appetite']) is not int or not 0<=value['sharing_appetite']<=100):
         raise ValueError('invalid live life controls')
     return dict(value)
 
@@ -198,7 +199,8 @@ class ChannelLife:
                 value={'brief':director(self.store.state(),'garik',1,1),'inputs':{},'results':{},
                        'personal_life':self.lab.session.personal_life,'lossless_intentions':self.lab.session.lossless_intentions,
                        'direct_channel':True,'active_world':self.lab.session.active_world,'entry_phase':'share',
-                       'bootstrap':bootstrap,'channel_visit':True}
+                       'bootstrap':bootstrap,'channel_visit':True,
+                       'channel_purpose':(self.store.get('channel_attention') or {}).get('purpose','comments')}
                 self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
                                       (cid,'garik','ready','share',self.store.get('revision'),json.dumps(value),self.now()))
                 self.store.put('bootstrap_prepared',True)
@@ -355,7 +357,12 @@ class ChannelLife:
                 self.social.register(message['speaker'][:60],key,message['user_id'] is None)
                 self.store.db.execute('UPDATE world_events SET value=? WHERE id=?',(json.dumps(value,ensure_ascii=False),row['id']))
 
-    def focus(self, fulfill=None):
+    def focus(self, fulfill=None, *, own_channel=False):
+        if own_channel or fulfill:
+            with self.store.lock,self.store.db:
+                self.store.put('channel_attention',{'purpose':'own_channel','focus_ids':[],
+                    'fulfill_intent':fulfill,'allowed_reactions':[]})
+            return []
         with self.store.lock:
             ids=[r[0] for r in self.store.db.execute(
                 'SELECT id FROM channel_read_batches WHERE considered=0 AND (deferred_until IS NULL OR deferred_until<=?) ORDER BY rowid LIMIT 8',(self.now(),))]
@@ -369,7 +376,7 @@ class ChannelLife:
             cache={'checked':self.now(),'emojis':self.connection.reaction_options()}
         with self.store.lock,self.store.db:
             self.store.put('reaction_capabilities',cache)
-            self.store.put('channel_attention',{'focus_ids':ids,'fulfill_intent':fulfill,'allowed_reactions':cache['emojis']})
+            self.store.put('channel_attention',{'purpose':'comments','focus_ids':ids,'fulfill_intent':fulfill,'allowed_reactions':cache['emojis']})
         return ids
 
     def finish_visit_turn(self):
@@ -415,11 +422,13 @@ class ChannelLife:
             cycle=cycles[0]
             if cycle['status']!='ready':return
             self.current_phase=cycle['phase'];self.lab.busy=True
-            if cycle['phase']=='share':self.focus((self.store.get('channel_attention') or {}).get('fulfill_intent') if cycle['value'].get('channel_visit') else None)
+            if cycle['phase']=='share':
+                goal=(self.store.get('channel_attention') or {}).get('fulfill_intent') if cycle['value'].get('channel_visit') else None
+                self.focus(goal,own_channel=not cycle['value'].get('channel_visit') or cycle['value'].get('bootstrap',False) or cycle['value'].get('channel_purpose')=='own_channel')
             self.lab.session.step(cycle['id']);updated=self.store.cycle(cycle['id'])
             if updated['status']=='complete':
                 if cycle['value'].get('channel_visit'):
-                    self.finish_visit_turn()
+                    if (self.store.get('channel_attention') or {}).get('purpose')=='comments':self.finish_visit_turn()
                 else:
                     with self.store.lock,self.store.db:
                         status=self.store.get('life_status')
@@ -427,6 +436,12 @@ class ChannelLife:
                         self.store.put('life_status',status)
             return
         self.import_comments()
+        if self.store.get('own_channel_check_requested'):
+            self.focus(own_channel=True)
+            with self.store.lock,self.store.db:
+                self.channel_cycle()
+                self.store.put('own_channel_check_requested',False)
+            return
         # Own life has its own deadline. Chat replies cannot move it into the future.
         if self.now()>=status['next_wake'] and self.store.get('bootstrap_prepared'):
             with self.store.lock,self.store.db:self.store.put('channel_attention',{})
@@ -438,7 +453,7 @@ class ChannelLife:
         if goal:
             self.focus(goal[0]);self.channel_cycle();return
         if not self.store.get('bootstrap_prepared'):
-            self.focus();self.channel_cycle(bootstrap=True);return
+            self.focus(own_channel=True);self.channel_cycle(bootstrap=True);return
         if visit.get('away_until',0)>self.now():
             self.current_phase='away';return
         ids=self.focus()

@@ -139,6 +139,10 @@ class LifeTests(unittest.TestCase):
         self.life.configure({'wake_minutes':30,'photos':False})
         self.assertEqual(self.life.state()['controls']['wake_minutes'],30)
         self.assertNotIn('post_every',json.dumps(self.life.state()))
+        self.life.configure({'sharing_appetite':80})
+        self.assertEqual(self.life.state()['controls']['sharing_appetite'],80)
+        for invalid in (-1,101,True):
+            with self.assertRaises(ValueError):self.life.configure({'sharing_appetite':invalid})
         for wrong in ({'wake_minutes':0,'photos':False},{'wake_minutes':30,'photos':'yes'}):
             with self.assertRaises(ValueError):self.life.configure(wrong)
 

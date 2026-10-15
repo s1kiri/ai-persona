@@ -45,6 +45,8 @@ def constrained_io(schema,payload):
     decode={alias:source for source,alias in encode.items()}
     payload=map_sources(payload,encode)
     aliases=list(decode)
+    if payload.get('attention',{}).get('purpose')=='own_channel':
+        schema['properties']['decision']['enum']=['post','keep']
     focus=payload.get('attention',{}).get('focus_ids',[])
     emojis=payload.get('attention',{}).get('allowed_reactions',[])
     profiles=payload.get('life',payload).get('reader_memory',[])
@@ -74,6 +76,17 @@ def constrained_io(schema,payload):
     return schema,payload,decode
 
 LIVE_INSTRUCTIONS = '''
+attention.purpose=own_channel — сейчас выбираешь отдельную запись в свой
+канал или keep. Ответы читателям будут отдельным коротким заходом, не вместо
+этого решения. previous_posts здесь — именно записи канала, без комментариев.
+Рассказанное одному читателю в ветке ещё не было рассказано всему каналу.
+Не копируй свой ответ: если хочется, расскажи от себя, что тебя сейчас зацепило.
+publication.sharing_appetite — мягкая готовность делиться от0 до100, не квота.
+При высокой можно охотнее бросать небольшие мысли и кусочки продолжающихся
+историй, не дожидаясь итога или особенно эффектного случая. При низкой чаще
+оставлять их себе. keep допустим всегда. Не выдумывай происшествие ради поста,
+не повторяй одно и то же и не объясняй читателям настройки.
+
 attention — небольшой заход в Telegram, не новое занятие на весь день.
 focus_comments — очередь доступных реплик вместе с исходными постами.
 Ответить можно на одну, на другую поставить reaction, остальные прочитать
@@ -238,6 +251,15 @@ class SocialMemory:
         payload['life'].update(self.context(actor,' '.join(c['text'] for e in focus for c in e['value']['comments']),
                                            [e['value'].get('person_key') for e in focus]))
         payload['fulfillment_goal'] = attention.get('fulfill_intent')
+        if attention.get('purpose')=='own_channel':
+            roots=[]
+            for row in self.store.db.execute("SELECT value FROM world_events WHERE actor_id=? AND stage='post' ORDER BY rowid DESC",(actor,)):
+                value=json.loads(row['value'])
+                if not value.get('reply_to') and value.get('delivery',{}).get('status')=='sent':
+                    roots.append(value['text'])
+                    if len(roots)==4:break
+            payload['previous_posts']=roots
+            payload['publication']={'sharing_appetite':(self.store.get('life_controls') or {}).get('sharing_appetite',50)}
         return self.with_source_ids(payload,actor)
 
     def with_source_ids(self,payload,actor='garik'):
@@ -261,6 +283,8 @@ class SocialMemory:
         if stage=='share':
             self.validate_people(answer['people'], actor, evidence)
             attention = payload['attention']; focus = set(attention.get('focus_ids', []))
+            if attention.get('purpose')=='own_channel' and answer['decision']=='reply':
+                raise ValueError('own channel choice cannot be consumed by a comment reply')
             if (set(answer['read_ids']) | set(answer['defer_ids'])) - focus or set(answer['read_ids']) & set(answer['defer_ids']):
                 raise ValueError('comment disposition belongs to this visit')
             reaction = answer['reaction']

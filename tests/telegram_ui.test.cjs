@@ -81,3 +81,12 @@ test('episode length is saved as a soft life control and survives polling while 
  const body=JSON.parse(t.requests[0].options.body);assert.equal(body.episode_minutes,10);assert.equal(body.wake_minutes,5);assert.equal(body.post_every,undefined);
  t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
 });
+test('sharing appetite is independent from episode length and never defines a post quota',async()=>{
+ const t=setup();t.ctx.live={paused:false,controls:{wake_minutes:5,episode_minutes:15,sharing_appetite:50,photos:true,visit_turns:3,away_minutes:5},world_calls:1,phase:'waiting',awake:null,error:null,reader_memory:[],own_intentions:[]};
+ t.run('render({...sample,configured:true,life:live})');
+ t.el('sharing-appetite').value='80';t.el('sharing-appetite').handlers.input();t.run('render({...sample,configured:true,life:live})');
+ assert.equal(t.el('sharing-appetite').value,'80');
+ const promise=t.el('life-form').handlers.submit({preventDefault(){}});const body=JSON.parse(t.requests[0].options.body);
+ assert.equal(body.sharing_appetite,80);assert.equal(body.episode_minutes,15);assert.equal(body.post_every,undefined);
+ t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
+});

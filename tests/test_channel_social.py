@@ -47,6 +47,8 @@ class SourceHandleTests(unittest.TestCase):
             self.assertEqual(schema['properties'][field]['maxItems'],0)
         self.assertNotIn('"enum": []',json.dumps(schema))
         self.assertEqual(schema['properties']['reaction']['type'],'null')
+        own,_,_=constrained_io(LIVE_CHANNEL,{'attention':{'purpose':'own_channel'}})
+        self.assertEqual(own['properties']['decision']['enum'],['post','keep'])
 
 
 class SocialTests(unittest.TestCase):
@@ -84,6 +86,54 @@ class SocialTests(unittest.TestCase):
         self.assertEqual(self.store.get('life_status')['next_wake'],deadline)
         self.assertEqual(self.store.get('minute'),minute)
         self.assertEqual(self.connection.api.calls[-1][0],'sendMessage')
+
+    def test_own_channel_opportunity_preserves_comments_and_excludes_replies_from_recent_posts(self):
+        ids=self.prepare_comments(comment())
+        self.backend.answers=[rich(decision='reply',text='ONLY IN COMMENTS',source_ids=ids,read_ids=ids)]
+        self.life.tick();self.life.tick()
+        with self.store.lock,self.store.db:self.store.put('own_channel_check_requested',True)
+        self.life.tick()
+        self.assertFalse(self.store.get('own_channel_check_requested'))
+        self.backend.answers=[rich(decision='post',text='A CHANNEL FRAGMENT')]
+        self.life.tick()
+        payload=self.backend.inputs[-1][2]
+        self.assertEqual(payload['attention']['purpose'],'own_channel')
+        self.assertEqual(payload['attention']['focus_ids'],[])
+        self.assertNotIn('ONLY IN COMMENTS',payload['previous_posts'])
+        self.assertIn('Initial own post',payload['previous_posts'])
+        self.assertIn('sharing_appetite',payload['publication'])
+
+    def test_channel_post_and_comment_can_both_happen_after_one_episode(self):
+        ids=self.prepare_comments(comment())
+        # End the prepared comment visit without consuming this reader message.
+        self.backend.answers=[rich(leave=True)]
+        self.life.tick()
+        self.life.focus(own_channel=True);cycle=self.life.channel_cycle()
+        with self.store.lock,self.store.db:
+            value=cycle['value'];value['channel_visit']=False
+            self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(value),cycle['id']))
+            self.store.put('channel_visit',{})
+        self.backend.answers=[rich(decision='post',text='Life fragment')]
+        self.life.tick();self.life.tick()
+        self.assertEqual(self.backend.inputs[-1][2]['attention']['purpose'],'own_channel')
+        self.assertEqual(self.store.db.execute('SELECT considered FROM channel_read_batches WHERE id=?',(ids[0],)).fetchone()[0],0)
+        self.life.tick()
+        self.backend.answers=[rich(decision='reply',text='Reader reply',source_ids=ids,read_ids=ids)]
+        self.life.tick();self.life.tick()
+        texts=[p['value']['text'] for p in self.store.monitor()['posts']]
+        self.assertIn('Life fragment',texts);self.assertIn('Reader reply',texts)
+
+    def test_own_channel_can_keep_silent_but_cannot_spend_its_choice_on_reply(self):
+        ids=self.prepare_comments(comment())
+        self.backend.answers=[rich(leave=True)];self.life.tick()
+        self.life.focus(own_channel=True);self.life.channel_cycle()
+        self.backend.answers=[rich()];self.life.tick()
+        self.assertEqual(self.life.state()['status'],'running')
+        self.life.focus(own_channel=True);self.life.channel_cycle()
+        self.backend.answers=[rich(decision='reply',text='Wrong surface',source_ids=ids)]
+        self.life.tick()
+        self.assertEqual(self.life.state()['status'],'error')
+        self.assertFalse([p for p in self.store.monitor()['posts'] if p['value']['text']=='Wrong surface'])
 
     def test_unanswered_comment_is_not_silently_marked_read_with_the_whole_batch(self):
         ids=self.prepare_comments(comment(),comment(52))

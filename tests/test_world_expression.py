@@ -48,6 +48,17 @@ class ExpressionTests(unittest.TestCase):
         self.assertFalse(self.store.complete(call['id'], result, {}))
         self.assertEqual(self.store.get('minute'), 165)
 
+    def test_event_rate_counts_time_spent_acting_since_the_last_world_observation(self):
+        result = outcome(elapsed_minutes=135)
+        cycle, session, _ = self.setup_cycle(choice(), result, enabled=False)
+        for _ in range(3): session.step(cycle['id'])
+        following = self.store.prepare(minutes=5, draw=.5)
+        brief = following['value']['brief']
+        self.assertEqual(brief['elapsed_minutes'], 140)
+        self.assertEqual(brief['new_event_draw'], .5)
+        self.assertTrue(brief['new_event_allowed'])
+        self.assertGreater(brief['new_event_probability'], .98)
+
     def test_narrated_now_must_match_clock_but_future_appointment_can_differ(self):
         cycle = self.store.prepare(draw=0)
         state, brief = self.store.state(), cycle['value']['brief']

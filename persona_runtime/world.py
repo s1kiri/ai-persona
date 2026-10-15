@@ -76,6 +76,7 @@ def director(state, actor_id, elapsed, draw):
         weights.pop('quiet')
     return {'actor_id': actor_id, 'minute': state['minute'], 'settings': settings,
             'new_event_allowed': novel, 'new_event_probability': round(probability, 4),
+            'elapsed_minutes': elapsed, 'new_event_draw': draw,
             'allowed_beats': allowed, 'allowed_domains': domains, 'beat_weights': weights,
             'recent_patterns': [e['value']['pattern'] for e in recent[-6:]],
             'due_threads': [t['id'] for t in due], 'cause_ids': causes,
@@ -332,7 +333,12 @@ class WorldStore:
             self.put('minute', self.get('minute') + minutes)
             self.put('revision', self.get('revision') + 1)
             state = self.state()
-            brief = director(state, actor_id, minutes, random.random() if draw is None else draw)
+            last_world = self.db.execute("SELECT minute FROM world_events WHERE stage='world' ORDER BY rowid DESC LIMIT 1").fetchone()
+            # The event rate is per world hour, including time spent acting.
+            # Counting only the explicit idle gap starves a busy character of
+            # outside developments. An uncommitted world turn is not a tick.
+            elapsed = max(1, state['minute'] - last_world[0]) if last_world else minutes
+            brief = director(state, actor_id, elapsed, random.random() if draw is None else draw)
             cycle_id = 'cycle-' + uuid.uuid4().hex
             value = {'brief': brief, 'inputs': {}, 'results': {}, 'personal_life': personal_life,
                      'lossless_intentions': lossless_intentions}

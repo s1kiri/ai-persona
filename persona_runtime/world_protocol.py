@@ -49,15 +49,17 @@ OUTCOME_SCHEMA = obj({'status': enum(('succeeded', 'partial', 'failed', 'pending
                                                  'minutes': {'type': 'integer', 'minimum': 0, 'maximum': 1440}}), 8),
                                      'minItems': 1},
                       **PATCH})
-SHARE_SCHEMA = obj({'decision': enum(('post', 'keep')), 'focus': string(600),
+SHARE_SCHEMA = obj({'decision': enum(('post', 'reply', 'keep')), 'focus': string(600),
                     'source_ids': array(string(80), 6)})
 CONCERN = obj({'id': string(80), 'text': string(500), 'stake': string(300),
                'next_hint': string(300), 'status': enum(('active', 'waiting', 'closed')),
                'source_ids': array(string(80), 4)})
 EXPERIENCE_SCHEMA = obj({'note': string(800), 'concerns': array(CONCERN, 3),
                           'director_signal': string(300)})
+AUDIENCE_SCHEMA = obj({'post_id': string(80),
+                       'comments': array(obj({'speaker': string(60), 'text': string(500)}), 3)})
 SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA,
-           'share': SHARE_SCHEMA, 'experience': EXPERIENCE_SCHEMA}
+           'share': SHARE_SCHEMA, 'experience': EXPERIENCE_SCHEMA, 'audience': AUDIENCE_SCHEMA}
 
 
 def clock_at(minute):
@@ -163,6 +165,10 @@ def validate_patch(value, state, settings):
 
 def validate_result(stage, value, state, brief):
     validate_shape(value, SCHEMAS[stage])
+    if stage == 'audience':
+        if any(not c['speaker'].strip() or not c['text'].strip() for c in value['comments']):
+            raise ValueError('empty fictional comment')
+        return value
     if stage == 'experience':
         ids = set()
         for concern in value['concerns']:
@@ -174,11 +180,12 @@ def validate_result(stage, value, state, brief):
                 raise ValueError('personal concern refers to an unobserved source')
         return value
     if stage == 'share':
-        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome', 'research') and
+        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome', 'research', 'audience') and
                      brief['actor_id'] in e['value'].get('visible_to', [e['actor_id']])}
+        available.update(state.get('public_evidence_ids', []))
         if not set(value['source_ids']) <= available:
             raise ValueError('post source must be an observed world event')
-        if value['decision'] == 'post' and (not value['focus'].strip() or not value['source_ids']):
+        if value['decision'] != 'keep' and (not value['focus'].strip() or not value['source_ids']):
             raise ValueError('post needs a personal focus and a stored event')
         return value
     if not value.get('observation', value.get('action', '')).strip():

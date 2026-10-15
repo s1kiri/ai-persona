@@ -68,3 +68,12 @@ test('interrupted choices show missing outcome and preserve full original intent
  assert.match(t.el('timeline').children[0].children[0].textContent,/Исхода нет.*прерван/);
  assert.equal(t.el('unfinished-attempts').children[0].children[1].textContent,text);
 });
+
+test('fictional reader comments and Garik replies stay attached and literal',()=>{
+ const t=setup();t.run('render({...sample,posts:[{id:"reply",minute:60,value:{text:"<b>reply</b>",reply_to:"root",audience_id:"aud"}},{id:"root",minute:30,value:{text:"First fragment"}}],audience:[{id:"aud",minute:45,value:{post_id:"root",comments:[{speaker:"Reader",text:"<script>claim</script>"}]}}]})');
+ assert.equal(t.el('post-feed').children.length,1);
+ const discussion=t.el('post-feed').children[0].children[2];
+ assert.match(discussion.children[0].textContent,/Вымышленные комментарии/);
+ assert.equal(discussion.children[1].textContent,'Reader: <script>claim</script>');
+ assert.equal(discussion.children[2].textContent,'Гарик: <b>reply</b>');
+});

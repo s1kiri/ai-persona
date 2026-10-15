@@ -14,7 +14,7 @@ from test_telegram import GROUP,comment,forward
 
 def rich(**changes):
     value={'decision':'keep','text':'','source_ids':[],'people':[],'commitments':[],
-           'intent_updates':[],'fulfills':[],'reaction':None,'read_ids':[],'defer_ids':[],'leave':False}
+           'intent_updates':[],'fulfills':[],'reaction':None,'read_ids':[],'defer_ids':[],'leave':False,'attachment':None}
     value.update(changes);return value
 
 
@@ -251,7 +251,7 @@ class SocialTests(unittest.TestCase):
         self.assertEqual(post['value']['source_ids'],ids[:2])
         self.assertEqual(len(self.backend.inputs),calls)
         self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'pending')
-        self.assertFalse(self.backend.inputs[-1][2]['media_capabilities']['gallery_browser'])
+        self.assertTrue(self.backend.inputs[-1][2]['media_capabilities']['gallery_browser'])
 
     def test_two_current_addressees_are_still_ambiguous(self):
         ids=self.prepare_comments(comment(),comment(52))

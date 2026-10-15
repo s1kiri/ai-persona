@@ -24,7 +24,7 @@ class AutonomousPhotoCase:
         self.reference_library = reference_library
         self.cancel = cancel
 
-    def run(self, context):
+    def run(self, context, choice=None):
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         state_path = self.directory/'case.json'
         if state_path.exists():
@@ -42,8 +42,11 @@ class AutonomousPhotoCase:
                 context['previous_photos'] = [{k: e[k] for k in ('subject_ids', 'view', 'visual_notes')} for e in previous]
             save_private(self.directory/'scene.json', context)
             self.observer({'phase': 'garik_chooses'})
-            choice, usage = self.chooser.generate('photo_choice', self.persona+'\n\n'+PHOTO_CHOICE, context,
-                                                  **({'cancel': self.cancel} if self.cancel is not None else {}))
+            if choice is None:
+                choice, usage = self.chooser.generate('photo_choice', self.persona+'\n\n'+PHOTO_CHOICE, context,
+                                                      **({'cancel': self.cancel} if self.cancel is not None else {}))
+            else:
+                usage={} # The character already selected it in the message decision.
             save_private(self.directory/'choice.json', {'choice': choice, 'usage': usage})
             request = render_request(choice, context)
             if request is None:

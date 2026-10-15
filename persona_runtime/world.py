@@ -444,7 +444,8 @@ class WorldStore:
             return brief
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
-                 after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False):
+                 after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False, media_attached=False,
+                 _reviewed_outcome=False):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -452,11 +453,16 @@ class WorldStore:
             if call['status'] == 'completed':
                 return False
             cycle = self.cycle(call['cycle_id'])
-            reviewed = _reviewed_experience or _reviewed_channel
+            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome
             expected_call, expected_cycle = ('failed', 'blocked') if reviewed else ('started', 'running')
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
+            if _reviewed_outcome:
+                saved=cycle['value'].get('rejected',{}).get('answer',{})
+                projected={**saved,'entities':[e for e in saved.get('entities',[]) if e['id']!=cycle['actor_id']]}
+                if _reviewed_experience or _reviewed_channel or stage!='outcome' or value!=projected or projected==saved:
+                    raise WorldConflict('review can only omit own protected actor patch from saved outcome')
             if _reviewed_experience and (stage != 'experience' or value != cycle['value'].get('rejected', {}).get('answer')):
                 raise WorldConflict('review can only apply the saved personal note')
             if _reviewed_channel:
@@ -506,6 +512,7 @@ class WorldStore:
                     state['personal_evidence_ids'] = self.personal_evidence_ids(cycle['actor_id'])
                 checked = value
                 direct = stage == 'share' and cycle['value'].get('direct_channel', False)
+                if direct and media_attached:state['channel_media_attached']=True
                 if stage == 'choice' and cycle['value'].get('lossless_intentions'):
                     from .world_intent import adapt
                     checked = {k: v for k, v in value.items() if k not in ('intent_parts', 'recovery')}
@@ -595,7 +602,7 @@ class WorldStore:
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if reviewed:
                 self.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',
-                                (cycle['id'], call_id, stage, 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
+                                (cycle['id'], call_id, stage, 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
             else:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
@@ -643,6 +650,27 @@ class WorldStore:
             self.complete(call['id'], rejected['answer'], {}, after_experience=after_experience, _reviewed_experience=True)
             return self.cycle(cycle_id)
 
+    def recover_outcome_without_actor_patch(self, cycle_id, after_outcome='experience'):
+        """Explicit host review only: retain saved observation, omit protected avatar patch.
+
+        All other validation still runs. Never called by the autonomous loop.
+        Failed call, usage and original rejected output remain untouched.
+        """
+        if after_outcome not in ('done','experience','share'):
+            raise ValueError('invalid continuation after reviewed outcome')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if self.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cycle_id,)).fetchone():return cycle
+            rejected=cycle['value'].get('rejected',{})
+            if cycle['phase']!='outcome' or cycle['status']!='blocked' or rejected.get('stage')!='outcome' or rejected.get('error_type')!='ValueError':
+                raise WorldConflict('only a rejected saved outcome can be reviewed')
+            call=self.db.execute("SELECT id FROM world_calls WHERE cycle_id=? AND stage='outcome' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('no failed outcome call to review')
+            original=rejected['answer']
+            projected={**original,'entities':[e for e in original['entities'] if e['id']!=cycle['actor_id']]}
+            self.complete(call['id'],projected,{},after_outcome=after_outcome,_reviewed_outcome=True)
+            return self.cycle(cycle_id)
+
     def recover_channel(self, cycle_id, extension=None):
         """Review exact saved output once, without model/action replay or delivery."""
         with self.lock,self.db:
@@ -661,7 +689,8 @@ class WorldStore:
                 apply=lambda committed:extension.apply('share',original,committed)
             else:
                 answer=original
-            self.complete(call['id'],answer,{},_reviewed_channel=True,extra_apply=apply)
+            self.complete(call['id'],answer,{},_reviewed_channel=True,extra_apply=apply,
+                          media_attached=bool(isinstance(original,dict) and original.get('attachment')))
             return self.cycle(cycle_id)
 
     @locked
@@ -1004,7 +1033,8 @@ class WorldSession:
             self.store.complete(call_id, answer, usage, after_outcome=next_stage,
                                 after_world=after_world, after_choice=after_choice, after_experience=share_stage,
                                 after_audience=cycle['value'].get('entry_phase', 'impulse'),
-                                extra_apply=(lambda committed:self.channel_extension.apply(stage,social_answer,committed)) if social_role else None)
+                                extra_apply=(lambda committed:self.channel_extension.apply(stage,social_answer,committed)) if social_role else None,
+                                media_attached=bool(social_role and stage=='share' and social_answer.get('attachment')))
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = social_answer if social_answer is not None else answer if answer is not None else getattr(active_backend, 'last_output', None)

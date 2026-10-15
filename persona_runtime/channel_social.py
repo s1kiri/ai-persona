@@ -15,12 +15,15 @@ COMMITMENT = obj({'key': string(80), 'kind': enum(('life', 'post')), 'action': s
                   'after_minutes': {'type': 'integer', 'minimum': 0, 'maximum': 1440}})
 INTENT_UPDATE = obj({'key': string(80), 'status': enum(('pending', 'done', 'dropped')),
                      'note': string(500), 'source_ids': array(string(80), 4)})
+ATTACHMENT = obj({'mode':enum(('existing','new')),'gallery_id':string(80),
+                  'subject_ids':array(string(80),4),'source_ids':array(string(80),4),
+                  'framing':string(700)})
 SOCIAL_FIELDS = {'people': array(PERSON, 4), 'commitments': array(COMMITMENT, 3),
                  'intent_updates': array(INTENT_UPDATE, 4), 'fulfills': array(string(80), 3),
                  'reaction': {'type': ['object', 'null'], 'properties': {'audience_id': string(80), 'emoji': string(16)},
                               'required': ['audience_id', 'emoji'], 'additionalProperties': False},
                  'read_ids': array(string(80), 8), 'defer_ids': array(string(80), 8),
-                 'leave': {'type': 'boolean'}}
+                 'leave': {'type': 'boolean'},'attachment':{**ATTACHMENT,'type':['object','null']}}
 LIVE_CHANNEL = obj({**CHANNEL_SCHEMA['properties'], **SOCIAL_FIELDS})
 LIVE_EXPERIENCE = obj({**EXPERIENCE_SCHEMA['properties'], 'intent_updates': array(INTENT_UPDATE, 4)})
 REVIEW_INTENT = obj({'key': string(80), 'kind': enum(('life', 'post')), 'action': string(700),
@@ -54,6 +57,18 @@ def constrained_io(schema,payload):
     intentions=payload.get('life',payload).get('own_intentions',[])
     keys=[i['key'] for i in intentions]
     post_keys=[i['key'] for i in intentions if i['kind']=='post' and i['status']=='pending']
+    gallery_ids=[p['id'] for p in payload.get('gallery',[])]
+    caps=payload.get('media_capabilities',{})
+    if 'attachment' in schema.get('properties',{}):
+        media=schema['properties']['attachment']
+        modes=(['existing'] if gallery_ids and caps.get('existing_photo_sharing') else [])+(['new'] if caps.get('new_photo_generation') else [])
+        if not modes:media['type']='null'
+        else:
+            media['properties']['mode']['enum']=modes
+            media['properties']['gallery_id']['enum']=['',*gallery_ids]
+            subjects=[s['id'] for s in payload.get('photo_scene',{}).get('subjects',[])]
+            if subjects:media['properties']['subject_ids']['items']['enum']=subjects
+            else:media['properties']['subject_ids']['maxItems']=0
     def constrain(node):
         if not isinstance(node,dict):return
         for key,child in node.get('properties',{}).items():
@@ -98,9 +113,20 @@ reaction — одна доступная emoji на конкретный audienc
 В source_ids ответа указывай один комментарий из текущего focus_comments,
 которому отвечаешь. Старые сообщения могут быть дополнительными основаниями:
 они не становятся вторым адресатом только потому, что ты их вспомнил.
-media_capabilities — доступные способы показа изображения. Не утверждай,
-что просмотрел галерею или отправил фото, если соответствующего инструмента
-нет. Технические поля не надо обсуждать с читателем.
+gallery — твои существующие фотографии, время и куда уже показывал. У части
+снимков приложены настоящие изображения с их ID; выбирай по содержимому,
+не выдавай неизвестную галерею за просмотренную. attachment=null — без фото.
+mode=existing выбирает gallery_id и оставляет subject_ids/source_ids/framing
+пустыми: это честная повторная отправка старого снимка, не новый кадр.
+mode=new оставляет gallery_id пустым, выбирает subject_ids/source_ids из
+photo_scene и framing нового кадра; твой инструмент действительно создаст
+новый файл с референсами. Старый кадр не подменяет новую генерацию.
+Можно прикрепить фото и к post, и к reply. text — дословная подпись/ответ,
+может быть пустым, если хочется просто кинуть снимок. Для reply всё равно
+выбери один текущий комментарий в source_ids. keep ничего не отправляет.
+Фотография — твой выбор, не обязанность иллюстрировать каждый ответ или
+исполнять просьбу. media_capabilities описывает доступные возможности;
+технические поля не надо обсуждать с читателем.
 
 reader_memory — твои прежние впечатления и запомненные слова людей, с
 источниками. people меняет только впечатление об известном person_key.
@@ -167,6 +193,9 @@ class SocialMemory:
                     emoji TEXT NOT NULL,status TEXT NOT NULL,receipt TEXT);
             ''')
         store.social_memory = self
+        from .channel_media import Gallery
+        self.gallery=Gallery(store)
+        self.renderer_available=False
 
     def register(self, name, key, anonymous, actor='garik'):
         self.store.db.execute('INSERT INTO reader_people VALUES(?,?,?,?,?,?,?) ON CONFLICT(actor_id,key) DO UPDATE SET name=excluded.name',
@@ -257,8 +286,19 @@ class SocialMemory:
         payload['life'].update(self.context(actor,' '.join(c['text'] for e in focus for c in e['value']['comments']),
                                            [e['value'].get('person_key') for e in focus]))
         payload['fulfillment_goal'] = attention.get('fulfill_intent')
-        payload['media_capabilities']={'optional_new_photo_with_own_post':bool((self.store.get('life_controls') or {}).get('photos')),
-                                       'gallery_browser':False,'photo_reply_in_comments':False}
+        enabled=bool((self.store.get('life_controls') or {}).get('photos'))
+        payload['media_capabilities']={'gallery_browser':True,'existing_photo_sharing':enabled,
+                                       'new_photo_generation':enabled and self.renderer_available,'photo_reply_in_comments':enabled}
+        known=[e['id'] for e in payload['life']['entities']]
+        query=' '.join(c['text'] for e in focus for c in e['value']['comments'])
+        payload['gallery']=self.gallery.catalog(actor,known,query)
+        payload['_gallery_previews']=[]
+        for photo in payload['gallery'][:4]:
+            item=self.gallery.get(actor,photo['id'],known)
+            payload['_gallery_previews'].append({k:item[k] for k in ('id','image_path','sha256')})
+        from .world_photo import photo_context
+        state=self.store.state()
+        payload['photo_scene']=photo_context(actor,state['entities'],state['history'])
         if attention.get('purpose')=='own_channel':
             roots=[]
             for row in self.store.db.execute("SELECT value FROM world_events WHERE actor_id=? AND stage='post' ORDER BY rowid DESC",(actor,)):
@@ -286,11 +326,29 @@ class SocialMemory:
 
     def validate(self, stage, answer, payload, actor):
         schema = LIVE_CHANNEL if stage=='share' else LIVE_EXPERIENCE
+        if stage=='share' and isinstance(answer,dict) and 'attachment' not in answer:
+            answer={**answer,'attachment':None} # Review of a pre-gallery saved output.
         validate_shape(answer, schema)
         evidence = self.evidence(actor)
         if stage=='share':
             self.validate_people(answer['people'], actor, evidence)
             attention = payload['attention']; focus = set(attention.get('focus_ids', []))
+            attachment=answer['attachment']
+            if attachment:
+                if answer['decision']=='keep':raise ValueError('silent choice cannot send a photograph')
+                caps=payload['media_capabilities']
+                if attachment['mode']=='existing':
+                    if not caps['existing_photo_sharing'] or attachment['gallery_id'] not in {p['id'] for p in payload['gallery']}:
+                        raise ValueError('gallery selection is not available')
+                    if any(attachment[k] for k in ('subject_ids','source_ids','framing')):
+                        raise ValueError('existing photograph is not a new render request')
+                    self.gallery.get(actor,attachment['gallery_id'],[e['id'] for e in payload['life']['entities']])
+                else:
+                    if not caps['new_photo_generation'] or attachment['gallery_id']:
+                        raise ValueError('new photograph needs the native renderer')
+                    from .world_photo import validate_photo_choice
+                    validate_photo_choice({'decision':'show','reason':'Selected with message',
+                        **{k:attachment[k] for k in ('subject_ids','source_ids','framing')},'caption':answer['text'][:2000]},payload['photo_scene'])
             if attention.get('purpose')=='own_channel' and answer['decision']=='reply':
                 raise ValueError('own channel choice cannot be consumed by a comment reply')
             if (set(answer['read_ids']) | set(answer['defer_ids'])) - focus or set(answer['read_ids']) & set(answer['defer_ids']):
@@ -316,6 +374,10 @@ class SocialMemory:
         actor = cycle['actor_id']; cycle['value']['social_output'] = answer
         self.apply_updates(answer['intent_updates'], actor)
         if stage=='share':
+            if answer.get('attachment'):
+                row=self.store.db.execute('SELECT value FROM world_events WHERE id=?',(cycle['id']+'-post',)).fetchone()
+                value=json.loads(row[0]);value['attachment']=answer['attachment']
+                self.store.db.execute('UPDATE world_events SET value=? WHERE id=?',(json.dumps(value,ensure_ascii=False),cycle['id']+'-post'))
             self.apply_people(answer['people'], actor)
             for commitment in answer['commitments']:
                 old = self.store.db.execute('SELECT action,status FROM personal_intentions WHERE actor_id=? AND key=?', (actor,commitment['key'])).fetchone()

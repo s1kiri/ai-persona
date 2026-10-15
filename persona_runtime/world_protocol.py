@@ -202,7 +202,7 @@ def validate_result(stage, value, state, brief):
         if not set(value['source_ids']) <= available:
             raise ValueError('channel source must be observed or an own public expression')
         expression = value['text'] if stage == 'channel' else value['focus']
-        if value['decision'] != 'keep' and not expression.strip():
+        if value['decision'] != 'keep' and not expression.strip() and not (stage=='channel' and state.get('channel_media_attached')):
             raise ValueError('channel expression must be nonempty')
         return value
     if not value.get('observation', value.get('action', '')).strip():

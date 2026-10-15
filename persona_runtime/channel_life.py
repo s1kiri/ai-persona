@@ -115,8 +115,10 @@ class ChannelLife:
         if social_enabled:
             from .channel_social import SocialMemory
             self.social=SocialMemory(self.store,now=self.now)
+            self.social.renderer_available=renderer is not None
             self.lab.session.channel_extension=self.social
             self.backfill_people()
+            self.social.gallery.backfill()
 
     def state(self):
         with self.store.lock:
@@ -259,12 +261,23 @@ class ChannelLife:
             return count
 
     def photo(self, post):
-        if not self.store.get('life_controls')['photos'] or self.renderer is None or post['value'].get('reply_to'):
+        if not self.store.get('life_controls')['photos']:
             return None
         from .world_photo import photo_context
         cycle = self.store.cycle(post['cycle_id'])
+        output=cycle['value'].get('social_output',{})
+        explicit='attachment' in output
+        attachment=output.get('attachment')
+        if explicit and attachment is None:return None
+        if attachment and attachment['mode']=='existing':
+            known=[e['id'] for e in self.store.actor_view(post['actor_id'])['entities']]
+            item=self.social.gallery.get(post['actor_id'],attachment['gallery_id'],known)
+            return {'status':'reused','gallery_id':item['id'],
+                    'choice':{'decision':'show','framing':item['view'],'source_ids':item['source_ids']},
+                    'image':{k:item[k] for k in ('image_path','sha256','subject_ids')},'image_calls':0}
+        if self.renderer is None or post['value'].get('reply_to') and not explicit:return None
         state = self.store.state()
-        context = photo_context('garik', state['entities'], state['history'],
+        context = photo_context(post['actor_id'], state['entities'], state['history'],
                                 cycle['value']['results'].get('experience', {}).get('note', ''))
         if not context['sources']:
             return None  # An initial thought has no occurred object scene to photograph.
@@ -277,7 +290,15 @@ class ChannelLife:
             factory = self.photo_factory or AutonomousPhotoCase
             case = factory(directory, self.lab.session.backend, self.renderer, self.persona,
                            reference_library=library, cancel=self.cancel)
-            return case.run(context)
+            if attachment:
+                choice={'decision':'show','reason':'Selected by the character with this message',
+                        **{k:attachment[k] for k in ('subject_ids','source_ids','framing')},'caption':post['value']['text'][:2000]}
+                result=case.run(context,choice=choice)
+            else:result=case.run(context)
+            if self.social and result['status']=='passed':
+                result['gallery_id']=self.social.gallery.register(result['image'],post['actor_id'],result['choice']['framing'],
+                    result['choice']['source_ids'],post['value']['text'],new_job=post['id'])
+            return result
         finally:
             library.close()
 
@@ -299,7 +320,7 @@ class ChannelLife:
             with self.store.lock, self.store.db:
                 self.store.db.execute('DELETE FROM channel_jobs WHERE post_id=?', (post['id'],))
             return
-        image = image_result['image'] if image_result and image_result['status'] == 'passed' else None
+        image = image_result['image'] if image_result and image_result['status'] in ('passed','reused') else None
         reply_to = None
         if post['value'].get('reply_to'):
             audience = next(e for e in self.store.channel_context('garik') if e['id'] == post['value']['audience_id'])
@@ -314,20 +335,22 @@ class ChannelLife:
         if attempts:
             key += ':review' + str(attempts)
         if image and len(text) <= 1024:
-            receipts.append(self.connection.send(key + ':photo', text, photo=Path(image['image_path']).read_bytes()))
+            receipts.append(self.connection.send(key + ':photo', text, reply_to=reply_to, photo=Path(image['image_path']).read_bytes()))
         else:
             for index, part in enumerate(split_text(text)):
                 receipts.append(self.connection.send(key + ':part' + str(index), part, reply_to=reply_to))
             if image:
-                receipts.append(self.connection.send(key + ':photo', '', photo=Path(image['image_path']).read_bytes()))
+                receipts.append(self.connection.send(key + ':photo', '', reply_to=reply_to, photo=Path(image['image_path']).read_bytes()))
         compact = [{k: r[k] for k in ('chat_id', 'message_id', 'key', 'status')} for r in receipts]
         photo_summary = {'status': image_result['status'], 'choice': image_result['choice']} if image_result else None
+        if image_result and image_result.get('gallery_id'):photo_summary['gallery_id']=image_result['gallery_id']
         if image:
             from .world_media import MediaReferenceLibrary
             library = MediaReferenceLibrary(self.store.directory / 'visual-memory')
             try:
-                library.register(image, 'garik', image_result['choice']['framing'], source='channel',
-                                 channel_post_id=str(receipts[-1]['message_id']))
+                if image_result['status']!='reused':
+                    library.register(image, post['actor_id'], image_result['choice']['framing'], source='channel',
+                                     channel_post_id=str(receipts[-1]['chat_id'])+':'+str(receipts[-1]['message_id']))
             finally:
                 library.close()
         with self.store.lock, self.store.db:
@@ -339,6 +362,7 @@ class ChannelLife:
             self.store.db.execute('UPDATE world_events SET value=? WHERE id=?', (json.dumps(value, ensure_ascii=False), post['id']))
             if self.social:
                 self.social.delivered(post)
+                if image:self.social.gallery.delivered(post['actor_id'],image_result['gallery_id'],post['id'],receipts[-1])
             start = self.store.get('channel_start')
             if start and not start.get('fulfilled') and not post['value'].get('reply_to'):
                 self.store.put('channel_start', {**start, 'fulfilled': True,

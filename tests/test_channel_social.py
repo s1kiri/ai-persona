@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from persona_runtime.channel_life import ChannelLife
 from persona_runtime.channel_social import person_key,constrained_io,map_sources,LIVE_CHANNEL
@@ -168,6 +169,20 @@ class SocialTests(unittest.TestCase):
         self.assertEqual(self.store.db.execute("SELECT status FROM personal_intentions WHERE key='intro'").fetchone()[0],'pending')
         self.life.tick()
         self.assertEqual(self.store.db.execute("SELECT status FROM personal_intentions WHERE key='intro'").fetchone()[0],'done')
+
+    def test_failed_commit_retains_full_social_output_for_exact_review(self):
+        ids=self.prepare_comments(comment())
+        answer=rich(decision='reply',text='I will write it',source_ids=ids,read_ids=ids,
+            commitments=[{'key':'intro','kind':'post','action':'Write introduction','quote':'I will write it','source_ids':ids,'after_minutes':0}])
+        self.backend.answers=[answer]
+        with patch.object(self.store,'complete',side_effect=ValueError('synthetic commit rejection')):
+            self.life.tick()
+        cycle=next(c for c in self.store.monitor()['cycles'] if c['status']=='blocked')
+        self.assertEqual(cycle['value']['rejected']['answer'],answer)
+        calls=len(self.backend.inputs)
+        self.store.recover_channel(cycle['id'],extension=self.life.social)
+        self.assertEqual(len(self.backend.inputs),calls)
+        self.assertEqual(self.store.db.execute("SELECT status FROM personal_intentions WHERE key='intro'").fetchone()[0],'awaiting_delivery')
 
     def test_eating_is_not_completed_by_saying_i_will_eat(self):
         ids=self.prepare_comments(comment())

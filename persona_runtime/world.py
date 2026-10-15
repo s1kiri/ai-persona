@@ -442,7 +442,7 @@ class WorldStore:
             return brief
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
-                 after_audience='impulse', _reviewed_experience=False, extra_apply=None):
+                 after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -450,12 +450,18 @@ class WorldStore:
             if call['status'] == 'completed':
                 return False
             cycle = self.cycle(call['cycle_id'])
-            expected_call, expected_cycle = ('failed', 'blocked') if _reviewed_experience else ('started', 'running')
+            reviewed = _reviewed_experience or _reviewed_channel
+            expected_call, expected_cycle = ('failed', 'blocked') if reviewed else ('started', 'running')
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
             if _reviewed_experience and (stage != 'experience' or value != cycle['value'].get('rejected', {}).get('answer')):
                 raise WorldConflict('review can only apply the saved personal note')
+            if _reviewed_channel:
+                saved=cycle['value'].get('rejected',{}).get('answer',{})
+                base={k:saved[k] for k in ('decision','text','source_ids') if k in saved} if isinstance(saved,dict) else None
+                if _reviewed_experience or stage!='share' or not cycle['value'].get('direct_channel') or value!=base:
+                    raise WorldConflict('review can only apply the saved direct expression')
             state = self.state()
             brief = cycle['value']['brief']
             links = []
@@ -489,6 +495,9 @@ class WorldStore:
                         raise ValueError('reader delivery already recorded; no replay')
                 if stage == 'share':
                     state['public_evidence_ids'] = self.public_evidence_ids(cycle['actor_id'])
+                    if cycle['value'].get('direct_channel'):
+                        state['own_expression_ids'] = [r[0] for r in self.db.execute(
+                            "SELECT id FROM world_events WHERE actor_id=? AND stage IN ('impulse','choice','experience')",(cycle['actor_id'],))]
                     if value.get('decision') == 'reply':
                         targets = [e for e in self.channel_context(cycle['actor_id'])
                                    if e['id'] in value['source_ids'] and e['stage'] == 'audience' and e['value']['comments']]
@@ -585,9 +594,9 @@ class WorldStore:
             self.put('revision', revision)
             self.db.execute('UPDATE world_cycles SET status=?,phase=?,revision=?,value=? WHERE id=?',
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
-            if _reviewed_experience:
+            if reviewed:
                 self.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',
-                                (cycle['id'], call_id, stage, 'Reviewed saved note under corrected private-source contract; no model call'))
+                                (cycle['id'], call_id, stage, 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
             else:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
@@ -619,6 +628,27 @@ class WorldStore:
             if not call:
                 raise WorldConflict('no failed note call to review')
             self.complete(call['id'], rejected['answer'], {}, after_experience=after_experience, _reviewed_experience=True)
+            return self.cycle(cycle_id)
+
+    def recover_channel(self, cycle_id, extension=None):
+        """Review exact saved output once, without model/action replay or delivery."""
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if self.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cycle_id,)).fetchone():
+                return cycle
+            rejected=cycle['value'].get('rejected',{})
+            if (cycle['phase']!='share' or cycle['status']!='blocked' or not cycle['value'].get('direct_channel') or
+                    rejected.get('stage')!='share' or rejected.get('error_type')!='ValueError'):
+                raise WorldConflict('only a rejected saved direct expression can be reviewed')
+            call=self.db.execute("SELECT id FROM world_calls WHERE cycle_id=? AND stage='share' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('no failed expression call to review')
+            original=rejected['answer'];apply=None
+            if extension and isinstance(original,dict) and 'people' in original:
+                answer=extension.validate('share',original,cycle['value']['inputs']['share'],cycle['actor_id'])
+                apply=lambda committed:extension.apply('share',original,committed)
+            else:
+                answer=original
+            self.complete(call['id'],answer,{},_reviewed_channel=True,extra_apply=apply)
             return self.cycle(cycle_id)
 
     @locked
@@ -789,6 +819,7 @@ class WorldSession:
             raise WorldConflict('actor has no configured personality')
         call_id, cycle = self.store.claim(cycle_id, self.max_calls)
         answer = None
+        social_answer = None
         active_backend = self.backend
         try:
             actor = cycle['actor_id']
@@ -963,6 +994,6 @@ class WorldSession:
                                 extra_apply=(lambda committed:self.channel_extension.apply(stage,social_answer,committed)) if social_role else None)
             return self.store.cycle(cycle_id)
         except Exception as error:
-            rejected = answer if answer is not None else getattr(active_backend, 'last_output', None)
+            rejected = social_answer if social_answer is not None else answer if answer is not None else getattr(active_backend, 'last_output', None)
             self.store.fail(call_id, getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__)
             raise

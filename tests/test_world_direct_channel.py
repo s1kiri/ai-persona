@@ -25,7 +25,9 @@ class DirectChannelTests(unittest.TestCase):
 
     def before_channel(self):
         cid = self.session.prepare(draw=0)['id']
-        self.backend.answers += ['MY-RAW-IMPULSE', choice(action='MY-RAW-IMPULSE'), event(pattern=cid),
+        observation=event(pattern=cid)
+        observation['threads'][0]['due_minute']=self.store.get('minute')+100
+        self.backend.answers += ['MY-RAW-IMPULSE', choice(action='MY-RAW-IMPULSE'), observation,
                                  outcome(), experience(cid+'-outcome', note='MY-RAW-AFTER')]
         for _ in range(5): self.session.step(cid)
         return cid
@@ -73,15 +75,42 @@ class DirectChannelTests(unittest.TestCase):
         self.assertEqual(self.store.monitor()['posts'], [])
         self.assertEqual(self.store.cycle(cid)['status'], 'complete')
 
-    def test_private_or_invented_source_is_still_rejected(self):
-        for source in ('-experience', '-invented'):
+    def test_own_thought_can_be_shared_but_invented_or_other_private_source_is_rejected(self):
+        cid = self.before_channel()
+        self.backend.answers = [{'decision':'post','text':'MY-RAW-AFTER','source_ids':[cid+'-experience']}]
+        self.session.step(cid)
+        self.assertEqual(self.store.monitor()['posts'][0]['value']['text'],'MY-RAW-AFTER')
+        self.session.simulated_audience=False
+        with self.store.lock,self.store.db:
+            self.store.register_actor('other','Other')
+            self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
+                ('other-cycle','other','complete','done',self.store.get('revision'),json.dumps({'results':{}}),0))
+            self.store.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
+                ('other-experience','other-cycle','other','experience',self.store.get('minute'),json.dumps({'note':'Private','concerns':[],'director_signal':''})))
+        count=len(self.store.monitor()['posts'])
+        for source in ('other-experience', 'invented'):
             with self.subTest(source=source):
                 cid = self.before_channel()
-                self.backend.answers = [{'decision': 'post', 'text': 'мысль', 'source_ids': [cid+source]}]
+                self.backend.answers = [{'decision': 'post', 'text': 'мысль', 'source_ids': [source]}]
                 with self.assertRaises(ValueError): self.session.step(cid)
-                self.assertEqual(self.store.monitor()['posts'], [])
+                self.assertEqual(len(self.store.monitor()['posts']), count)
                 self.assertEqual(self.store.cycle(cid)['status'], 'blocked')
                 self.store.abandon(cid)
+
+    def test_saved_direct_expression_recovers_without_model_replay_or_usage_rewrite(self):
+        cid=self.before_channel()
+        original={'decision':'post','text':'EXACT SAVED THOUGHT','source_ids':[cid+'-experience']}
+        call_id,_=self.store.claim(cid,None)
+        self.store.fail(call_id,{'input_tokens':123},original,'ValueError')
+        calls=len(self.backend.inputs)
+        self.store.recover_channel(cid)
+        self.store.recover_channel(cid)
+        self.assertEqual(self.store.cycle(cid)['status'],'complete')
+        self.assertEqual(len(self.store.monitor()['posts']),1)
+        self.assertEqual(self.store.monitor()['posts'][0]['value']['text'],original['text'])
+        self.assertEqual(len(self.backend.inputs),calls)
+        receipt=self.store.db.execute('SELECT status,usage FROM world_calls WHERE id=?',(call_id,)).fetchone()
+        self.assertEqual(receipt['status'],'failed');self.assertEqual(json.loads(receipt['usage']),{'input_tokens':123})
 
     def test_direct_reply_targets_existing_comments(self):
         cid = self.before_channel()

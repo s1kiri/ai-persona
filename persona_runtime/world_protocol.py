@@ -197,6 +197,8 @@ def validate_result(stage, value, state, brief):
         available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome', 'research', 'audience', 'post') and
                      brief['actor_id'] in e['value'].get('visible_to', [e['actor_id']])}
         available.update(state.get('public_evidence_ids', []))
+        if stage == 'channel':
+            available.update(state.get('own_expression_ids', []))
         if not set(value['source_ids']) <= available:
             raise ValueError('channel source must be observed or an own public expression')
         expression = value['text'] if stage == 'channel' else value['focus']

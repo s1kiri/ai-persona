@@ -58,8 +58,16 @@ EXPERIENCE_SCHEMA = obj({'note': string(800), 'concerns': array(CONCERN, 3),
                           'director_signal': string(300)})
 AUDIENCE_SCHEMA = obj({'post_id': string(80),
                        'comments': array(obj({'speaker': string(60), 'text': string(500)}), 3)})
+HOOK = obj({'id': string(80), 'anchor_ids': array(string(80), 3),
+            'actor_ids': array(string(80), 8), 'domain': enum(DOMAINS),
+            'opens_minute': {'type': 'integer', 'minimum': 0},
+            'closes_minute': {'type': 'integer', 'minimum': 0},
+            'route': string(400), 'npc_want': string(400),
+            'friction': string(400), 'temptation': string(400)})
+HORIZON_SCHEMA = obj({'hooks': {**array(HOOK, 3), 'minItems': 1}})
 SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA,
-           'share': SHARE_SCHEMA, 'experience': EXPERIENCE_SCHEMA, 'audience': AUDIENCE_SCHEMA}
+           'share': SHARE_SCHEMA, 'experience': EXPERIENCE_SCHEMA, 'audience': AUDIENCE_SCHEMA,
+           'horizon': HORIZON_SCHEMA}
 
 
 def clock_at(minute):
@@ -165,6 +173,10 @@ def validate_patch(value, state, settings):
 
 def validate_result(stage, value, state, brief):
     validate_shape(value, SCHEMAS[stage])
+    if stage == 'horizon':
+        from .world_hooks import validate_horizon
+        validate_horizon(value, state)
+        return value
     if stage == 'audience':
         if any(not c['speaker'].strip() or not c['text'].strip() for c in value['comments']):
             raise ValueError('empty fictional comment')
@@ -210,6 +222,10 @@ def validate_result(stage, value, state, brief):
     validate_clock(value['observation'], state['minute'])
     ids, threads = validate_patch(value, state, brief['settings'])
     if stage == 'world':
+        exposure = brief.get('exposure')
+        if exposure and (value['beat'] == 'quiet' or not value['thread_id'] or
+                         not set(exposure['anchor_ids']) & set(value['entity_ids'])):
+            raise ValueError('selected opening must become an observable unfinished situation')
         if not brief['new_event_allowed']:
             existing_entities = {e['id'] for e in state['entities']}
             existing_threads = {t['id'] for t in state['threads']}
@@ -242,6 +258,8 @@ def validate_result(stage, value, state, brief):
         thread_id = value['thread_id']
         if thread_id is not None and thread_id not in threads:
             raise ValueError('unknown story')
+        if exposure and threads[thread_id]['status'] == 'closed':
+            raise ValueError('opening cannot resolve the story before the actor chooses')
         if value['beat'] in ('consequence', 'return', 'closure') and not value['causes']:
             raise ValueError('continuation requires a stored cause')
     return value

@@ -135,7 +135,7 @@ class PersonalTests(unittest.TestCase):
                            'Synthetic post about the discovery.']
         for _ in range(8): session.step(cycle['id'])
         worker = backend.inputs[3][2]
-        self.assertEqual(worker, {'task_id': cycle['id'], 'question': 'Look up a topic.'})
+        self.assertEqual(worker, {'task_id': cycle['id'], 'question': 'Look up a topic.', 'topic': 'Try something new.'})
         self.assertNotIn('MY-PERSONA', backend.inputs[3][1])
         self.assertIn('Synthetic fact.', json.dumps(backend.inputs[5][2]))
         self.assertIn('https://example.org/evidence', json.dumps(backend.inputs[-1][2]))

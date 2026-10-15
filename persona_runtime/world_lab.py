@@ -44,6 +44,8 @@ class Laboratory:
         value['research_enabled'] = bool(self.session and self.session.research_enabled)
         value['lossless_intentions'] = bool(self.session and self.session.lossless_intentions)
         value['simulated_audience'] = bool(self.session and self.session.simulated_audience)
+        value['active_world'] = bool(self.session.active_world if self.session else
+                                    value['cycles'] and value['cycles'][0]['value'].get('active_world'))
         value['night'] = self.store.get('night')
         return value
 
@@ -172,6 +174,7 @@ def main(argv=None):
     parser.add_argument('--research', action='store_true', help='allow character-chosen bounded native web research')
     parser.add_argument('--lossless-intentions', action='store_true', help='account for every intent fragment and explicit recovery decisions')
     parser.add_argument('--simulated-audience', action='store_true', help='deliver explicitly fictional local reader comments before the next free choice')
+    parser.add_argument('--active-world', action='store_true', help='plan resident openings and observe the world before choosing')
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
@@ -185,6 +188,8 @@ def main(argv=None):
         parser.error('lossless transfer requires written intentions')
     if args.simulated_audience and not args.personal_life:
         parser.error('simulated readers require personal life')
+    if args.active_world and not args.personal_life:
+        parser.error('active world requires personal life')
     if args.background:
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         command = [sys.executable, '-m', 'persona_runtime.world_lab', '--data-dir', str(destination),
@@ -203,6 +208,8 @@ def main(argv=None):
             command += ['--lossless-intentions']
         if args.simulated_audience:
             command += ['--simulated-audience']
+        if args.active_world:
+            command += ['--active-world']
         fd = os.open(destination / 'lab.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
@@ -257,7 +264,7 @@ def main(argv=None):
                                    autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
                                    personal_life=args.personal_life, research_enabled=args.research,
                                    research_backend=research_backend, lossless_intentions=args.lossless_intentions,
-                                   simulated_audience=args.simulated_audience)
+                                   simulated_audience=args.simulated_audience, active_world=args.active_world)
         lab = Laboratory(store, session)
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)

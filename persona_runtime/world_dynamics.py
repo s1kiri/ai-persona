@@ -2,7 +2,7 @@
 
 Mechanisms describe how a situation can start, not a ready plot or a quota
 of mishaps. Existing event frequency, quiet and surprise controls still gate it.
-The default live process does not enable this candidate.
+Fresh worlds keep the original default; live activation is persisted explicitly.
 """
 from collections import Counter
 import copy
@@ -31,7 +31,7 @@ def planning_directions(state, actor):
     the generated scene is funny or even matches its assigned mechanism.
     """
     recent=recent_mechanisms(state,actor)
-    waiting=[h.get('mechanism') for h in state.get('hooks',[]) if actor in h['actor_ids']
+    waiting=[h.get('mechanism') for h in state.get('hooks',[]) if not h.get('superseded') and actor in h['actor_ids']
              and actor not in h.get('exposed_to',[]) and h['closes_minute']>=state['minute']]
     counts=Counter(recent+waiting)
     order=list(MECHANISMS)

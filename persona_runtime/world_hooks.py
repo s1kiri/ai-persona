@@ -25,7 +25,7 @@ def validate_horizon(value, state):
 
 
 def pending_hooks(state, actor, available=False):
-    return [h for h in state.get('hooks', []) if actor in h['actor_ids'] and actor not in h['exposed_to']
+    return [h for h in state.get('hooks', []) if not h.get('superseded') and actor in h['actor_ids'] and actor not in h['exposed_to']
             and h['closes_minute'] >= state['minute']
             and (not available or h['opens_minute'] <= state['minute'])]
 

@@ -90,7 +90,7 @@ def split_text(text, limit=3500):
 
 
 class ChannelLife:
-    def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None, social_enabled=False):
+    def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None, social_enabled=False, lively_world=None):
         self.lab, self.store, self.connection = lab, lab.store, connection
         self.persona, self.renderer, self.now = persona, renderer, now
         self.cancel = lab.session.cancel
@@ -112,6 +112,12 @@ class ChannelLife:
             if 'deferred_until' not in columns:
                 self.store.db.execute('ALTER TABLE channel_read_batches ADD COLUMN deferred_until REAL')
             self.store.put('life_controls',{**DEFAULT_CONTROLS,**self.store.get('life_controls')})
+            if self.store.get('world_profile') is None:
+                self.store.put('world_profile', {'active': lab.session.lively_world, 'requested': lab.session.lively_world})
+            lab.session.lively_world = self.store.get('world_profile')['active']
+        if lively_world is not None:
+            self.request_world_profile(lively_world)
+        self.sync_world_profile()
         if social_enabled:
             from .channel_social import SocialMemory
             self.social=SocialMemory(self.store,now=self.now)
@@ -119,6 +125,40 @@ class ChannelLife:
             self.lab.session.channel_extension=self.social
             self.backfill_people()
             self.social.gallery.backfill()
+
+    def request_world_profile(self, lively):
+        if type(lively) is not bool:
+            raise ValueError('invalid world profile')
+        with self.store.lock, self.store.db:
+            self.store.put('world_profile', {**self.store.get('world_profile'), 'requested': lively})
+
+    def sync_world_profile(self):
+        """Finish committed episodes in their original mode, then switch once.
+
+        Unseen possibilities are superseded, not deleted or made into events.
+        Already exposed hooks and all actual stories retain their continuity.
+        """
+        with self.store.lock, self.store.db:
+            profile = self.store.get('world_profile')
+            row = self.store.db.execute("SELECT value FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid LIMIT 1").fetchone()
+            if row:
+                self.lab.session.lively_world = json.loads(row[0]).get('lively_world', False)
+                return
+            if profile['active'] != profile['requested']:
+                superseded = []
+                for row in self.store.db.execute('SELECT id,value FROM world_hooks').fetchall():
+                    hook = json.loads(row['value'])
+                    if hook.get('superseded') or hook.get('exposed_to') or hook['closes_minute'] < self.store.get('minute'):
+                        continue
+                    hook['superseded'] = {'reason': 'world_profile_changed', 'at': self.now()}
+                    self.store.db.execute('UPDATE world_hooks SET value=? WHERE id=?', (json.dumps(hook, ensure_ascii=False), row['id']))
+                    superseded.append(row['id'])
+                history = self.store.get('world_profile_history') or []
+                history.append({'at': self.now(), 'from': profile['active'], 'to': profile['requested'], 'superseded_hook_ids': superseded})
+                self.store.put('world_profile_history', history)
+                profile = {**profile, 'active': profile['requested']}
+                self.store.put('world_profile', profile)
+            self.lab.session.lively_world = profile['active']
 
     def state(self):
         with self.store.lock:
@@ -133,6 +173,7 @@ class ChannelLife:
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
                     'persona_sha256': hashlib.sha256(self.persona.encode()).hexdigest(),
                     'role_boundary': {'active': True, 'on_violation': 'pause_before_delivery'},
+                    'world_profile': {**self.store.get('world_profile'), 'active': self.lab.session.lively_world},
                     'awake': self.store.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
             if self.social:
                 value.update(self.social.context())
@@ -502,6 +543,7 @@ class ChannelLife:
                 return
             if self.connection.poll_blocked:
                 return self.block('Приём Telegram остановлен. Следующие публикации и вызовы на паузе.')
+            self.sync_world_profile()
             if self.social:
                 return self.tick_social(status)
             with self.store.lock:
@@ -598,6 +640,8 @@ def main(argv=None):
     parser.add_argument('--persona', type=Path, required=True)
     parser.add_argument('--speech-contract', type=Path, required=True)
     parser.add_argument('--environment', type=Path)
+    parser.add_argument('--lively-world', action='store_true', default=None,
+                        help='enable incident dynamics after the current episode; persisted across restarts')
     parser.add_argument('--fresh', action='store_true')
     parser.add_argument('--start', action='store_true')
     parser.add_argument('--awake-hours', type=int, default=6)
@@ -655,7 +699,7 @@ def main(argv=None):
                            free_intentions=True, research_enabled=True, research_backend=research, lossless_intentions=True,
                            active_world=True, direct_channel=True, continuous=True, external_channel=True, cancel=stopping)
     lab = Laboratory(store, session)
-    life = ChannelLife(lab, connection, persona, renderer, social_enabled=True)
+    life = ChannelLife(lab, connection, persona, renderer, social_enabled=True, lively_world=args.lively_world)
     setup = Setup(connection, life=life)
     servers, threads, awake = [], [], AwakeGuard(life, args.awake_hours)
     try:

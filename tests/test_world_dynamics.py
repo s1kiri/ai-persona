@@ -83,7 +83,7 @@ class DynamicsTests(unittest.TestCase):
     def test_separate_channel_visit_keeps_the_candidate_mode(self):
         social=social_fixtures.SocialTests();social.setUp()
         try:
-            social.fixture.session.lively_world=True
+            social.fixture.life.request_world_profile(True)
             social.root()
             cycle=social.store.monitor()['cycles'][0]
             self.assertTrue(cycle['value']['lively_world'])

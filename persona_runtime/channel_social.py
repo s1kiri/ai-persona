@@ -226,6 +226,7 @@ class SocialMemory:
         for r in self.store.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND stage IN ('audience','post','outcome','world','experience','impulse','choice')", (actor,)):
             value=json.loads(r['value'])
+            if r['stage']=='post' and value.get('retracted'):continue
             if r['stage'] in ('world','outcome'):
                 if actor not in value.get('visible_to',[r['actor_id']]):
                     continue
@@ -303,7 +304,7 @@ class SocialMemory:
             roots=[]
             for row in self.store.db.execute("SELECT value FROM world_events WHERE actor_id=? AND stage='post' ORDER BY rowid DESC",(actor,)):
                 value=json.loads(row['value'])
-                if not value.get('reply_to') and value.get('delivery',{}).get('status')=='sent':
+                if not value.get('retracted') and not value.get('reply_to') and value.get('delivery',{}).get('status')=='sent':
                     roots.append(value['text'])
                     if len(roots)==4:break
             payload['previous_posts']=roots
@@ -331,6 +332,8 @@ class SocialMemory:
         validate_shape(answer, schema)
         evidence = self.evidence(actor)
         if stage=='share':
+            from .role_boundary import check_character_speech
+            check_character_speech(answer['text'],self.store.db.execute('SELECT name FROM world_actors WHERE id=?',(actor,)).fetchone()[0])
             self.validate_people(answer['people'], actor, evidence)
             attention = payload['attention']; focus = set(attention.get('focus_ids', []))
             attachment=answer['attachment']

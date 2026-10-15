@@ -132,6 +132,7 @@ class ChannelLife:
                     'phase': self.current_phase, 'controls': self.store.get('life_controls'),
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
                     'persona_sha256': hashlib.sha256(self.persona.encode()).hexdigest(),
+                    'role_boundary': {'active': True, 'on_violation': 'pause_before_delivery'},
                     'awake': self.store.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
             if self.social:
                 value.update(self.social.context())
@@ -304,6 +305,9 @@ class ChannelLife:
             library.close()
 
     def deliver(self, post):
+        if post['value'].get('retracted'):return
+        from .role_boundary import check_character_speech
+        check_character_speech(post['value']['text'],self.store.db.execute('SELECT name FROM world_actors WHERE id=?',(post['actor_id'],)).fetchone()[0])
         with self.store.lock, self.store.db:
             old = self.store.db.execute('SELECT status FROM channel_jobs WHERE post_id=?', (post['id'],)).fetchone()
             if old:
@@ -546,7 +550,8 @@ class ChannelLife:
             with self.store.lock, self.store.db:
                 self.store.put('life_error_detail', {'type': type(error).__name__, 'phase': self.current_phase,
                                                     'telegram_code': error.code if isinstance(error, TelegramError) else None})
-            self.block(str(error) if isinstance(error, TelegramError) else
+            from .role_boundary import RoleBoundaryError
+            self.block('Реплика вышла из роли. Отправка заблокирована; текст сохранён для разбора.' if isinstance(error,RoleBoundaryError) else str(error) if isinstance(error, TelegramError) else
                        'Жизнь остановлена после ошибки. Память и результат сохранены; автоматического повтора нет.')
         finally:
             self.lab.busy = False

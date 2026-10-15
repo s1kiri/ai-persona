@@ -296,6 +296,7 @@ class WorldStore:
             elif row['actor_id'] == actor_id and row['stage'] == 'experience':
                 entry['personal_record'] = value
             elif row['actor_id'] == actor_id and row['stage'] == 'post':
+                if value.get('retracted'):continue
                 entry['public_expression'] = value['text']
             elif row['actor_id'] == actor_id and row['stage'] in ('impulse', 'choice'):
                 entry['text'] = value.get('text', value.get('action', ''))
@@ -324,6 +325,7 @@ class WorldStore:
         recent = [{**dict(r), 'value': json.loads(r['value'])} for r in reversed(self.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND stage IN ('post','audience') ORDER BY rowid DESC LIMIT 12",
             (actor,)).fetchall())]
+        recent=[e for e in recent if not e['value'].get('retracted')]
         focus=(self.get('channel_attention') or {}).get('focus_ids',[])
         known={e['id'] for e in recent}
         for source in focus:
@@ -332,7 +334,7 @@ class WorldStore:
             entry={**dict(row),'value':json.loads(row['value'])}
             for eid in (entry['value']['post_id'],source):
                 extra=self.db.execute("SELECT id,actor_id,stage,minute,value FROM world_events WHERE id=? AND actor_id=?",(eid,actor)).fetchone()
-                if extra and eid not in known:
+                if extra and eid not in known and not json.loads(extra['value']).get('retracted'):
                     recent.append({**dict(extra),'value':json.loads(extra['value'])});known.add(eid)
         return recent
 
@@ -458,6 +460,10 @@ class WorldStore:
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
+            if stage in ('speech','post','impulse','experience') or stage=='share' and cycle['value'].get('direct_channel'):
+                from .role_boundary import check_character_speech
+                expression=value if isinstance(value,str) else value.get('note','') if stage=='experience' else value.get('text','')
+                check_character_speech(expression,self.db.execute('SELECT name FROM world_actors WHERE id=?',(cycle['actor_id'],)).fetchone()[0])
             if _reviewed_outcome:
                 saved=cycle['value'].get('rejected',{}).get('answer',{})
                 projected={**saved,'entities':[e for e in saved.get('entities',[]) if e['id']!=cycle['actor_id']]}
@@ -704,6 +710,7 @@ class WorldStore:
         ids = []
         for row in self.db.execute('SELECT id,actor_id,stage,value FROM world_events'):
             value = json.loads(row['value'])
+            if value.get('retracted'):continue
             if row['stage'] in ('world', 'outcome'):
                 if actor in value.get('visible_to', [row['actor_id']]):
                     ids.append(row['id'])
@@ -716,6 +723,7 @@ class WorldStore:
         ids = []
         for row in self.db.execute('SELECT id,actor_id,stage,value FROM world_events'):
             value = json.loads(row['value'])
+            if value.get('retracted'):continue
             if row['stage'] in ('world', 'outcome') and actor in value.get('visible_to', [row['actor_id']]):
                 ids.append(row['id'])
             elif row['actor_id'] == actor and row['stage'] in ('research', 'audience', 'post'):
@@ -1023,6 +1031,9 @@ class WorldSession:
                 else:
                     instruction+='Чаще выбирай посильные законченные попытки примерно такого масштаба. Большая затея может продолжаться несколькими самостоятельными шагами с сохранённым намерением; не теряй её между ними. Долгое занятие тоже допустимо, когда именно его хочется. Не мельчи ради количества и не объявляй читателям служебный лимит.'
             output_role = 'intent' if stage == 'choice' and lossless else 'channel' if stage == 'share' and direct else stage
+            if stage in ('impulse','choice','experience','share','post','speech'):
+                from .role_boundary import ROLE_RULES
+                instruction+='\n'+ROLE_RULES
             social_role=self.channel_extension is not None and stage in ('share','experience')
             if social_role:
                 from .channel_social import LIVE_INSTRUCTIONS

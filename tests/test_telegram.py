@@ -41,6 +41,9 @@ class API:
         if method=='setMessageReaction':
             if self.fail_send:raise RuntimeError('synthetic reaction timeout')
             return True
+        if method=='deleteMessage':
+            if self.fail_send:raise RuntimeError('synthetic deletion timeout')
+            return True
         raise AssertionError(method)
 
 
@@ -204,6 +207,24 @@ class TelegramTests(unittest.TestCase):
     def test_second_owner_cannot_consume_same_update_stream(self):
         with self.assertRaises(TelegramError):
             Connection(self.temp.name, API)
+
+    def test_explicit_delete_only_own_receipt_is_idempotent_after_restart(self):
+        self.bind();receipt=self.connection.send('delete-me','synthetic own text')
+        result=self.connection.delete_own(receipt['chat_id'],receipt['message_id'])
+        self.assertEqual(result['status'],'deleted')
+        self.assertEqual(self.api.calls[-1][0],'deleteMessage')
+        with self.assertRaises(TelegramError):self.connection.delete_own(GROUP['id'],51)
+        self.connection.close();self.connection=Connection(self.temp.name,API)
+        self.assertEqual(self.connection.delete_own(receipt['chat_id'],receipt['message_id']),result)
+        self.assertFalse(self.connection.api.calls)
+        self.assertEqual(self.connection.state()['outbox'][0]['status'],'sent')
+
+    def test_unknown_deletion_is_not_repeated(self):
+        self.bind();receipt=self.connection.send('delete-unknown','synthetic own text');self.api.fail_send=True
+        with self.assertRaises(TelegramError):self.connection.delete_own(receipt['chat_id'],receipt['message_id'])
+        calls=len(self.api.calls)
+        with self.assertRaises(TelegramError):self.connection.delete_own(receipt['chat_id'],receipt['message_id'])
+        self.assertEqual(len(self.api.calls),calls)
 
     def test_reaction_targets_known_comment_and_duplicate_does_not_touch_network(self):
         self.bind();self.receive(comment())

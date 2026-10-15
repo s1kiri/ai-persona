@@ -56,7 +56,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class BotAPI:
-    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto', 'setMessageReaction'}
+    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto', 'setMessageReaction', 'deleteMessage'}
 
     def __init__(self, token, opener=None):
         self._token = checked_token(token)
@@ -157,6 +157,9 @@ class TelegramConnection:
                 fingerprint TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS reactions(key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,emoji TEXT NOT NULL,status TEXT NOT NULL,error TEXT);
+            CREATE TABLE IF NOT EXISTS deletions(chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+                status TEXT NOT NULL,created REAL NOT NULL,error TEXT,
+                PRIMARY KEY(chat_id,message_id));
         ''')
         with self.db:
             self.db.execute("UPDATE outbox SET status='unknown',error=? WHERE status='sending'",
@@ -397,6 +400,27 @@ class TelegramConnection:
                 self.db.execute('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?)',
                                 (chat_id, receipt['message_id'], comment[0], text, 'Гарик', 'own', self.get('bot')['id'], time.time()))
             return dict(self.db.execute('SELECT * FROM outbox WHERE key=?', (key,)).fetchone())
+
+    def delete_own(self, chat_id, message_id):
+        """Explicit operator action only; receipt must belong to our sent outbox."""
+        with self.operation,self.lock,self.db:
+            sent=self.db.execute("SELECT 1 FROM outbox WHERE chat_id=? AND message_id=? AND status='sent'",(chat_id,message_id)).fetchone()
+            if not sent or not self.api:raise TelegramError('Удалять можно только своё подтверждённое сообщение.')
+            prior=self.db.execute('SELECT status FROM deletions WHERE chat_id=? AND message_id=?',(chat_id,message_id)).fetchone()
+            if prior:
+                if prior[0]=='deleted':return {'chat_id':chat_id,'message_id':message_id,'status':'deleted'}
+                raise TelegramError('Предыдущее удаление не подтверждено; автоматического повтора нет.')
+            self.db.execute('INSERT INTO deletions VALUES(?,?,?,?,?)',(chat_id,message_id,'started',time.time(),None))
+        try:
+            result=self.api.call('deleteMessage',{'chat_id':chat_id,'message_id':message_id})
+            if result is not True:raise TelegramError('Telegram не подтвердил удаление.')
+        except Exception:
+            with self.lock,self.db:
+                self.db.execute("UPDATE deletions SET status='unknown',error='receipt missing; no automatic retry' WHERE chat_id=? AND message_id=?",(chat_id,message_id))
+            raise TelegramError('Удаление не подтверждено; повтор заблокирован.') from None
+        with self.lock,self.db:
+            self.db.execute("UPDATE deletions SET status='deleted' WHERE chat_id=? AND message_id=?",(chat_id,message_id))
+        return {'chat_id':chat_id,'message_id':message_id,'status':'deleted'}
 
     def state(self):
         with self.lock:

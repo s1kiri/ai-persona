@@ -9,13 +9,25 @@ class Night:
     def __init__(self, lab):
         self.lab, self.store = lab, lab.store
 
+    def interval(self, plan, latest, state):
+        """Compress a virtual wait, preserving an actor's revisit and due events."""
+        chosen = latest['value']['results'].get('choice', {}) if latest else {}
+        virtual = min(plan['virtual_minutes'], chosen.get('revisit_minutes', plan['virtual_minutes']))
+        due = [t['due_minute'] - state['minute'] for t in state['threads']
+               if t['status'] != 'closed' and t['due_minute'] is not None]
+        if due:
+            virtual = min(virtual, max(1, min(due)))
+        virtual = max(1, virtual)
+        seconds = max(5, virtual * 60 * plan['interval_minutes'] / plan['virtual_minutes'])
+        return virtual, seconds
+
     def start(self, request, now=None):
         now = time.time() if now is None else now
         if set(request) != {'id', 'hours', 'interval_minutes', 'virtual_minutes', 'max_calls', 'speech_every'}:
             raise ValueError('invalid night controls')
         uuid.UUID(request['id'])
-        for key, lower, upper in [('hours', 1, 12), ('interval_minutes', 5, 90),
-                                  ('virtual_minutes', 5, 360), ('max_calls', 3, 100), ('speech_every', 0, 12)]:
+        for key, lower, upper in [('hours', 1, 12), ('interval_minutes', 1, 90),
+                                  ('virtual_minutes', 5, 360), ('max_calls', 3, 200), ('speech_every', 0, 12)]:
             if type(request[key]) is not int or not lower <= request[key] <= upper:
                 raise ValueError('invalid night control')
         if self.lab.session is None:
@@ -37,6 +49,9 @@ class Night:
                     'last_cycle': latest['id'] if latest and latest['status'] == 'complete' else None,
                     'initial_cycle': latest['id'] if latest and latest['status'] == 'complete' else None,
                     'cycles_completed': 0, 'ended': None}
+            virtual, seconds = self.interval(plan, latest, state)
+            plan.update(next_virtual_minutes=virtual,
+                        next_due=now+seconds if plan['initial_cycle'] else now)
             self.store.put('night', plan)
             self.store.put('paused', False)
             return plan
@@ -75,9 +90,11 @@ class Night:
         if latest and latest['status'] == 'complete' and latest['id'] != plan['last_cycle']:
             count = plan['cycles_completed'] + 1
             if plan['speech_every'] and count % plan['speech_every'] == 0 and 'speech' not in latest['value']['results']:
-                self.store.request_speech(latest['id'], 'private', 'Как продвигается то, чем ты занимался?')
+                self.store.request_speech(latest['id'], 'private', 'Ты сейчас чем занят?')
                 return
-            plan.update(cycles_completed=count, last_cycle=latest['id'], next_due=now+plan['interval_minutes']*60)
+            virtual, seconds = self.interval(plan, latest, state)
+            plan.update(cycles_completed=count, last_cycle=latest['id'], next_due=now+seconds,
+                        next_virtual_minutes=virtual)
             with self.store.lock, self.store.db:
                 # Do not revive a plan that the user stopped during this tick.
                 if self.store.get('night')['status'] == 'running':
@@ -86,7 +103,7 @@ class Night:
         if now >= plan['next_due']:
             if plan['call_ceiling'] - state['call_count'] < 3:
                 return self.stop('budget', now)
-            self.store.prepare('garik', plan['virtual_minutes'])
+            self.store.prepare('garik', plan.get('next_virtual_minutes', plan['virtual_minutes']))
 
     def loop(self, stopping):
         while not stopping.wait(1):

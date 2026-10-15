@@ -214,6 +214,35 @@ class WorldTests(unittest.TestCase):
         self.assertGreater(director(state, 'garik', 60, .5)['new_event_probability'], director(state, 'garik', 15, .5)['new_event_probability'])
         self.assertEqual(self.store.get('settings')['events_per_hour'], 1)
 
+    def test_long_quiet_streak_yields_only_when_a_new_arrival_is_available(self):
+        state = self.store.state()
+        state['settings'] = {**DEFAULT_SETTINGS, 'quiet': 10}
+        state['history'] = [{'id': 'quiet-'+str(i), 'stage': 'world',
+                             'value': {'beat': 'quiet'}} for i in range(3)]
+        self.assertNotIn('quiet', director(state, 'garik', 60, 0)['allowed_beats'])
+        self.assertIn('quiet', director(state, 'garik', 60, 1)['allowed_beats'])
+        state['settings']['events_per_hour'] = 0
+        self.assertIn('quiet', director(state, 'garik', 60, 0)['allowed_beats'])
+        state['settings'].update(events_per_hour=6, quiet=100)
+        self.assertIn('quiet', director(state, 'garik', 60, 0)['allowed_beats'])
+
+    def test_previous_speech_is_returned_only_to_its_original_surface(self):
+        captured = []
+        for index, (surface, text) in enumerate([
+                ('private', 'Synthetic private detail.'),
+                ('channel_draft', 'Synthetic public draft.'),
+                ('private', 'Synthetic next private reply.')]):
+            cycle = self.prepare()
+            scene = event(pattern='test-pattern-'+str(index))
+            scene['threads'][0]['due_minute'] = None
+            session, backend = self.session(scene, choice(), outcome(), text)
+            for _ in range(3):
+                session.step(cycle['id'])
+            self.store.request_speech(cycle['id'], surface, 'Synthetic question.')
+            session.step(cycle['id'])
+            captured.append(backend.inputs[-1][2]['recent_spoken'])
+        self.assertEqual(captured, [[], [], ['Synthetic private detail.']])
+
     def test_open_story_cap_and_closed_story_are_not_overwritten(self):
         cycle = self.prepare()
         self.store.set_settings({**DEFAULT_SETTINGS, 'max_threads': 1}, 0)

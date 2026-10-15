@@ -28,7 +28,7 @@ function renderControls(){
  for(const key of nightFields){$('night-'+key).disabled=running;if(night&&!nightDirty)$('night-'+key).value=night[key];}
  nightLabels();
  const names={finished:'Завершён по времени',budget:'Завершён по лимиту',error:'Остановлен по ошибке',stopped:'Остановлен вручную'};
- $('night-status').textContent=running?`До ${new Date(night.deadline*1000).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'})} МСК · завершено эпизодов: ${night.cycles_completed} · предел вызовов: ${night.call_ceiling}${state.paused?' · на паузе':''}`:(night?names[night.status]||'Остановлен':'Не запущен. Остановка по сроку, лимиту или ошибке.');
+ $('night-status').textContent=running?`До ${new Date(night.deadline*1000).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'})} МСК · ускорение ×${Number((night.virtual_minutes/night.interval_minutes).toFixed(1))} · завершено эпизодов: ${night.cycles_completed} · предел вызовов: ${night.call_ceiling}${state.paused?' · на паузе':''}`:(night?names[night.status]||'Остановлен':'Не запущен. Остановка по сроку, лимиту или ошибке.');
 }
 function render(value){
  state=value;

@@ -155,7 +155,7 @@ def main(argv=None):
     parser.add_argument('--max-calls', type=int, default=24)
     parser.add_argument('--background', action='store_true', help='detach the laboratory from the terminal and wait for readiness')
     args = parser.parse_args(argv)
-    if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 100:
+    if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
     root = Path(__file__).resolve().parent.parent
     destination = args.data_dir.expanduser().resolve()

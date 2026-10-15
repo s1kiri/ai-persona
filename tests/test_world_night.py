@@ -91,6 +91,31 @@ class NightTests(unittest.TestCase):
         self.tick(5000)
         self.assertEqual(len(self.backend.inputs), 3)
 
+    def test_acceleration_respects_revisit_and_an_earlier_world_deadline(self):
+        plan = {**self.request, 'interval_minutes': 1, 'virtual_minutes': 60}
+        latest = {'value': {'results': {'choice': {'revisit_minutes': 15}}}}
+        state = {'minute': 200, 'threads': []}
+        self.assertEqual(self.lab.night.interval(plan, latest, state), (15, 15))
+        state['threads'] = [{'status': 'waiting', 'due_minute': 203}]
+        self.assertEqual(self.lab.night.interval(plan, latest, state), (3, 5))
+        state['threads'][0]['status'] = 'closed'
+        self.assertEqual(self.lab.night.interval(plan, latest, state), (15, 15))
+
+    def test_selected_virtual_wait_is_persisted_and_used_for_next_episode(self):
+        self.backend.answers = [event(), choice(revisit_minutes=10), outcome()]
+        self.lab.night.start({**self.request, 'interval_minutes': 1, 'virtual_minutes': 60}, 1000)
+        for _ in range(5):
+            self.tick(1000)
+        plan = self.store.get('night')
+        self.assertEqual(plan['next_virtual_minutes'], 10)
+        self.assertEqual(plan['next_due'], 1010)
+        before = self.store.get('minute')
+        self.tick(1009)
+        self.assertEqual(len(self.store.monitor()['cycles']), 1)
+        self.tick(1010)
+        self.assertEqual(self.store.get('minute'), before+10)
+        self.assertEqual(len(self.backend.inputs), 3)
+
 
 if __name__ == '__main__':
     unittest.main()

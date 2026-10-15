@@ -61,6 +61,16 @@ def director(state, actor_id, elapsed, draw):
         if beat in weights:
             weights[beat] *= 1 + settings['continuity'] / 25 + bool(due) * 2
     weights['quiet'] *= 1 + settings['quiet'] / 15
+    quiet_streak = 0
+    for e in reversed([e for e in history if e['stage'] == 'world']):
+        if e['value']['beat'] != 'quiet':
+            break
+        quiet_streak += 1
+    # An available arrival should eventually change the circumstances. This
+    # never manufactures an arrival when frequency is zero or the gate is shut.
+    if novel and settings['quiet'] < 100 and quiet_streak >= 2 + settings['quiet'] // 20:
+        allowed.remove('quiet')
+        weights.pop('quiet')
     return {'actor_id': actor_id, 'minute': state['minute'], 'settings': settings,
             'new_event_allowed': novel, 'new_event_probability': round(probability, 4),
             'allowed_beats': allowed, 'allowed_domains': domains, 'beat_weights': weights,
@@ -367,14 +377,14 @@ class WorldStore:
 class WorldSession:
     """One stage per explicit click. No autonomous loop or external actions yet."""
     def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24):
-        if type(max_calls) is not int or not 1 <= max_calls <= 100:
+        if type(max_calls) is not int or not 1 <= max_calls <= 200:
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
         self.actor_prompts = dict(actor_prompts)
         self.speech_contract, self.max_calls = speech_contract, max_calls
 
     def step(self, cycle_id):
-        from .world_prompts import WORLD, CHOICE, OUTCOME
+        from .world_prompts import WORLD, CHOICE, OUTCOME, SPEECH_CONTEXT
         if self.store.cycle(cycle_id)['actor_id'] not in self.actor_prompts:
             raise WorldConflict('actor has no configured personality')
         call_id, cycle = self.store.claim(cycle_id, self.max_calls)
@@ -403,6 +413,15 @@ class WorldSession:
                            'moment': results.get('world', {}).get('observation'),
                            'outcome': results.get('outcome', {}).get('observation'),
                            'request': cycle['value'].get('speech_request')}
+                if stage == 'speech':
+                    instruction += '\n\n' + SPEECH_CONTEXT
+                    rows = self.store.db.execute(
+                        "SELECT e.value,c.value FROM world_events e JOIN world_cycles c ON c.id=e.cycle_id "
+                        "WHERE e.actor_id=? AND e.stage='speech' ORDER BY e.rowid DESC", (actor,)).fetchall()
+                    surface = cycle['value']['speech_request']['surface']
+                    spoken = [json.loads(r[0])['text'] for r in rows
+                              if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
+                    payload['recent_spoken'] = list(reversed(spoken))
             self.store.save_input(cycle_id, payload)
             answer, usage = self.backend.generate(stage, instruction, payload)
             self.store.complete(call_id, answer, usage)

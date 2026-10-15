@@ -72,3 +72,12 @@ test('attention slider saves independently of post timing and polling preserves 
  const body=JSON.parse(t.requests[0].options.body);assert.equal(body.visit_turns,2);assert.equal(body.away_minutes,5);assert.equal(body.post_every,undefined);
  t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
 });
+test('episode length is saved as a soft life control and survives polling while edited',async()=>{
+ const t=setup();t.ctx.live={paused:false,controls:{wake_minutes:5,episode_minutes:15,photos:true,visit_turns:3,away_minutes:5},world_calls:1,phase:'living',awake:null,error:null,reader_memory:[],own_intentions:[]};
+ t.run('render({...sample,configured:true,life:live})');
+ t.el('episode-minutes').value='10';t.el('episode-minutes').handlers.input();
+ t.run('render({...sample,configured:true,life:live})');assert.equal(t.el('episode-minutes').value,'10');
+ const promise=t.el('life-form').handlers.submit({preventDefault(){}});
+ const body=JSON.parse(t.requests[0].options.body);assert.equal(body.episode_minutes,10);assert.equal(body.wake_minutes,5);assert.equal(body.post_every,undefined);
+ t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
+});

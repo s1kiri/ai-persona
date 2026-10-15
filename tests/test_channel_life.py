@@ -142,6 +142,23 @@ class LifeTests(unittest.TestCase):
         for wrong in ({'wake_minutes':0,'photos':False},{'wake_minutes':30,'photos':'yes'}):
             with self.assertRaises(ValueError):self.life.configure(wrong)
 
+    def test_episode_pace_guides_choice_without_clamping_actual_duration(self):
+        from test_world import choice,outcome
+        from test_world_personal import quiet
+        self.life.configure({'episode_minutes':10,'wake_minutes':5})
+        self.store.set_settings({**self.store.get('settings'),'events_per_hour':0},0)
+        cycle=self.session.prepare(minutes=0,draw=1)
+        minute=self.store.get('minute')
+        self.backend.answers=[quiet(),'Rest.',choice(action='Rest.'),outcome(elapsed_minutes=45)]
+        for _ in range(4):self.session.step(cycle['id'])
+        calls={stage:payload for stage,_,payload in self.backend.inputs}
+        self.assertEqual(calls['impulse']['episode_pace']['target_minutes'],10)
+        self.assertTrue(calls['outcome']['episode_pace']['soft_target'])
+        self.assertEqual(self.store.get('minute'),minute+45)
+        self.assertNotIn('episode_pace',calls['world'])
+        for wrong in (0,95,True,'15'):
+            with self.assertRaises(ValueError):self.life.configure({'episode_minutes':wrong})
+
     def test_optional_photo_is_sent_through_bot_and_only_delivered_image_becomes_reference(self):
         self.backend.answers=[{'decision':'post','text':'look at this','source_ids':[]}]
         self.life.tick();self.life.tick();self.now+=60

@@ -11,10 +11,10 @@ function render(value){
   $('life-status').textContent=life.error?'Остановлен · нужна проверка':life.paused?'На паузе':'Живёт самостоятельно';
   const phases={share:'Решает, хочется ли написать',horizon:'Что затевают жители',world:'Замечает обстоятельства',impulse:'Чего хочется сейчас',choice:'Выбирает поступок',outcome:'Что получилось',experience:'Что осталось важным',research:'Ищет и читает',photo_choice:'Выбирает фотографию',delivery:'Отправляет выбранное',living:'Занят своим делом',waiting:'Между эпизодами',away:'Заглянул в Telegram и вернулся к своим делам',memory:'Вспоминает общение и свои намерения',reaction:'Ставит выбранную реакцию'};
   $('life-detail').textContent=life.error||`${phases[life.phase]||'Готовится'} · вызовов жизни: ${life.world_calls}`;
-  if(!lifeDirty){$('wake').value=life.controls.wake_minutes;$('photos').checked=life.controls.photos;$('visit-turns').value=life.controls.visit_turns??3;$('away-minutes').value=life.controls.away_minutes??5;}
+  if(!lifeDirty){$('wake').value=life.controls.wake_minutes;$('photos').checked=life.controls.photos;$('visit-turns').value=life.controls.visit_turns??3;$('away-minutes').value=life.controls.away_minutes??5;$('episode-minutes').value=life.controls.episode_minutes??15;}
   $('attention-controls').hidden=!life.reader_memory;
   $('visit-turns-value').textContent=$('visit-turns').value;$('away-minutes-value').textContent=$('away-minutes').value+' мин';
-  $('wake-value').textContent=$('wake').value+' мин';
+  $('wake-value').textContent=$('wake').value+' мин';$('episode-minutes-value').textContent=$('episode-minutes').value+' мин';
   $('life-save').disabled=busy||!lifeDirty;
   $('life-action').disabled=busy||!!life.error;$('life-action').textContent=life.paused?'Продолжить жизнь':'Пауза после текущего этапа';
   $('awake-status').textContent=life.awake?.active?(life.awake.until===null?'Mac защищён от сна, пока работает процесс Гарика. Блокировка экрана допустима.':`Mac защищён от сна до ${new Date(life.awake.until*1000).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'})} МСК. Блокировка экрана допустима.`):'Защита от сна сейчас не действует.';
@@ -77,7 +77,7 @@ $('channel-form').addEventListener('submit',event=>{event.preventDefault();retur
 $('test-post').addEventListener('click',()=>post('/api/test-post',{}));
 $('wake').addEventListener('input',()=>{lifeDirty=true;$('wake-value').textContent=$('wake').value+' мин';$('life-save').disabled=false;});
 $('photos').addEventListener('change',()=>{lifeDirty=true;$('life-save').disabled=false;});
-for(const id of ['visit-turns','away-minutes'])$(id).addEventListener('input',()=>{lifeDirty=true;$(id+'-value').textContent=$(id).value+(id==='away-minutes'?' мин':'');$('life-save').disabled=false;});
-$('life-form').addEventListener('submit',async event=>{event.preventDefault();const options={wake_minutes:Number($('wake').value),photos:$('photos').checked};if(state.life.reader_memory)Object.assign(options,{visit_turns:Number($('visit-turns').value),away_minutes:Number($('away-minutes').value)});if(await post('/api/life/settings',options)){lifeDirty=false;render(state);}});
+for(const id of ['visit-turns','away-minutes','episode-minutes'])$(id).addEventListener('input',()=>{lifeDirty=true;$(id+'-value').textContent=$(id).value+(id!=='visit-turns'?' мин':'');$('life-save').disabled=false;});
+$('life-form').addEventListener('submit',async event=>{event.preventDefault();const options={wake_minutes:Number($('wake').value),photos:$('photos').checked};if(state.life.controls.episode_minutes!==undefined)options.episode_minutes=Number($('episode-minutes').value);if(state.life.reader_memory)Object.assign(options,{visit_turns:Number($('visit-turns').value),away_minutes:Number($('away-minutes').value)});if(await post('/api/life/settings',options)){lifeDirty=false;render(state);}});
 $('life-action').addEventListener('click',()=>post('/api/life/action',{running:state.life.paused}));
 refresh();setInterval(()=>{if(!document.hidden)refresh();},2000);

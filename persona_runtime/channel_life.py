@@ -20,17 +20,18 @@ from .telegram_setup import Setup, LocalServer, handler as setup_handler
 
 MOSCOW = ZoneInfo('Europe/Moscow')
 START_DESIRE = 'Хочу завести свой Telegram-канал и делиться там своей жизнью: затеями, находками, мыслями и тем, что происходит. Пока это желание, а не уже написанный пост.'
-DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5}
+DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5, 'episode_minutes': 15}
 
 
 def controls_checked(value):
-    if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),{'wake_minutes','photos'}):
+    if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),set(DEFAULT_CONTROLS)-{'episode_minutes'},{'wake_minutes','photos'}):
         raise ValueError('invalid live life controls')
     value={**DEFAULT_CONTROLS,**value}
     if (
             type(value['wake_minutes']) is not int or not 5 <= value['wake_minutes'] <= 90 or
             type(value['photos']) is not bool or type(value['visit_turns']) is not int or not 1<=value['visit_turns']<=6 or
-            type(value['away_minutes']) is not int or not 1<=value['away_minutes']<=30):
+            type(value['away_minutes']) is not int or not 1<=value['away_minutes']<=30 or
+            type(value['episode_minutes']) is not int or not 5<=value['episode_minutes']<=90):
         raise ValueError('invalid live life controls')
     return dict(value)
 

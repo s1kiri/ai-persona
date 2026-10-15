@@ -915,6 +915,14 @@ class WorldSession:
                     spoken = [json.loads(r[0])['text'] for r in rows
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
+            pace=(self.store.get('life_controls') or {}).get('episode_minutes') if self.external_channel else None
+            if pace and (stage in ('impulse','outcome') or stage=='choice' and 'impulse' not in results):
+                payload['episode_pace']={'target_minutes':pace,'soft_target':True}
+                instruction+='\nepisode_pace — мягкий ориентир размера одного жизненного эпизода, не таймер поста и не ускорение часов. '
+                if stage=='outcome':
+                    instruction+='Учитывай естественное время выбранного поступка без искусственного растягивания бытовых мелочей. Не сжимай долгую готовку или дорогу ради ориентира и не обрывай уже выбранную цельную попытку без причины.'
+                else:
+                    instruction+='Чаще выбирай посильные законченные попытки примерно такого масштаба. Большая затея может продолжаться несколькими самостоятельными шагами с сохранённым намерением; не теряй её между ними. Долгое занятие тоже допустимо, когда именно его хочется. Не мельчи ради количества и не объявляй читателям служебный лимит.'
             output_role = 'intent' if stage == 'choice' and lossless else 'channel' if stage == 'share' and direct else stage
             social_role=self.channel_extension is not None and stage in ('share','experience')
             if social_role:

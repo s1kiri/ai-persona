@@ -49,6 +49,7 @@ class Laboratory:
         value['active_world'] = bool(self.session.active_world if self.session else
                                     value['cycles'] and value['cycles'][0]['value'].get('active_world'))
         value['night'] = self.store.get('night')
+        value['channel_life'] = self.store.get('channel_life')
         return value
 
     def prepare(self, actor_id, minutes):
@@ -134,6 +135,8 @@ def handler(lab):
                 value = json.loads(self.rfile.read(size))
                 if not isinstance(value, dict):
                     raise ValueError('object required')
+                if lab.store.get('channel_life') and self.path not in ('/api/settings', '/api/action'):
+                    raise WorldConflict('live channel owns its cycle; use pause and settings')
                 if self.path == '/api/settings' and set(value) == {'settings', 'revision'}:
                     lab.store.set_settings(value['settings'], value['revision'])
                 elif self.path == '/api/prepare' and set(value) == {'actor_id', 'minutes'}:

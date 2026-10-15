@@ -83,3 +83,8 @@ test('direct channel decisions show the exact text instead of a missing summary'
  assert.equal(t.el('timeline').children[0].children[1].textContent,'Хочу рассказать: блять');
  assert.match(t.el('posts-mode').textContent,/без переписывания/);
 });
+test('live Telegram life shows real publication mode and disables manual cycle mutations',()=>{
+ const t=setup();t.run('render({...sample,model_enabled:true,max_calls:null,channel_life:{enabled:true},paused:false,call_count:230})');
+ assert.equal(t.el('call-count').textContent,'230');assert.equal(t.el('prepare').disabled,true);
+ assert.equal(t.el('night-start').disabled,true);assert.match(t.el('scope').textContent,/публикации/);
+});

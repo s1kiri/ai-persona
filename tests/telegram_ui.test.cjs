@@ -41,3 +41,13 @@ test('delivered test remains disabled and comments render as literal text',()=>{
  assert.equal(t.el('messages').children[0].children[1].textContent,'<b>Comment</b>');
  assert.match(t.el('messages').children[0].children[0].textContent,/<script>Reader<\/script>/);
 });
+test('live panel preserves unsaved pace and does not offer technical replies',()=>{
+ const t=setup();t.ctx.live={status:'running',paused:false,busy:false,controls:{wake_minutes:15,photos:true},world_calls:1,phase:'waiting',awake:null,error:null};
+ t.run('render({...sample,configured:true,life:live,messages:[{id:51,kind:"comment",speaker:"Reader",text:"Hello"}]})');
+ assert.equal(t.el('life-section').hidden,false);assert.equal(t.el('test-post').hidden,true);
+ assert.equal(t.el('messages').children[0].children.length,2);
+ t.el('wake').value='30';t.el('wake').handlers.input();
+ t.run('render({...sample,configured:true,life:{...live,controls:{wake_minutes:45,photos:true}}})');
+ assert.equal(t.el('wake').value,'30');assert.equal(t.el('life-save').disabled,false);
+ assert.equal(t.requests.length,0);
+});

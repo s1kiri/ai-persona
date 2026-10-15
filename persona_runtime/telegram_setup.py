@@ -21,12 +21,17 @@ TEST_REPLY = 'Комментарий дошёл, ответ прикреплён
 
 
 class Setup:
-    def __init__(self, connection):
+    def __init__(self, connection, life=None):
         self.connection = connection
+        self.life = life
         self.cookie, self.csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 
     def state(self):
-        return {**self.connection.state(), 'csrf': self.csrf}
+        value = {**self.connection.state(), 'csrf': self.csrf}
+        if self.life:
+            value.update(life=self.life.state(), character_enabled=True,
+                         autopublish=not self.life.store.get('paused'))
+        return value
 
 
 def handler(setup):
@@ -89,7 +94,15 @@ def handler(setup):
                 value = json.loads(self.rfile.read(size))
                 if not isinstance(value, dict):
                     raise ValueError()
-                if self.path == '/api/token' and set(value) == {'token'}:
+                if self.path == '/api/life/settings' and setup.life:
+                    setup.life.configure(value)
+                elif self.path == '/api/life/action' and setup.life and set(value) == {'running'}:
+                    setup.life.action(value['running'])
+                elif self.path == '/api/life/confirm-absent' and setup.life and set(value) == {'post_id', 'confirmation'} and value['confirmation'] == 'owner_checked_absent':
+                    setup.life.confirm_absent(value['post_id'])
+                elif setup.life:
+                    return self.reply(409, {'error': 'Подключение уже используется живым каналом. Технические тесты здесь выключены.'})
+                elif self.path == '/api/token' and set(value) == {'token'}:
                     setup.connection.configure(value['token'])
                 elif self.path == '/api/bind' and set(value) == {'channel'}:
                     setup.connection.bind(value['channel'])

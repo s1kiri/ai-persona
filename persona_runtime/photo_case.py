@@ -16,12 +16,13 @@ from .world_media import MediaReferenceLibrary, with_visual_references, ensure_n
 
 
 class AutonomousPhotoCase:
-    def __init__(self, directory, chooser, renderer, persona, references=None, observer=None, reference_library=None):
+    def __init__(self, directory, chooser, renderer, persona, references=None, observer=None, reference_library=None, cancel=None):
         self.directory = Path(directory)
         self.chooser, self.renderer, self.persona = chooser, renderer, persona
         self.references = references or {}
         self.observer = observer or (lambda value: None)
         self.reference_library = reference_library
+        self.cancel = cancel
 
     def run(self, context):
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -41,7 +42,8 @@ class AutonomousPhotoCase:
                 context['previous_photos'] = [{k: e[k] for k in ('subject_ids', 'view', 'visual_notes')} for e in previous]
             save_private(self.directory/'scene.json', context)
             self.observer({'phase': 'garik_chooses'})
-            choice, usage = self.chooser.generate('photo_choice', self.persona+'\n\n'+PHOTO_CHOICE, context)
+            choice, usage = self.chooser.generate('photo_choice', self.persona+'\n\n'+PHOTO_CHOICE, context,
+                                                  **({'cancel': self.cancel} if self.cancel is not None else {}))
             save_private(self.directory/'choice.json', {'choice': choice, 'usage': usage})
             request = render_request(choice, context)
             if request is None:
@@ -55,7 +57,8 @@ class AutonomousPhotoCase:
                 save_private(self.directory/'request.json', request)
                 save_private(self.directory/'used-references.json', references)
                 self.observer({'phase': 'garik_tool_generates', 'choice': choice, 'references': len(references)})
-                image = self.renderer.render(request, self.directory/'photo.png', references=references)
+                image = self.renderer.render(request, self.directory/'photo.png', references=references,
+                                             **({'cancel': self.cancel} if self.cancel is not None else {}))
                 path = Path(image['image_path'])
                 if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != image['sha256']:
                     raise ValueError('image receipt does not match the saved file')

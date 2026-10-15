@@ -60,6 +60,7 @@ class BotAPI:
 
     def __init__(self, token, opener=None):
         self._token = checked_token(token)
+        self.last_failure = None
         # Explicit transport: do not inherit unrelated proxy environment variables.
         self.opener = opener or build_opener(ProxyHandler({}), NoRedirect())
 
@@ -100,14 +101,16 @@ class BotAPI:
                 return result['result']
             if isinstance(result, dict) and type(result.get('error_code')) is int:
                 status = result['error_code']
-        except Exception:
+        except Exception as error:
             # urllib exception strings contain the URL and therefore the token.
+            self.last_failure = {'type': type(error).__name__, 'status': status}
             raise TelegramError('Не удалось связаться с Telegram. Проверь интернет; токен скрыт.') from None
         messages = {401: 'Telegram не принял токен. Проверь его в BotFather.',
                     403: 'Telegram отказал в доступе. Проверь, что бот добавлен и получил права.',
                     409: 'Бот уже получает сообщения в другом процессе или через webhook. Второе подключение остановлено.',
                     429: 'Telegram просит подождать. Отправка автоматически не повторяется.',
                     400: 'Telegram отклонил запрос. Проверь выбранный канал, обсуждение и права бота.'}
+        self.last_failure = {'type': 'telegram_response', 'status': status}
         raise TelegramError(messages.get(status, 'Telegram вернул ошибку. Запрос автоматически не повторяется.'), status)
 
 
@@ -343,7 +346,7 @@ class TelegramConnection:
         """Publish once to the verified channel or a known comment in its group."""
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,180}', key):
             raise TelegramError('Некорректный ключ отправки.')
-        if not isinstance(text, str) or not text.strip() or len(text) > (1024 if photo else 4096):
+        if not isinstance(text, str) or (photo is None and not text.strip()) or len(text) > (1024 if photo else 4096):
             raise TelegramError('Текст слишком длинный или пустой.')
         with self.lock, self.db:
             if not self.api or not (binding := self.get('binding')):
@@ -379,6 +382,9 @@ class TelegramConnection:
             with self.lock, self.db:
                 self.db.execute("UPDATE outbox SET status='unknown',error=? WHERE key=?",
                                 ('Квитанция не получена. Проверь Telegram; автоматического повтора нет.', key))
+                self.put('last_send_failure', {'type': type(error).__name__,
+                    'code': error.code if isinstance(error, TelegramError) else None,
+                    'transport': getattr(client, 'last_failure', None)})
             if isinstance(error, TelegramError):
                 raise
             raise TelegramError('Квитанция не получена. Проверь Telegram; автоматического повтора нет.') from None

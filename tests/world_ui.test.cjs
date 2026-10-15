@@ -9,7 +9,7 @@ function setup(){
  const document={hidden:false,getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id)},createElement:element};
  const ctx=vm.createContext({document,console,Intl,Date,setInterval(){},fetch(path,options){if(!options?.method)return new Promise(()=>{});return new Promise((resolve,reject)=>posts.push({path,options,reject,resolve:(value,ok=true)=>resolve({ok,json:async()=>value})}));}});
  vm.runInContext(fs.readFileSync('persona_runtime/world_panel/world.js','utf8'),ctx);
- const sample={csrf:'synthetic',model_enabled:false,paused:true,busy:false,failure:null,minute:0,settings_revision:0,settings:{events_per_hour:2,surprise:45,continuity:70,quiet:30,max_threads:4},actors:[{id:'garik',name:'Гарик'}],threads:[],entities:[],history:[],notes:[],cycles:[],calls:[],call_count:0,max_calls:24};
+ const sample={csrf:'synthetic',model_enabled:false,paused:true,busy:false,failure:null,minute:0,settings_revision:0,settings:{events_per_hour:2,surprise:45,continuity:70,quiet:30,max_threads:4,post_cooldown_minutes:90},actors:[{id:'garik',name:'Гарик'}],threads:[],entities:[],history:[],notes:[],cycles:[],calls:[],call_count:0,max_calls:24};
  ctx.sample=sample;vm.runInContext('render(sample)',ctx);
  return {ctx,sample,posts,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
 }
@@ -43,4 +43,13 @@ test('model-written markup remains literal text in the monitor',()=>{
  const t=setup();const text='<img src=x onerror=alert(1)>';
  t.ctx.markup=text;t.run('render({...sample,entities:[{name:markup,condition:markup}]})');
  const card=t.el('entities').children[0];assert.equal(card.children[0].textContent,text);assert.equal(card.children[1].textContent,text);
+});
+test('autonomous drafts and personal reactions are rendered as literal text',()=>{
+ const t=setup();const text='<script>synthetic</script>';
+ t.ctx.markup=text;
+ t.run('render({...sample,autonomous_posts:true,posts:[{minute:90,value:{text:markup}}],undertakings:[{status:"active",want:markup}],cycles:[{status:"complete",value:{results:{choice:{desire:"Want",action:"Act",reaction:markup,note:""}}}}]})');
+ assert.equal(t.el('post-feed').children[0].children[1].textContent,text);
+ assert.equal(t.el('undertakings').children[0].children[1].textContent,text);
+ assert.equal(t.el('reaction').textContent,text);
+ assert.match(t.el('posts-mode').textContent,/сам выбирает/);
 });

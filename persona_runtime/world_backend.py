@@ -12,7 +12,7 @@ class WorldBackend(AppServerBackend):
         super().__init__(*args, **kwargs, minimal_tools=True)
 
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None

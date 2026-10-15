@@ -37,6 +37,8 @@ class Laboratory:
                      max_calls=self.session.max_calls if self.session else 24,
                      mode='model-review' if self.session else 'preparation',
                      model=getattr(self.session.backend, 'model', None) if self.session else None)
+        value['autonomous_posts'] = bool(self.session and self.session.autonomous_posts)
+        value['free_intentions'] = bool(self.session and self.session.free_intentions)
         value['night'] = self.store.get('night')
         return value
 
@@ -154,6 +156,8 @@ def main(argv=None):
     parser.add_argument('--speech-contract', type=Path)
     parser.add_argument('--max-calls', type=int, default=24)
     parser.add_argument('--background', action='store_true', help='detach the laboratory from the terminal and wait for readiness')
+    parser.add_argument('--autonomous-posts', action='store_true', help='let the character choose local channel drafts after outcomes')
+    parser.add_argument('--free-intentions', action='store_true', help='write a private intention before extracting world action metadata')
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
@@ -169,6 +173,10 @@ def main(argv=None):
                    '--port', str(args.port), '--max-calls', str(args.max_calls)]
         if args.live:
             command += ['--live', '--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
+        if args.autonomous_posts:
+            command += ['--autonomous-posts']
+        if args.free_intentions:
+            command += ['--free-intentions']
         fd = os.open(destination / 'lab.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
@@ -213,7 +221,8 @@ def main(argv=None):
             if not persona.strip() or not contract.strip():
                 raise ValueError('empty personality/contract')
             backend = WorldBackend(destination / 'transport')
-            session = WorldSession(store, backend, {'garik': persona}, contract, args.max_calls)
+            session = WorldSession(store, backend, {'garik': persona}, contract, args.max_calls,
+                                   autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions)
         lab = Laboratory(store, session)
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)

@@ -38,13 +38,33 @@ EVENT_SCHEMA = obj({'beat': enum(BEATS), 'domain': enum(DOMAINS),
                     **PATCH})
 CHOICE_SCHEMA = obj({'desire': string(500), 'kind': enum(('act', 'wait', 'rest')),
                      'action': string(900), 'entity_ids': array(string(80), 6),
-                     'note': string(800),
+                     'note': string(800), 'reaction': string(600),
+                     'undertakings': array(obj({'id': string(80), 'want': string(500),
+                                               'status': enum(('active', 'waiting', 'closed'))}), 3),
                      'revisit_minutes': {'type': 'integer', 'minimum': 5, 'maximum': 10080}})
 OUTCOME_SCHEMA = obj({'status': enum(('succeeded', 'partial', 'failed', 'pending')),
                       'observation': string(1800), 'world_note': string(800),
-                      'elapsed_minutes': {'type': 'integer', 'minimum': 1, 'maximum': 120},
+                      'elapsed_minutes': {'type': 'integer', 'minimum': 1, 'maximum': 1440},
+                      'time_costs': {**array(obj({'activity': string(140),
+                                                 'minutes': {'type': 'integer', 'minimum': 0, 'maximum': 1440}}), 8),
+                                     'minItems': 1},
                       **PATCH})
-SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA}
+SHARE_SCHEMA = obj({'decision': enum(('post', 'keep')), 'focus': string(600),
+                    'source_ids': array(string(80), 6)})
+SCHEMAS = {'world': EVENT_SCHEMA, 'choice': CHOICE_SCHEMA, 'outcome': OUTCOME_SCHEMA, 'share': SHARE_SCHEMA}
+
+
+def clock_at(minute):
+    return {'minute': minute, 'day': minute // 1440 + 1,
+            'time': f'{minute % 1440 // 60:02d}:{minute % 60:02d}'}
+
+
+def validate_clock(observation, minute):
+    # Only explicit claims about "now"; appointment times remain legitimate.
+    for match in re.finditer(r'\b(?:сейчас|на часах)\s+(?:(?:уже|около|примерно)\s+)*(\d{1,2}):(\d{2})', observation, re.I):
+        hour, minutes = map(int, match.groups())
+        if hour > 23 or minutes > 59 or hour * 60 + minutes != minute % 1440:
+            raise ValueError('narrated current time disagrees with the world clock')
 
 
 def validate_shape(value, schema, path='result'):
@@ -60,7 +80,7 @@ def validate_shape(value, schema, path='result'):
         for key, item in value.items():
             validate_shape(item, schema['properties'][key], path + '.' + key)
     elif kind == 'array':
-        if not isinstance(value, list) or len(value) > schema['maxItems']:
+        if not isinstance(value, list) or not schema.get('minItems', 0) <= len(value) <= schema['maxItems']:
             raise ValueError('invalid array: ' + path)
         for item in value:
             validate_shape(item, schema['items'], path)
@@ -137,6 +157,14 @@ def validate_patch(value, state, settings):
 
 def validate_result(stage, value, state, brief):
     validate_shape(value, SCHEMAS[stage])
+    if stage == 'share':
+        available = {e['id'] for e in state['history'] if e['stage'] in ('world', 'outcome') and
+                     brief['actor_id'] in e['value'].get('visible_to', [e['actor_id']])}
+        if not set(value['source_ids']) <= available:
+            raise ValueError('post source must be an observed world event')
+        if value['decision'] == 'post' and (not value['focus'].strip() or not value['source_ids']):
+            raise ValueError('post needs a personal focus and a stored event')
+        return value
     if not value.get('observation', value.get('action', '')).strip():
         raise ValueError('empty observation/action')
     actor = brief['actor_id']
@@ -146,7 +174,17 @@ def validate_result(stage, value, state, brief):
             raise ValueError('Garik cannot act on undiscovered entities')
         if not value['desire'].strip():
             raise ValueError('empty personal desire')
+        ids = [u['id'] for u in value['undertakings']]
+        for identity in ids:
+            identifier(identity)
+        if len(ids) != len(set(ids)) or any(not u['want'].strip() for u in value['undertakings']):
+            raise ValueError('invalid personal undertaking')
         return value
+    if stage == 'outcome':
+        if sum(t['minutes'] for t in value['time_costs']) != value['elapsed_minutes']:
+            raise ValueError('elapsed time must equal travel, waiting and activity costs')
+        state = {**state, 'minute': state['minute'] + value['elapsed_minutes']}
+    validate_clock(value['observation'], state['minute'])
     ids, threads = validate_patch(value, state, brief['settings'])
     if stage == 'world':
         if not brief['new_event_allowed']:

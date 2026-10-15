@@ -24,7 +24,7 @@ def event(**changes):
 
 def choice(**changes):
     value = {'desire': 'Try something new.', 'kind': 'act', 'action': 'Go to the workshop.',
-             'entity_ids': ['home'], 'note': 'Synthetic personal diary note.', 'revisit_minutes': 60}
+             'entity_ids': ['home'], 'note': 'Synthetic personal diary note.', 'reaction': '', 'undertakings': [], 'revisit_minutes': 60}
     value.update(changes)
     return value
 
@@ -33,6 +33,7 @@ def outcome(**changes):
     value = {'status': 'succeeded', 'observation': 'He reached the workshop.',
              'world_note': '', 'elapsed_minutes': 15, 'entities': [], 'threads': []}
     value.update(changes)
+    value.setdefault('time_costs', [{'activity': 'Synthetic activity', 'minutes': value['elapsed_minutes']}])
     return value
 
 

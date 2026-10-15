@@ -16,17 +16,18 @@ import threading
 import time
 import uuid
 
-from .world_protocol import BEATS, DOMAINS, identifier, validate_result
+from .world_protocol import BEATS, DOMAINS, identifier, validate_result, clock_at
 
 DEFAULT_SETTINGS = {'events_per_hour': 2.0, 'surprise': 45, 'continuity': 70,
-                    'quiet': 30, 'max_threads': 4}
+                    'quiet': 30, 'max_threads': 4, 'post_cooldown_minutes': 90}
 
 
 def settings_checked(value):
     if not isinstance(value, dict) or set(value) != set(DEFAULT_SETTINGS):
         raise ValueError('invalid world controls')
     for key, lower, upper in [('events_per_hour', 0, 6), ('surprise', 0, 100),
-                              ('continuity', 0, 100), ('quiet', 0, 100), ('max_threads', 1, 8)]:
+                              ('continuity', 0, 100), ('quiet', 0, 100), ('max_threads', 1, 8),
+                              ('post_cooldown_minutes', 0, 360)]:
         number = value[key]
         if type(number) not in (int, float) or not math.isfinite(number) or not lower <= number <= upper:
             raise ValueError('invalid world control: ' + key)
@@ -118,6 +119,8 @@ class WorldStore:
             CREATE TABLE IF NOT EXISTS world_notes(id TEXT PRIMARY KEY,actor_id TEXT NOT NULL REFERENCES world_actors(id),
                 cycle_id TEXT NOT NULL REFERENCES world_cycles(id),minute INTEGER NOT NULL,text TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_snapshots(revision INTEGER PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS world_undertakings(actor_id TEXT NOT NULL REFERENCES world_actors(id),
+                id TEXT NOT NULL,value TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(actor_id,id));
         ''')
         with self.lock, self.db:
             if self.get('version') is None:
@@ -140,6 +143,7 @@ class WorldStore:
                 self.snapshot()
             elif self.get('version') != 1:
                 raise ValueError('unknown world database version')
+            self.put('settings', {**DEFAULT_SETTINGS, **self.get('settings')})
             # Ambiguous in-flight calls never replay merely because the UI reopened.
             self.db.execute("UPDATE world_calls SET status='interrupted',error='process stopped; no automatic retry' WHERE status='started'")
             self.db.execute("UPDATE world_cycles SET status='blocked' WHERE status='running'")
@@ -205,9 +209,13 @@ class WorldStore:
                                 'observation': e['value']['observation']})
             elif e['actor_id'] == actor_id and e['stage'] == 'choice':
                 history.append({'id': e['id'], 'minute': e['minute'], 'stage': 'choice', 'value': e['value']})
+            elif e['actor_id'] == actor_id and e['stage'] == 'impulse':
+                history.append({'id': e['id'], 'minute': e['minute'], 'stage': 'impulse', 'text': e['value']['text']})
         state['history'] = history[-16:]
         state['notes'] = [dict(r) for r in self.db.execute(
             'SELECT minute,text FROM world_notes WHERE actor_id=? ORDER BY rowid DESC LIMIT 8', (actor_id,))]
+        state['undertakings'] = [json.loads(r[0]) for r in self.db.execute(
+            'SELECT value FROM world_undertakings WHERE actor_id=? ORDER BY rowid DESC LIMIT 12', (actor_id,))]
         state['basis'] = {actor_id: state.get('basis', {}).get(actor_id, '')}
         visible_ids = {e['id'] for e in state['entities']}
         state['actors'] = [a for a in state['actors'] if a['id'] in visible_ids]
@@ -284,7 +292,7 @@ class WorldStore:
             self.db.execute('UPDATE world_cycles SET value=? WHERE id=?',
                             (json.dumps(cycle['value'], ensure_ascii=False), cycle_id))
 
-    def complete(self, call_id, value, usage):
+    def complete(self, call_id, value, usage, after_outcome='done', after_world='choice'):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -297,8 +305,8 @@ class WorldStore:
             stage = cycle['phase']
             state = self.state()
             brief = cycle['value']['brief']
-            if stage == 'speech':
-                if not isinstance(value, str) or not value.strip() or len(value) > 12000:
+            if stage in ('speech', 'post', 'impulse'):
+                if not isinstance(value, str) or not value.strip() or len(value) > (900 if stage == 'impulse' else 12000):
                     raise ValueError('invalid spoken text')
             else:
                 validate_result(stage, value, state, brief)
@@ -313,11 +321,21 @@ class WorldStore:
             if stage == 'choice' and value['note'].strip():
                 self.db.execute('INSERT INTO world_notes VALUES(?,?,?,?,?)',
                                 (event_id, cycle['actor_id'], cycle['id'], state['minute'], value['note']))
-            stored = {'text': value, 'draft': True} if stage == 'speech' else value
+            if stage == 'choice':
+                for undertaking in value['undertakings']:
+                    self.db.execute('INSERT OR REPLACE INTO world_undertakings VALUES(?,?,?,?)',
+                                    (cycle['actor_id'], undertaking['id'], json.dumps(undertaking, ensure_ascii=False), event_id))
+            stored = {'text': value, 'draft': True} if stage in ('speech', 'post', 'impulse') else value
+            if stage == 'impulse':
+                stored['private'] = True
+            if stage == 'post':
+                stored.update(surface='channel_draft', autonomous=True)
             self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
                             (event_id, cycle['id'], cycle['actor_id'], stage, self.get('minute'), json.dumps(stored, ensure_ascii=False)))
             cycle['value']['results'][stage] = value
-            next_phase = {'world': 'choice', 'choice': 'outcome', 'outcome': 'done', 'speech': 'done'}[stage]
+            next_phase = {'world': after_world, 'impulse': 'choice', 'choice': 'outcome', 'outcome': after_outcome,
+                          'speech': 'done', 'post': 'done',
+                          'share': 'post' if stage == 'share' and value['decision'] == 'post' else 'done'}[stage]
             status = 'complete' if next_phase == 'done' else 'ready'
             revision = state['revision'] + 1
             self.put('revision', revision)
@@ -326,6 +344,11 @@ class WorldStore:
             self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
         return True
+
+    def posting_allowed(self, actor, at_minute=None):
+        row = self.db.execute("SELECT minute FROM world_events WHERE actor_id=? AND stage='post' ORDER BY rowid DESC LIMIT 1", (actor,)).fetchone()
+        now = self.get('minute') if at_minute is None else at_minute
+        return row is None or now - row[0] >= self.get('settings')['post_cooldown_minutes']
 
     def request_speech(self, cycle_id, surface='private', message='Как у тебя дела?'):
         """An explicit review request, not an autonomous decision to publish."""
@@ -371,20 +394,26 @@ class WorldStore:
             notes = [dict(r) for r in self.db.execute('SELECT * FROM world_notes ORDER BY rowid DESC LIMIT 24')]
             state.update(cycles=cycles, calls=calls, notes=notes,
                          call_count=self.db.execute('SELECT COUNT(*) FROM world_calls').fetchone()[0])
+            state['posts'] = [{**dict(r), 'value': json.loads(r['value'])} for r in self.db.execute(
+                "SELECT * FROM world_events WHERE stage='post' ORDER BY rowid DESC LIMIT 20")]
+            state['undertakings'] = [{**json.loads(r['value']), 'actor_id': r['actor_id']} for r in self.db.execute(
+                'SELECT * FROM world_undertakings ORDER BY rowid DESC LIMIT 24')]
             return state
 
 
 class WorldSession:
     """One stage per explicit click. No autonomous loop or external actions yet."""
-    def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24):
+    def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24, autonomous_posts=False, free_intentions=False):
         if type(max_calls) is not int or not 1 <= max_calls <= 200:
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
         self.actor_prompts = dict(actor_prompts)
         self.speech_contract, self.max_calls = speech_contract, max_calls
+        self.autonomous_posts = autonomous_posts
+        self.free_intentions = free_intentions
 
     def step(self, cycle_id):
-        from .world_prompts import WORLD, CHOICE, OUTCOME, SPEECH_CONTEXT
+        from .world_prompts import WORLD, CHOICE, OUTCOME, SPEECH_CONTEXT, SHARE, POST, IMPULSE, INTENT_ADAPTER
         if self.store.cycle(cycle_id)['actor_id'] not in self.actor_prompts:
             raise WorldConflict('actor has no configured personality')
         call_id, cycle = self.store.claim(cycle_id, self.max_calls)
@@ -396,9 +425,11 @@ class WorldSession:
                 raise ValueError('actor has no configured personality')
             state = self.store.state()
             results = cycle['value']['results']
+            clock = clock_at(state['minute'])
             if stage in ('world', 'outcome'):
                 instruction = WORLD if stage == 'world' else OUTCOME
                 world = copy.deepcopy(state)
+                world['history'] = [e for e in world['history'] if e['stage'] != 'impulse']
                 for event in world['history']:
                     if event['stage'] == 'choice':
                         event['value'] = {k: v for k, v in event['value'].items()
@@ -406,13 +437,30 @@ class WorldSession:
                 action = results.get('choice')
                 action = {k: action[k] for k in ('kind', 'action', 'entity_ids')} if action else None
                 payload = {'world': world, 'director': cycle['value']['brief'],
-                           'current_event': results.get('world'), 'chosen_action': action}
+                           'current_event': results.get('world'), 'chosen_action': action, 'clock': clock}
+            elif stage == 'choice' and 'impulse' in results:
+                instruction = INTENT_ADAPTER
+                view = self.store.actor_view(actor, state)
+                payload = {'written_intent': results['impulse'], 'known_entities': view['entities'],
+                           'undertakings': view['undertakings'], 'clock': clock}
+            elif stage == 'post':
+                selected = set(results['share']['source_ids'])
+                observed = [{**dict(r), 'value': json.loads(r['value'])} for r in self.store.db.execute(
+                    'SELECT * FROM world_events WHERE id IN (' + ','.join('?' for _ in selected) + ') ORDER BY rowid', tuple(selected))]
+                instruction = self.actor_prompts[actor] + '\n\n' + self.speech_contract + '\n\n' + POST
+                payload = {'surface': 'channel_draft', 'focus': results['share']['focus'],
+                           'events': [{'id': e['id'], 'minute': e['minute'], 'observation': e['value']['observation']}
+                                      for e in observed],
+                           'previous_posts': [e['value']['text'] for e in self.store.monitor()['posts'] if e['actor_id'] == actor][:4],
+                           'clock': clock}
             else:
-                instruction = self.actor_prompts[actor] + '\n\n' + (CHOICE if stage == 'choice' else self.speech_contract)
+                instruction = self.actor_prompts[actor] + '\n\n' + (CHOICE if stage == 'choice' else IMPULSE if stage == 'impulse' else SHARE if stage == 'share' else self.speech_contract)
                 payload = {'life': self.store.actor_view(actor, state),
                            'moment': results.get('world', {}).get('observation'),
                            'outcome': results.get('outcome', {}).get('observation'),
-                           'request': cycle['value'].get('speech_request')}
+                           'request': cycle['value'].get('speech_request'), 'clock': clock}
+                if stage == 'share':
+                    payload['previous_posts'] = [e['value']['text'] for e in self.store.monitor()['posts'] if e['actor_id'] == actor][:4]
                 if stage == 'speech':
                     instruction += '\n\n' + SPEECH_CONTEXT
                     rows = self.store.db.execute(
@@ -424,7 +472,13 @@ class WorldSession:
                     payload['recent_spoken'] = list(reversed(spoken))
             self.store.save_input(cycle_id, payload)
             answer, usage = self.backend.generate(stage, instruction, payload)
-            self.store.complete(call_id, answer, usage)
+            if stage == 'choice' and 'impulse' in results:
+                if not isinstance(answer, dict) or not answer.get('action', '').strip() or answer['action'] not in results['impulse']:
+                    raise ValueError('intent adapter must quote the original attempted action')
+            end_minute = state['minute'] + answer['elapsed_minutes'] if stage == 'outcome' else state['minute']
+            next_stage = 'share' if stage == 'outcome' and self.autonomous_posts and self.store.posting_allowed(actor, end_minute) else 'done'
+            self.store.complete(call_id, answer, usage, after_outcome=next_stage,
+                                after_world='impulse' if self.free_intentions else 'choice')
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = answer if answer is not None else getattr(self.backend, 'last_output', None)

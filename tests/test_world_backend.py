@@ -69,11 +69,12 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(self.backend.minimal_tools)
 
     def test_speech_has_no_service_schema(self):
-        self.backend.client = Client('Synthetic character speech.')
-        answer, _ = self.backend.generate('speech', 'Synthetic personality', {})
-        self.assertEqual(answer, 'Synthetic character speech.')
-        start = next(p for m, p in self.backend.client.calls if m == 'turn/start')
-        self.assertNotIn('outputSchema', start)
+        for stage in ('speech', 'post', 'impulse'):
+            self.backend.client = Client('Synthetic character speech.')
+            answer, _ = self.backend.generate(stage, 'Synthetic personality', {})
+            self.assertEqual(answer, 'Synthetic character speech.')
+            start = next(p for m, p in self.backend.client.calls if m == 'turn/start')
+            self.assertNotIn('outputSchema', start)
 
     def test_tool_rejected_without_retry_and_usage_survives(self):
         self.backend.client = Client(event(), unexpected=True)

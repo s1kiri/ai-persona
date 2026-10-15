@@ -87,6 +87,17 @@ class BackendTests(unittest.TestCase):
         self.assertIn('parts', start['outputSchema']['properties'])
         self.assertNotIn('action', start['outputSchema']['properties'])
 
+    def test_resident_plans_cannot_select_empty_or_invented_participants(self):
+        self.backend.client=Client({'hooks':[]})
+        self.backend.generate('horizon','Synthetic world',{'world':{'actors':[{'id':'hero'}],'entities':[{'id':'street'}]}})
+        start=next(p for m,p in self.backend.client.calls if m=='turn/start')
+        props=start['outputSchema']['properties']['hooks']['items']['properties']
+        self.assertEqual(props['actor_ids']['minItems'],1)
+        self.assertEqual(props['actor_ids']['items']['enum'],['hero'])
+        self.assertEqual(props['anchor_ids']['minItems'],1)
+        self.assertEqual(props['anchor_ids']['items']['enum'],['street'])
+        self.assertNotIn('enum',__import__('persona_runtime.world_protocol',fromlist=['HOOK']).HOOK['properties']['actor_ids']['items'])
+
     def test_tool_rejected_without_retry_and_usage_survives(self):
         self.backend.client = Client(event(), unexpected=True)
         with self.assertRaises(CodexError):

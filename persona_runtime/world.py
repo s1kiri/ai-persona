@@ -529,7 +529,11 @@ class WorldStore:
                 validate_result('channel' if direct else stage, checked, state, brief)
             event_id = cycle['id'] + '-' + stage
             if stage == 'horizon':
-                for hook in value['hooks']:
+                planned=value
+                if brief.get('lively_world'):
+                    from .world_dynamics import assign_plans
+                    planned=assign_plans(value,brief['plan_directions'])
+                for hook in planned['hooks']:
                     self.db.execute('INSERT INTO world_hooks VALUES(?,?,?)',
                                     (hook['id'], json.dumps({**hook, 'exposed_to': []}, ensure_ascii=False), event_id))
             if stage in ('world', 'outcome'):
@@ -545,6 +549,8 @@ class WorldStore:
                 if stage == 'world' and brief.get('exposure'):
                     hook = copy.deepcopy(brief['exposure'])
                     hook['exposed_to'] = list(dict.fromkeys([*hook['exposed_to'], cycle['actor_id']]))
+                    if brief.get('lively_world'):
+                        hook.update(exposed_minute=state['minute'],thread_ids=[value['thread_id']])
                     self.db.execute('UPDATE world_hooks SET value=? WHERE id=?',
                                     (json.dumps(hook, ensure_ascii=False), hook['id']))
             if stage == 'choice' and value['note'].strip():
@@ -806,7 +812,8 @@ class WorldSession:
     """One recorded stage per step; optional personal life, research and drafts."""
     def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24, autonomous_posts=False, free_intentions=False,
                  personal_life=False, research_enabled=False, research_backend=None, lossless_intentions=False,
-                 simulated_audience=False, active_world=False, direct_channel=False, continuous=False, external_channel=False, cancel=None, channel_extension=None):
+                 simulated_audience=False, active_world=False, direct_channel=False, continuous=False, external_channel=False, cancel=None, channel_extension=None,
+                 lively_world=False):
         if not continuous and (type(max_calls) is not int or not 1 <= max_calls <= 200):
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
@@ -823,11 +830,14 @@ class WorldSession:
         self.lossless_intentions = lossless_intentions
         self.simulated_audience = simulated_audience
         self.active_world = active_world
+        self.lively_world = lively_world
         self.direct_channel = direct_channel
         if direct_channel and not autonomous_posts:
             raise ValueError('direct channel requires voluntary channel decisions')
         if active_world and not personal_life:
             raise ValueError('active world requires personal continuity')
+        if lively_world and not active_world:
+            raise ValueError('incident direction requires an active world')
         if simulated_audience and not personal_life:
             raise ValueError('reader simulation requires personal life')
         if lossless_intentions and not (personal_life or free_intentions):
@@ -838,6 +848,10 @@ class WorldSession:
             cycle = self.store.prepare(actor_id, minutes, draw=draw, personal_life=self.personal_life,
                                        lossless_intentions=self.lossless_intentions,allow_zero=self.external_channel)
             cycle['value']['direct_channel'] = self.direct_channel
+            cycle['value']['lively_world'] = self.lively_world
+            if self.lively_world:
+                from .world_dynamics import planning_directions
+                cycle['value']['brief'].update(lively_world=True,plan_directions=planning_directions(self.store.state(),actor_id))
             self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',
                                   (json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if self.active_world:
@@ -878,6 +892,9 @@ class WorldSession:
             if lossless != self.lossless_intentions:
                 raise WorldConflict('intent transfer mode changed during the episode')
             active = cycle['value'].get('active_world', False)
+            lively = cycle['value'].get('lively_world', False)
+            if lively != self.lively_world:
+                raise WorldConflict('incident direction changed during the episode')
             direct = cycle['value'].get('direct_channel', False)
             if direct != self.direct_channel:
                 raise WorldConflict('channel mode changed during the episode')
@@ -890,6 +907,10 @@ class WorldSession:
                 world = copy.deepcopy(state)
                 world['history'] = [e for e in world['history'] if e['stage'] in ('world', 'outcome')]
                 payload = {'world': world, 'clock': clock}
+                if lively:
+                    from .world_dynamics import HORIZON as INCIDENT_HORIZON
+                    instruction=INCIDENT_HORIZON
+                    payload['plan_directions']=cycle['value']['brief']['plan_directions']
             elif stage == 'audience':
                 if not self.simulated_audience:
                     raise WorldConflict('reader simulation disabled during pending delivery')
@@ -912,6 +933,11 @@ class WorldSession:
                 action = {k: action[k] for k in ('kind', 'action', 'entity_ids')} if action else None
                 payload = {'world': world, 'director': cycle['value']['brief'],
                            'current_event': results.get('world'), 'chosen_action': action, 'clock': clock}
+                if lively:
+                    from .world_dynamics import WORLD as INCIDENT_WORLD,OUTCOME as INCIDENT_OUTCOME,resident_interests,recent_mechanisms
+                    instruction+='\n'+(INCIDENT_WORLD if stage=='world' else INCIDENT_OUTCOME)
+                    payload['scene_dynamics']={'resident_interests':resident_interests(state,actor),
+                                               'recent_mechanisms':recent_mechanisms(state,actor)}
                 if self.simulated_audience:
                     payload['channel_context'] = self.store.channel_context(actor)
                 if stage == 'world' and personal and state['settings']['director_empathy']:

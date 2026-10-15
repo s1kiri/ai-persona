@@ -39,6 +39,9 @@ def select_hook(state, actor, brief):
     # No knowledge is granted by selection; the world must expose it in a
     # validated observation. Remaining plans wait for a later event slot.
     known = {e['id'] for e in state['entities'] if actor in e['known_to']}
+    if brief.get('lively_world'):
+        from .world_dynamics import selection_rank
+        return min(candidates,key=lambda h:selection_rank(h,state,actor)) if candidates else None
     return min(candidates, key=lambda h: (bool(set(h['anchor_ids']) <= known), h['opens_minute'])) if candidates else None
 
 

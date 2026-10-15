@@ -202,6 +202,7 @@ class ChannelLife:
                 value={'brief':director(self.store.state(),'garik',1,1),'inputs':{},'results':{},
                        'personal_life':self.lab.session.personal_life,'lossless_intentions':self.lab.session.lossless_intentions,
                        'direct_channel':True,'active_world':self.lab.session.active_world,'entry_phase':'share',
+                       'lively_world':self.lab.session.lively_world,
                        'bootstrap':bootstrap,'channel_visit':True,
                        'channel_purpose':(self.store.get('channel_attention') or {}).get('purpose','comments')}
                 self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',

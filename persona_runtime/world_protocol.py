@@ -60,8 +60,8 @@ EXPERIENCE_SCHEMA = obj({'note': string(800), 'concerns': array(CONCERN, 3),
                           'director_signal': string(300)})
 AUDIENCE_SCHEMA = obj({'post_id': string(80),
                        'comments': array(obj({'speaker': string(60), 'text': string(500)}), 3)})
-HOOK = obj({'id': string(80), 'anchor_ids': array(string(80), 3),
-            'actor_ids': array(string(80), 8), 'domain': enum(DOMAINS),
+HOOK = obj({'id': string(80), 'anchor_ids': {**array(string(80), 3),'minItems':1},
+            'actor_ids': {**array(string(80), 8),'minItems':1}, 'domain': enum(DOMAINS),
             'opens_minute': {'type': 'integer', 'minimum': 0},
             'closes_minute': {'type': 'integer', 'minimum': 0},
             'route': string(400), 'npc_want': string(400),

@@ -1,6 +1,7 @@
 """Bounded world-lab calls; only the research role can use native web."""
 import json
 import hashlib
+import copy
 from pathlib import Path
 import time
 
@@ -42,6 +43,12 @@ class WorldBackend(AppServerBackend):
                   'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False}}
         if stage in SCHEMAS:
             params['outputSchema'] = SCHEMAS[stage]
+        if stage=='horizon':
+            params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
+            props=params['outputSchema']['properties']['hooks']['items']['properties']
+            for field,table in (('actor_ids','actors'),('anchor_ids','entities')):
+                choices=[item['id'] for item in payload.get('world',{}).get(table,[])]
+                if choices:props[field]['items']['enum']=choices
         if web:
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':

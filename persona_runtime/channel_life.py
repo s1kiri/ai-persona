@@ -129,6 +129,7 @@ class ChannelLife:
             value = {**status, 'paused': self.store.get('paused'), 'busy': self.lab.busy,
                     'phase': self.current_phase, 'controls': self.store.get('life_controls'),
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
+                    'persona_sha256': hashlib.sha256(self.persona.encode()).hexdigest(),
                     'awake': self.store.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
             if self.social:
                 value.update(self.social.context())
@@ -584,7 +585,9 @@ def main(argv=None):
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen([sys.executable, '-m', 'persona_runtime.channel_life', *arguments],
                                        cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        deadline = time.monotonic()+12
+        # Initial binding performs several bounded read-only Telegram calls.
+        # A short local readiness timer must not kill a healthy slow binding.
+        deadline = time.monotonic()+180
         while time.monotonic()<deadline:
             if process.poll() is not None:
                 raise RuntimeError('life process stopped before readiness')

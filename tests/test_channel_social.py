@@ -234,6 +234,31 @@ class SocialTests(unittest.TestCase):
         self.assertEqual(len(self.backend.inputs),calls)
         self.assertEqual(self.store.db.execute("SELECT status FROM personal_intentions WHERE key='intro'").fetchone()[0],'awaiting_delivery')
 
+    def test_reply_can_cite_an_old_request_without_mistaking_it_for_second_addressee(self):
+        ids=self.prepare_comments(comment(),comment(52),comment(53))
+        with self.store.lock,self.store.db:
+            self.store.db.execute('UPDATE channel_read_batches SET considered=1 WHERE id=?',(ids[0],))
+            attention=self.store.get('channel_attention');attention['focus_ids']=ids[1:];self.store.put('channel_attention',attention)
+        answer=rich(decision='reply',text='I remember your earlier request.',source_ids=ids[:2],
+                    read_ids=ids[1:],reaction={'audience_id':ids[2],'emoji':'👍'})
+        self.backend.answers=[answer]
+        with patch.object(self.store,'complete',side_effect=ValueError('synthetic previous target guard')):self.life.tick()
+        cycle=next(c for c in self.store.monitor()['cycles'] if c['status']=='blocked')
+        calls=len(self.backend.inputs)
+        self.store.recover_channel(cycle['id'],extension=self.life.social)
+        post=next(p for p in self.store.monitor()['posts'] if p['cycle_id']==cycle['id'])
+        self.assertEqual(post['value']['audience_id'],ids[1])
+        self.assertEqual(post['value']['source_ids'],ids[:2])
+        self.assertEqual(len(self.backend.inputs),calls)
+        self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'pending')
+        self.assertFalse(self.backend.inputs[-1][2]['media_capabilities']['gallery_browser'])
+
+    def test_two_current_addressees_are_still_ambiguous(self):
+        ids=self.prepare_comments(comment(),comment(52))
+        self.backend.answers=[rich(decision='reply',text='Ambiguous',source_ids=ids)]
+        self.life.tick()
+        self.assertEqual(self.life.state()['status'],'error')
+
     def test_eating_is_not_completed_by_saying_i_will_eat(self):
         ids=self.prepare_comments(comment())
         with self.store.lock,self.store.db:

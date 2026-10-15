@@ -95,6 +95,12 @@ defer_ids — к чему хочешь вернуться. Не обязан о�
 или изображать занятость в тексте. leave=true заканчивает этот заход.
 reaction — одна доступная emoji на конкретный audience_id или null; это
 самостоятельная короткая реакция, иногда достаточная без текстового ответа.
+В source_ids ответа указывай один комментарий из текущего focus_comments,
+которому отвечаешь. Старые сообщения могут быть дополнительными основаниями:
+они не становятся вторым адресатом только потому, что ты их вспомнил.
+media_capabilities — доступные способы показа изображения. Не утверждай,
+что просмотрел галерею или отправил фото, если соответствующего инструмента
+нет. Технические поля не надо обсуждать с читателем.
 
 reader_memory — твои прежние впечатления и запомненные слова людей, с
 источниками. people меняет только впечатление об известном person_key.
@@ -251,6 +257,8 @@ class SocialMemory:
         payload['life'].update(self.context(actor,' '.join(c['text'] for e in focus for c in e['value']['comments']),
                                            [e['value'].get('person_key') for e in focus]))
         payload['fulfillment_goal'] = attention.get('fulfill_intent')
+        payload['media_capabilities']={'optional_new_photo_with_own_post':bool((self.store.get('life_controls') or {}).get('photos')),
+                                       'gallery_browser':False,'photo_reply_in_comments':False}
         if attention.get('purpose')=='own_channel':
             roots=[]
             for row in self.store.db.execute("SELECT value FROM world_events WHERE actor_id=? AND stage='post' ORDER BY rowid DESC",(actor,)):

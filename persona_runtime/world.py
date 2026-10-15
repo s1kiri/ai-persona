@@ -501,10 +501,7 @@ class WorldStore:
                         state['own_expression_ids'] = [r[0] for r in self.db.execute(
                             "SELECT id FROM world_events WHERE actor_id=? AND stage IN ('impulse','choice','experience')",(cycle['actor_id'],))]
                     if value.get('decision') == 'reply':
-                        targets = [e for e in self.channel_context(cycle['actor_id'])
-                                   if e['id'] in value['source_ids'] and e['stage'] == 'audience' and e['value']['comments']]
-                        if len(targets) != 1:
-                            raise ValueError('reply needs one own observed comment batch')
+                        self.reply_target(cycle['actor_id'],value['source_ids'])
                 if stage == 'experience':
                     state['personal_evidence_ids'] = self.personal_evidence_ids(cycle['actor_id'])
                 checked = value
@@ -608,10 +605,24 @@ class WorldStore:
         posted = {'text': text, 'draft': True, 'surface': 'channel_draft',
                   'autonomous': True, 'source_ids': share['source_ids']}
         if share['decision'] == 'reply':
-            target = next(e for e in self.channel_context(actor)
-                          if e['id'] in share['source_ids'] and e['stage'] == 'audience')
+            target = self.reply_target(actor,share['source_ids'])
             posted.update(surface='comment_reply', reply_to=target['value']['post_id'], audience_id=target['id'])
         return posted
+
+    @locked
+    def reply_target(self, actor, source_ids):
+        """Current addressee is distinct from older comments cited as context."""
+        candidates=[]
+        for source in dict.fromkeys(source_ids):
+            row=self.db.execute("SELECT id,value FROM world_events WHERE id=? AND actor_id=? AND stage='audience'",(source,actor)).fetchone()
+            if row:
+                value=json.loads(row['value'])
+                if value['comments']:candidates.append({'id':row['id'],'value':value})
+        focus=set((self.get('channel_attention') or {}).get('focus_ids',[]))
+        if focus:candidates=[c for c in candidates if c['id'] in focus]
+        if len(candidates)!=1:
+            raise ValueError('reply needs one own current addressee; other citations are context')
+        return candidates[0]
 
     def recover_experience(self, cycle_id, after_experience='done'):
         """Explicit host review of a saved note; no action/model replay or usage rewrite."""

@@ -121,6 +121,8 @@ class WorldStore:
             CREATE TABLE IF NOT EXISTS world_actors(id TEXT PRIMARY KEY,name TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_entities(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_threads(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS world_thread_links(child TEXT PRIMARY KEY REFERENCES world_threads(id),
+                parent TEXT NOT NULL REFERENCES world_threads(id),source TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_cycles(id TEXT PRIMARY KEY,actor_id TEXT NOT NULL REFERENCES world_actors(id),
                 status TEXT NOT NULL,phase TEXT NOT NULL,revision INTEGER NOT NULL,value TEXT NOT NULL,created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS world_events(id TEXT PRIMARY KEY,cycle_id TEXT NOT NULL REFERENCES world_cycles(id),
@@ -214,7 +216,7 @@ class WorldStore:
                     'basis': self.get('basis'),
                     'settings': self.get('settings'), 'settings_revision': self.get('settings_revision'),
                     'paused': self.get('paused'), 'actors': self._rows('world_actors'),
-                    'entities': entities, 'threads': threads, 'history': history}
+                    'entities': entities, 'threads': threads, 'thread_links': self._rows('world_thread_links'), 'history': history}
 
     @locked
     def actor_view(self, actor_id, state=None):
@@ -222,6 +224,9 @@ class WorldStore:
         state['entities'] = [{k: v for k, v in e.items() if k != 'world_note'}
                              for e in state['entities'] if actor_id in e['known_to']]
         state['threads'] = [t for t in state['threads'] if actor_id in t['visible_to']]
+        visible_threads = {t['id'] for t in state['threads']}
+        state['thread_links'] = [link for link in state['thread_links']
+                                 if {link['child'], link['parent']} <= visible_threads]
         history = []
         for e in state['history']:
             visible = e['value'].get('visible_to', [e['actor_id']])
@@ -407,6 +412,15 @@ class WorldStore:
             stage = cycle['phase']
             state = self.state()
             brief = cycle['value']['brief']
+            links = []
+            if stage in ('world', 'outcome'):
+                from .world_protocol import validate_shape, SCHEMAS
+                from .world_threads import branch_closed_threads
+                validate_shape(value, SCHEMAS[stage])
+                original = value
+                value, links = branch_closed_threads(value, state)
+                if links:
+                    cycle['value'].setdefault('thread_routing', {})[stage] = {'original': original, 'links': links}
             if stage in ('speech', 'post', 'impulse'):
                 if not isinstance(value, str) or not value.strip() or len(value) > (900 if stage == 'impulse' else 12000):
                     raise ValueError('invalid spoken text')
@@ -459,6 +473,9 @@ class WorldStore:
                                         (entry['id'], json.dumps(entry, ensure_ascii=False), event_id))
                 if stage == 'outcome':
                     self.put('minute', state['minute'] + value['elapsed_minutes'])
+                for link in links:
+                    self.db.execute('INSERT INTO world_thread_links VALUES(?,?,?)',
+                                    (link['child'], link['parent'], event_id))
             if stage == 'choice' and value['note'].strip():
                 self.db.execute('INSERT INTO world_notes VALUES(?,?,?,?,?)',
                                 (event_id, cycle['actor_id'], cycle['id'], state['minute'], value['note']))

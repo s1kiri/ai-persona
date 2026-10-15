@@ -15,7 +15,7 @@ class WorldBackend(AppServerBackend):
         super().__init__(*args, **kwargs, minimal_tools=True, code_mode_host=research_host)
 
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
@@ -44,6 +44,9 @@ class WorldBackend(AppServerBackend):
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':
             params['outputSchema'] = INTENT_SCHEMA
+        if stage == 'photo_choice':
+            from .world_photo import PHOTO_SCHEMA
+            params['outputSchema'] = PHOTO_SCHEMA
         turn = None
         try:
             if cancel and cancel.is_set():
@@ -105,7 +108,7 @@ class WorldBackend(AppServerBackend):
                 if value['task_id'] != payload['task_id']:
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
-            return (json.loads(answer) if stage in SCHEMAS or stage == 'intent' else answer), self.last_usage
+            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice') else answer), self.last_usage
         except Exception:
             if turn:
                 try:

@@ -39,6 +39,7 @@ class CodexImageBackend(AppServerBackend):
             reference = Path(reference).resolve(strict=True)
             inputs.append({'type': 'localImage', 'path': str(reference)})
         self.last_usage = {}
+        self.last_trace = []
         self._start()
         attempt_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Atomic claim also prevents two local workers from dispatching the
@@ -78,6 +79,13 @@ class CodexImageBackend(AppServerBackend):
                     raise
                 method, data = event.get('method'), event.get('params', {})
                 if data.get('threadId') != thread or data.get('turnId') not in (None, turn): continue
+                if method in ('item/started', 'item/completed', 'turn/completed', 'error'):
+                    item = data.get('item', {})
+                    # Operational evidence only: no message text, hidden
+                    # reasoning, credentials or base64 pixels in trace logs.
+                    self.last_trace.append({'method': method, 'type': item.get('type'),
+                                            'id': item.get('id'), 'status': item.get('status')})
+                    save_private(destination.with_suffix('.trace.json'), self.last_trace)
                 if method == 'thread/tokenUsage/updated':
                     self.last_usage = cumulative_delta(data['tokenUsage']['total'], {})
                     if sum(self.last_usage.get(k, 0) for k in ('input_tokens', 'output_tokens')) >= self.max_known_tokens:

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Гарик · Telegram</title><link rel="stylesheet" href="/telegram.css"><script src="/telegram.js" defer></script></head>
+<body><main>
+<header><a href="http://127.0.0.1:8766/#posts">← Пульс мира</a><p class="eyebrow">ГАРИК / TELEGRAM</p><h1>Переезжаем в канал.</h1><p>Сначала подключим бота и проверим комментарии. Жизнь Гарика пока на паузе.</p></header>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<section><span class="number">01</span><h2>Бот</h2><p id="bot-status">Токен ещё не сохранён.</p>
+<form id="token-form" autocomplete="off"><label for="token">Токен из BotFather</label><input id="token" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" required placeholder="Вставь токен сюда"><button id="save-token" type="submit">Сохранить и проверить</button></form>
+<p class="hint">Сохраняется только на этом Mac, в закрытом локальном файле. Не попадает в промпт, адрес страницы или журнал. После отправки поле очищается.</p></section>
+<section><span class="number">02</span><h2>Канал и обсуждение</h2><p id="channel-status">Сначала подключи бота.</p>
+<form id="channel-form"><label for="channels">Найденные каналы</label><select id="channels"><option value="">Пока нет найденных каналов</option></select><label for="channel">Канал</label><input id="channel" autocomplete="off" placeholder="Выбери выше или введи @username / ID"><button id="bind" type="submit" disabled>Проверить права и подключить</button></form>
+<p class="hint">Если закрытого канала нет в списке: напиши в нём любое новое сообщение от себя. Бот заметит канал, список обновится сам. Назначение ботом администратора заново тоже создаёт событие.</p>
+<div id="binding" hidden></div></section>
+<section><span class="number">03</span><h2>Проверка связи</h2><p>Кнопка ниже отправит один технический пост в выбранный канал. Затем напиши под ним комментарий: он появится здесь. У комментария будет кнопка проверки ответа.</p>
+<button id="test-post" disabled>Отправить проверочный пост в канал</button><p id="delivery-status" class="hint">Публикации ещё не отправлялись.</p>
+<div id="messages" class="messages"></div></section>
+<footer>Самостоятельные публикации выключены. Подключение не вызывает модель и не меняет память мира.</footer>
+</main></body></html>

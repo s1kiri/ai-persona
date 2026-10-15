@@ -4,6 +4,7 @@ This runner has no access to tools of a parent Codex chat. All inference and
 image operations are performed by the configured child Codex processes.
 """
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -11,14 +12,16 @@ from pathlib import Path
 
 from .app_server import save_private
 from .world_photo import PHOTO_CHOICE, render_request
+from .world_media import MediaReferenceLibrary, with_visual_references, ensure_new_photo
 
 
 class AutonomousPhotoCase:
-    def __init__(self, directory, chooser, renderer, persona, references=None, observer=None):
+    def __init__(self, directory, chooser, renderer, persona, references=None, observer=None, reference_library=None):
         self.directory = Path(directory)
         self.chooser, self.renderer, self.persona = chooser, renderer, persona
         self.references = references or {}
         self.observer = observer or (lambda value: None)
+        self.reference_library = reference_library
 
     def run(self, context):
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -32,6 +35,10 @@ class AutonomousPhotoCase:
         with os.fdopen(fd, 'w') as stream:
             json.dump({'status': 'started'}, stream)
         try:
+            context = copy.deepcopy(context)
+            if self.reference_library:
+                previous = self.reference_library.select(context['actor_id'], [s['id'] for s in context['subjects']])
+                context['previous_photos'] = [{k: e[k] for k in ('subject_ids', 'view', 'visual_notes')} for e in previous]
             save_private(self.directory/'scene.json', context)
             self.observer({'phase': 'garik_chooses'})
             choice, usage = self.chooser.generate('photo_choice', self.persona+'\n\n'+PHOTO_CHOICE, context)
@@ -41,8 +48,12 @@ class AutonomousPhotoCase:
                 result = {'status': 'skipped', 'choice': choice, 'choice_usage': usage,
                           'image_calls': 0, 'published': False}
             else:
-                save_private(self.directory/'request.json', request)
                 references = [self.references[i] for i in request['subject_ids'] if i in self.references]
+                entries = self.reference_library.select(context['actor_id'], request['subject_ids']) if self.reference_library else []
+                references = list(dict.fromkeys([*references, *(e['image_path'] for e in entries)]))
+                request = with_visual_references(request, entries)
+                save_private(self.directory/'request.json', request)
+                save_private(self.directory/'used-references.json', references)
                 self.observer({'phase': 'garik_tool_generates', 'choice': choice, 'references': len(references)})
                 image = self.renderer.render(request, self.directory/'photo.png', references=references)
                 path = Path(image['image_path'])
@@ -52,6 +63,7 @@ class AutonomousPhotoCase:
                     # Recovery is useful, but it cannot pass this test of the
                     # whole corrected live transport and native completion.
                     raise ValueError('asset recovered but full native receipt is still missing')
+                ensure_new_photo(image, references)
                 result = {'status': 'passed', 'choice': choice, 'choice_usage': usage,
                           'image': image, 'image_calls': 1, 'published': False,
                           'parent_chat_image_tool': False}
@@ -70,6 +82,7 @@ def main(argv=None):
     parser.add_argument('--scene', required=True, type=Path)
     parser.add_argument('--persona', required=True, type=Path)
     parser.add_argument('--references', type=Path, help='JSON mapping subject IDs to local visual references')
+    parser.add_argument('--reference-library', type=Path, help='persistent visual references indexed by world subject ID')
     args = parser.parse_args(argv)
     directory = args.data_dir.expanduser().resolve()
     root = Path(__file__).resolve().parent.parent
@@ -85,13 +98,16 @@ def main(argv=None):
     owner = SharedTransport()
     chooser = WorldBackend(directory/'choice-transport', transport_factory=owner.borrow)
     renderer = CodexImageBackend(directory/'image-transport', transport_factory=owner.borrow)
+    library = MediaReferenceLibrary(args.reference_library) if args.reference_library else None
     try:
         case = AutonomousPhotoCase(directory, chooser, renderer, persona, refs,
-                                   observer=lambda v: print(json.dumps(v, ensure_ascii=False), flush=True))
+                                   observer=lambda v: print(json.dumps(v, ensure_ascii=False), flush=True),
+                                   reference_library=library)
         result = case.run(context)
         print(json.dumps(result, ensure_ascii=False), flush=True)
     finally:
         chooser.close(); renderer.close(); owner.close()
+        if library: library.close()
 
 
 if __name__ == '__main__': main()

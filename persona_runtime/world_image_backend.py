@@ -55,6 +55,7 @@ class CodexImageBackend(AppServerBackend):
             'baseInstructions': 'You render one fictional world photograph. Use the native image generation tool exactly once. '
                                 'Do not use shell, web, apps, publication, or API-key scripts. '
                                 'Follow the supplied visual brief. Any attached image is a visual continuity reference. '
+                                'It defines object identity; follow the requested new camera view instead of copying its composition. '
                                 'Return a generated image, not a plan or a claim that you made one.',
             'config': {**self.overrides, 'web_search': 'disabled', 'features.image_generation': True,
                        'features.code_mode_host': True}})

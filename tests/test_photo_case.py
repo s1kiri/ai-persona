@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from persona_runtime.photo_case import AutonomousPhotoCase
+from persona_runtime.world_media import MediaReferenceLibrary
 from test_world_image_backend import PNG
 
 
@@ -17,11 +18,11 @@ class Chooser:
 
 
 class Renderer:
-    def __init__(self, recovered=False): self.calls, self.recovered = [], recovered
+    def __init__(self, recovered=False, pixels=PNG): self.calls, self.recovered, self.pixels = [], recovered, pixels
     def render(self, request, destination, references):
         self.calls.append((request, references))
-        destination.write_bytes(PNG)
-        return {'image_path': str(destination), 'sha256': hashlib.sha256(PNG).hexdigest(),
+        destination.write_bytes(self.pixels)
+        return {'image_path': str(destination), 'sha256': hashlib.sha256(self.pixels).hexdigest(),
                 'native_receipt_received': not self.recovered}
 
 
@@ -78,3 +79,25 @@ class AutonomousPhotoCaseTests(unittest.TestCase):
         renderer.render = bad
         with self.assertRaisesRegex(ValueError, 'does not match'):
             AutonomousPhotoCase(self.root, Chooser(self.choice), renderer, 'Persona').run(self.context)
+
+    def test_library_supplies_prior_views_to_actor_and_references_to_tool(self):
+        library = MediaReferenceLibrary(self.root/'library')
+        try:
+            old = self.root/'old.png'; old.write_bytes(PNG)
+            library.register({'image_path': str(old), 'sha256': hashlib.sha256(PNG).hexdigest(), 'subject_ids': ['map']},
+                             'garik', 'previous overhead view', source='approved')
+            chooser, renderer = Chooser(self.choice), Renderer(pixels=PNG+b'new-frame-fixture')
+            result = AutonomousPhotoCase(self.root/'case', chooser, renderer, 'Persona', reference_library=library).run(self.context)
+            self.assertEqual(result['status'], 'passed')
+            self.assertEqual(chooser.calls[0][2]['previous_photos'][0]['view'], 'previous overhead view')
+            request, references = renderer.calls[0]
+            self.assertEqual(len(references), 1)
+            self.assertEqual(Path(references[0]).read_bytes(), PNG)
+            self.assertIn('genuinely new camera shot', request['prompt'])
+        finally: library.close()
+
+    def test_returning_old_reference_cannot_pass_a_new_case(self):
+        old = self.root/'old.png'; old.write_bytes(PNG)
+        case = AutonomousPhotoCase(self.root/'new-case', Chooser(self.choice), Renderer(), 'Persona', {'map': str(old)})
+        with self.assertRaisesRegex(ValueError, 'identical to an old reference'):
+            case.run(self.context)

@@ -80,6 +80,13 @@ class BackendTests(unittest.TestCase):
             start = next(p for m, p in self.backend.client.calls if m == 'turn/start')
             self.assertNotIn('outputSchema', start)
 
+    def test_lossless_metadata_has_partition_schema_instead_of_an_action_summary(self):
+        self.backend.client = Client({'parts': []})
+        self.backend.generate('intent', 'Technical routing', {})
+        start = next(p for m, p in self.backend.client.calls if m == 'turn/start')
+        self.assertIn('parts', start['outputSchema']['properties'])
+        self.assertNotIn('action', start['outputSchema']['properties'])
+
     def test_tool_rejected_without_retry_and_usage_survives(self):
         self.backend.client = Client(event(), unexpected=True)
         with self.assertRaises(CodexError):

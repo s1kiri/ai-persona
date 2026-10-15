@@ -134,6 +134,10 @@ class WorldStore:
                 id TEXT NOT NULL,value TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(actor_id,id));
             CREATE TABLE IF NOT EXISTS world_concerns(actor_id TEXT NOT NULL REFERENCES world_actors(id),
                 id TEXT NOT NULL,value TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(actor_id,id));
+            CREATE TABLE IF NOT EXISTS world_recovery(actor_id TEXT NOT NULL REFERENCES world_actors(id),
+                prior_cycle TEXT NOT NULL REFERENCES world_cycles(id),
+                next_cycle TEXT NOT NULL REFERENCES world_cycles(id),decision TEXT NOT NULL,note TEXT NOT NULL,
+                PRIMARY KEY(actor_id,prior_cycle));
         ''')
         with self.lock, self.db:
             if self.get('version') is None:
@@ -243,11 +247,15 @@ class WorldStore:
         state['concerns'] = [c for c in concerns if c['status'] != 'closed'] + [c for c in concerns if c['status'] == 'closed'][:3]
         state['unfinished_attempts'] = []
         for row in self.db.execute("SELECT id,phase,value FROM world_cycles WHERE actor_id=? AND status IN ('blocked','abandoned') ORDER BY rowid DESC LIMIT 3", (actor_id,)):
+            recovery = self.db.execute('SELECT * FROM world_recovery WHERE actor_id=? AND prior_cycle=?', (actor_id, row['id'])).fetchone()
+            if recovery and recovery['decision'] in ('resume', 'drop'):
+                continue
             results = json.loads(row['value'])['results']
             if 'choice' in results and 'outcome' not in results:
                 state['unfinished_attempts'].append({'cycle_id': row['id'], 'phase': row['phase'],
                                                      'action': results['choice']['action'],
                                                      'written_intent': results.get('impulse', ''),
+                                                     'disposition': recovery['decision'] if recovery else 'undecided',
                                                      'status': 'no_committed_outcome'})
         # Keep evidence usable after the moving event window, without replaying
         # an ever-growing transcript. Up to four source receipts; no duplicates
@@ -313,7 +321,7 @@ class WorldStore:
             raise ValueError('unknown cycle')
         return {**dict(row), 'value': json.loads(row['value'])}
 
-    def prepare(self, actor_id='garik', minutes=30, draw=None, personal_life=False):
+    def prepare(self, actor_id='garik', minutes=30, draw=None, personal_life=False, lossless_intentions=False):
         if type(minutes) is not int or not 1 <= minutes <= 1440:
             raise ValueError('invalid virtual interval')
         with self.lock, self.db:
@@ -326,7 +334,8 @@ class WorldStore:
             state = self.state()
             brief = director(state, actor_id, minutes, random.random() if draw is None else draw)
             cycle_id = 'cycle-' + uuid.uuid4().hex
-            value = {'brief': brief, 'inputs': {}, 'results': {}, 'personal_life': personal_life}
+            value = {'brief': brief, 'inputs': {}, 'results': {}, 'personal_life': personal_life,
+                     'lossless_intentions': lossless_intentions}
             self.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
                             (cycle_id, actor_id, 'ready', 'impulse' if personal_life else 'world', state['revision'], json.dumps(value, ensure_ascii=False), time.time()))
             self.snapshot()
@@ -380,7 +389,21 @@ class WorldStore:
             else:
                 if stage == 'experience':
                     state['personal_evidence_ids'] = self.personal_evidence_ids(cycle['actor_id'])
-                validate_result(stage, value, state, brief)
+                checked = value
+                if stage == 'choice' and cycle['value'].get('lossless_intentions'):
+                    from .world_intent import adapt
+                    checked = {k: v for k, v in value.items() if k not in ('intent_parts', 'recovery')}
+                    canonical = adapt({**{k: v for k, v in checked.items() if k != 'action'},
+                                       'parts': value.get('intent_parts'), 'recovery': value.get('recovery')},
+                                      cycle['value']['results']['impulse'])
+                    if canonical != value:
+                        raise ValueError('canonical intent differs')
+                    for recovery in value['recovery']:
+                        prior = self.cycle(recovery['cycle_id'])
+                        if (prior['actor_id'] != cycle['actor_id'] or prior['status'] not in ('abandoned', 'blocked') or
+                                'choice' not in prior['value']['results'] or 'outcome' in prior['value']['results']):
+                            raise ValueError('recovery must refer to own interrupted attempt')
+                validate_result(stage, checked, state, brief)
             event_id = cycle['id'] + '-' + stage
             if stage in ('world', 'outcome'):
                 for field, table in [('entities', 'world_entities'), ('threads', 'world_threads')]:
@@ -393,6 +416,9 @@ class WorldStore:
                 self.db.execute('INSERT INTO world_notes VALUES(?,?,?,?,?)',
                                 (event_id, cycle['actor_id'], cycle['id'], state['minute'], value['note']))
             if stage == 'choice':
+                for recovery in value.get('recovery', []):
+                    self.db.execute('INSERT OR REPLACE INTO world_recovery VALUES(?,?,?,?,?)',
+                                    (cycle['actor_id'], recovery['cycle_id'], cycle['id'], recovery['decision'], recovery['note']))
                 for undertaking in value['undertakings']:
                     self.db.execute('INSERT OR REPLACE INTO world_undertakings VALUES(?,?,?,?)',
                                     (cycle['actor_id'], undertaking['id'], json.dumps(undertaking, ensure_ascii=False), event_id))
@@ -499,6 +525,10 @@ class WorldStore:
                 event['execution'] = ('has_outcome' if 'outcome' in results else
                                       'interrupted' if cycle['status'] == 'abandoned' else
                                       'blocked' if cycle['status'] == 'blocked' else 'pending')
+                recovery = self.db.execute('SELECT decision,next_cycle,note FROM world_recovery WHERE actor_id=? AND prior_cycle=?',
+                                           (event['actor_id'], event['cycle_id'])).fetchone()
+                if recovery:
+                    event['recovery'] = dict(recovery)
             cycles = [{**dict(r), 'value': json.loads(r['value'])} for r in self.db.execute(
                 'SELECT * FROM world_cycles ORDER BY rowid DESC LIMIT 12')]
             calls = [{**dict(r), 'usage': json.loads(r['usage'])} for r in self.db.execute(
@@ -522,7 +552,7 @@ class WorldStore:
 class WorldSession:
     """One recorded stage per step; optional personal life, research and drafts."""
     def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24, autonomous_posts=False, free_intentions=False,
-                 personal_life=False, research_enabled=False, research_backend=None):
+                 personal_life=False, research_enabled=False, research_backend=None, lossless_intentions=False):
         if type(max_calls) is not int or not 1 <= max_calls <= 200:
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
@@ -533,9 +563,13 @@ class WorldSession:
         self.personal_life = personal_life
         self.research_enabled = research_enabled
         self.research_backend = research_backend or backend
+        self.lossless_intentions = lossless_intentions
+        if lossless_intentions and not (personal_life or free_intentions):
+            raise ValueError('lossless transfer requires a written intention')
 
     def prepare(self, actor_id='garik', minutes=30, draw=None):
-        return self.store.prepare(actor_id, minutes, draw=draw, personal_life=self.personal_life)
+        return self.store.prepare(actor_id, minutes, draw=draw, personal_life=self.personal_life,
+                                  lossless_intentions=self.lossless_intentions)
 
     def step(self, cycle_id):
         from .world_prompts import (WORLD, CHOICE, OUTCOME, SPEECH_CONTEXT, SHARE, POST,
@@ -556,6 +590,9 @@ class WorldSession:
             personal = cycle['value'].get('personal_life', False)
             if personal != self.personal_life:
                 raise WorldConflict('cycle mode differs; do not switch an in-flight experiment')
+            lossless = cycle['value'].get('lossless_intentions', False)
+            if lossless != self.lossless_intentions:
+                raise WorldConflict('intent transfer mode changed during the episode')
             clock = clock_at(state['minute'])
             if stage in ('world', 'outcome'):
                 instruction = WORLD if stage == 'world' else OUTCOME
@@ -574,10 +611,13 @@ class WorldSession:
                     payload['research_receipt'] = results['research']
             elif stage == 'choice' and 'impulse' in results:
                 instruction = INTENT_ADAPTER
+                if lossless:
+                    from .world_intent import INSTRUCTIONS
+                    instruction = INSTRUCTIONS
                 instruction += '\n' + (SEARCH_CHOICE if self.research_enabled else 'Поиск здесь недоступен; kind=research запрещён.')
                 view = self.store.actor_view(actor, state)
                 payload = {'written_intent': results['impulse'], 'known_entities': view['entities'],
-                           'undertakings': view['undertakings'], 'clock': clock}
+                           'undertakings': view['undertakings'], 'unfinished_attempts': view['unfinished_attempts'], 'clock': clock}
             elif stage == 'research':
                 if not self.research_enabled:
                     raise WorldConflict('real search is not enabled for this review')
@@ -623,8 +663,11 @@ class WorldSession:
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
             self.store.save_input(cycle_id, payload)
-            answer, usage = active_backend.generate(stage, instruction, payload)
-            if stage == 'choice' and 'impulse' in results:
+            answer, usage = active_backend.generate('intent' if stage == 'choice' and lossless else stage, instruction, payload)
+            if stage == 'choice' and lossless:
+                from .world_intent import adapt
+                answer = adapt(answer, results['impulse'])
+            elif stage == 'choice' and 'impulse' in results:
                 if not isinstance(answer, dict) or not answer.get('action', '').strip() or answer['action'] not in results['impulse']:
                     raise ValueError('intent adapter must quote the original attempted action')
             if stage == 'choice' and answer.get('kind') == 'research' and not self.research_enabled:

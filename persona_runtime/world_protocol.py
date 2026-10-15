@@ -37,7 +37,7 @@ EVENT_SCHEMA = obj({'beat': enum(BEATS), 'domain': enum(DOMAINS),
                     'surprise': {'type': 'integer', 'minimum': 0, 'maximum': 100},
                     **PATCH})
 CHOICE_SCHEMA = obj({'desire': string(500), 'kind': enum(('act', 'wait', 'rest', 'research')),
-                     'action': string(900), 'entity_ids': array(string(80), 6),
+                     'action': string(1024), 'entity_ids': array(string(80), 6),
                      'note': string(800), 'reaction': string(600),
                      'undertakings': array(obj({'id': string(80), 'want': string(500),
                                                'status': enum(('active', 'waiting', 'closed'))}), 3),

@@ -6,6 +6,7 @@ from .app_server import AppServerBackend, cumulative_delta
 from .codex import CodexError, CodexCancelled
 from .world_protocol import SCHEMAS
 from . import research
+from .world_intent import INTENT_SCHEMA
 
 
 class WorldBackend(AppServerBackend):
@@ -14,7 +15,7 @@ class WorldBackend(AppServerBackend):
         super().__init__(*args, **kwargs, minimal_tools=True, code_mode_host=research_host)
 
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
@@ -41,6 +42,8 @@ class WorldBackend(AppServerBackend):
             params['outputSchema'] = SCHEMAS[stage]
         if web:
             params['outputSchema'] = research.SCHEMA
+        if stage == 'intent':
+            params['outputSchema'] = INTENT_SCHEMA
         turn = None
         try:
             if cancel and cancel.is_set():
@@ -102,7 +105,7 @@ class WorldBackend(AppServerBackend):
                 if value['task_id'] != payload['task_id']:
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
-            return (json.loads(answer) if stage in SCHEMAS else answer), self.last_usage
+            return (json.loads(answer) if stage in SCHEMAS or stage == 'intent' else answer), self.last_usage
         except Exception:
             if turn:
                 try:

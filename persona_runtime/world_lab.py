@@ -42,11 +42,12 @@ class Laboratory:
         value['personal_life'] = bool(self.session.personal_life if self.session else
                                       value['cycles'] and value['cycles'][0]['value'].get('personal_life'))
         value['research_enabled'] = bool(self.session and self.session.research_enabled)
+        value['lossless_intentions'] = bool(self.session and self.session.lossless_intentions)
         value['night'] = self.store.get('night')
         return value
 
     def prepare(self, actor_id, minutes):
-        if self.session and self.session.personal_life:
+        if self.session and (self.session.personal_life or self.session.lossless_intentions):
             return self.session.prepare(actor_id, minutes)
         return self.store.prepare(actor_id, minutes)
 
@@ -168,6 +169,7 @@ def main(argv=None):
     parser.add_argument('--free-intentions', action='store_true', help='write a private intention before extracting world action metadata')
     parser.add_argument('--personal-life', action='store_true', help='choose before the world event and update lasting personal matters after the outcome')
     parser.add_argument('--research', action='store_true', help='allow character-chosen bounded native web research')
+    parser.add_argument('--lossless-intentions', action='store_true', help='account for every intent fragment and explicit recovery decisions')
     args = parser.parse_args(argv)
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
@@ -177,6 +179,8 @@ def main(argv=None):
         parser.error('repository data must live under .local/ or .runtime/')
     if args.live and (not args.persona or not args.speech_contract):
         parser.error('live review requires explicit persona and speech contract files')
+    if args.lossless_intentions and not (args.personal_life or args.free_intentions):
+        parser.error('lossless transfer requires written intentions')
     if args.background:
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         command = [sys.executable, '-m', 'persona_runtime.world_lab', '--data-dir', str(destination),
@@ -191,6 +195,8 @@ def main(argv=None):
             command += ['--personal-life']
         if args.research:
             command += ['--research']
+        if args.lossless_intentions:
+            command += ['--lossless-intentions']
         fd = os.open(destination / 'lab.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log,
@@ -244,7 +250,7 @@ def main(argv=None):
             session = WorldSession(store, backend, {'garik': persona}, contract, args.max_calls,
                                    autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
                                    personal_life=args.personal_life, research_enabled=args.research,
-                                   research_backend=research_backend)
+                                   research_backend=research_backend, lossless_intentions=args.lossless_intentions)
         lab = Laboratory(store, session)
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)

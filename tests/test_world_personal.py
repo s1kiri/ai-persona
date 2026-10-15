@@ -104,6 +104,28 @@ class PersonalTests(unittest.TestCase):
         self.assertNotIn('UNPERFORMED-ACTION', json.dumps(context))
         self.assertNotIn(first['id']+'-choice', context['director']['cause_ids'])
 
+    def test_interrupted_action_preserves_whole_intent_for_next_choice_and_ui(self):
+        session, backend = self.session()
+        first = session.prepare(draw=0)
+        full = 'I want to try a meal. Go and ask for meat. If sold, bring it home and try it with apples.'
+        backend.answers = [full, choice(action='Go and ask for meat.'), RuntimeError('Synthetic world failure')]
+        for _ in range(2): session.step(first['id'])
+        with self.assertRaises(RuntimeError): session.step(first['id'])
+        history = self.store.monitor()['history']
+        self.assertTrue(all(e['execution'] == 'blocked' for e in history))
+        self.store.abandon(first['id'])
+        next_cycle = session.prepare(draw=0)
+        backend.answers = ['Do something else.']
+        session.step(next_cycle['id'])
+        recovery = backend.inputs[-1][2]['life']['unfinished_attempts'][0]
+        self.assertEqual(recovery['written_intent'], full)
+        self.assertEqual(recovery['status'], 'no_committed_outcome')
+        monitor = self.store.monitor()
+        self.assertEqual(monitor['unfinished_attempts'][0]['written_intent'], full)
+        previous = [e for e in monitor['history'] if e['cycle_id'] == first['id']]
+        self.assertTrue(all(e['execution'] == 'interrupted' for e in previous))
+        self.assertEqual(len(backend.inputs), 4)  # No automatic replay.
+
     def test_search_worker_receives_only_question_and_real_result_returns_to_actor(self):
         session, backend = self.session(research_enabled=True, autonomous_posts=True)
         cycle = session.prepare(draw=0)

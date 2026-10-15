@@ -247,6 +247,7 @@ class WorldStore:
             if 'choice' in results and 'outcome' not in results:
                 state['unfinished_attempts'].append({'cycle_id': row['id'], 'phase': row['phase'],
                                                      'action': results['choice']['action'],
+                                                     'written_intent': results.get('impulse', ''),
                                                      'status': 'no_committed_outcome'})
         # Keep evidence usable after the moving event window, without replaying
         # an ever-growing transcript. Up to four source receipts; no duplicates
@@ -488,6 +489,16 @@ class WorldStore:
     def monitor(self):
         with self.lock:
             state = self.state()
+            # Displayed choices are proposals, not proof that a fictional
+            # action happened. Resolve their status from the stored cycle.
+            for event in state['history']:
+                if event['stage'] not in ('impulse', 'choice'):
+                    continue
+                cycle = self.cycle(event['cycle_id'])
+                results = cycle['value']['results']
+                event['execution'] = ('has_outcome' if 'outcome' in results else
+                                      'interrupted' if cycle['status'] == 'abandoned' else
+                                      'blocked' if cycle['status'] == 'blocked' else 'pending')
             cycles = [{**dict(r), 'value': json.loads(r['value'])} for r in self.db.execute(
                 'SELECT * FROM world_cycles ORDER BY rowid DESC LIMIT 12')]
             calls = [{**dict(r), 'usage': json.loads(r['usage'])} for r in self.db.execute(
@@ -502,6 +513,9 @@ class WorldStore:
             state['concerns'] = [{**json.loads(r['value']), 'actor_id': r['actor_id']} for r in self.db.execute(
                 'SELECT * FROM world_concerns ORDER BY rowid DESC LIMIT 32')]
             state['director_signals'] = [s for a in state['actors'] if (s := self.director_signal(a['id']))]
+            state['unfinished_attempts'] = [{**attempt, 'actor_id': a['id']}
+                                            for a in state['actors']
+                                            for attempt in self.actor_view(a['id'])['unfinished_attempts']]
             return state
 
 

@@ -61,3 +61,10 @@ test('personal matters and director signal stay literal and distinct in the cons
  assert.equal(t.el('director-signals').children[0].textContent,'Brief interest');
  assert.match(t.el('cycle-flow').textContent,/Своё намерение/);
 });
+
+test('interrupted choices show missing outcome and preserve full original intention',()=>{
+ const t=setup();const text='Ask for meat. If sold, bring it home and try it with apples.';t.ctx.intent=text;
+ t.run('render({...sample,history:[{minute:1333,stage:"choice",execution:"interrupted",value:{action:"Ask for meat."}}],unfinished_attempts:[{action:"Ask for meat.",written_intent:intent}]})');
+ assert.match(t.el('timeline').children[0].children[0].textContent,/Исхода нет.*прерван/);
+ assert.equal(t.el('unfinished-attempts').children[0].children[1].textContent,text);
+});

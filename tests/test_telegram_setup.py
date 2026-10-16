@@ -4,11 +4,37 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch, Mock
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPCookieProcessor
 
-from persona_runtime.telegram_setup import LocalServer, Setup, handler
+from persona_runtime.telegram_setup import LocalServer, Setup, handler, main
 from test_telegram import Connection, API, TOKEN, CHANNEL
+
+
+class SetupTransportTests(unittest.TestCase):
+    def test_setup_ui_uses_owned_shared_proxy_without_any_initial_api_call(self):
+        with tempfile.TemporaryDirectory() as folder:
+            connection=Mock();server=Mock(server_port=12345);owner=Mock()
+            with patch('persona_runtime.proxy.SharedTransport',return_value=owner), \
+                 patch('persona_runtime.telegram_setup.TelegramConnection',return_value=connection) as connect, \
+                 patch('persona_runtime.telegram_setup.BotAPI') as api, \
+                 patch('persona_runtime.telegram_setup.LocalServer',return_value=server), \
+                 patch('persona_runtime.telegram_setup.private_json'),patch('persona_runtime.telegram_setup.signal.signal'):
+                main(['--data-dir',folder,'--port','0'])
+                api.assert_not_called()
+                connect.call_args.kwargs['api_factory'](TOKEN)
+                api.assert_called_once_with(TOKEN,transport_factory=owner.borrow)
+                connection.close.assert_called_once()
+                owner.close.assert_called_once()
+
+    def test_setup_constructor_failure_releases_transport_owner(self):
+        with tempfile.TemporaryDirectory() as folder:
+            owner=Mock()
+            with patch('persona_runtime.proxy.SharedTransport',return_value=owner), \
+                 patch('persona_runtime.telegram_setup.TelegramConnection',side_effect=ValueError('fixture')):
+                with self.assertRaises(ValueError):main(['--data-dir',folder,'--port','0'])
+            owner.close.assert_called_once()
 
 
 class SetupTests(unittest.TestCase):

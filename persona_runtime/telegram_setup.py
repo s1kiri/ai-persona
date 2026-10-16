@@ -14,7 +14,7 @@ import time
 
 from .daemon import same_secret
 from .local_http import local_request, local_navigation
-from .telegram import TelegramConnection, TelegramError, private_json
+from .telegram import BotAPI, TelegramConnection, TelegramError, private_json
 
 ASSETS = Path(__file__).parent / 'telegram_panel'
 TEST_POST = 'Проверка подключения Гарика. Напиши комментарий под этим постом — проверим, что он доходит. Это технический тест, не самостоятельный пост персонажа.'
@@ -185,9 +185,12 @@ def main(argv=None):
             process.terminate()
             process.wait(timeout=5)
             raise
-    connection = TelegramConnection(destination)
+    from .proxy import SharedTransport
+    owner = SharedTransport()
+    connection = None
     server = None
     try:
+        connection = TelegramConnection(destination,api_factory=lambda token:BotAPI(token,transport_factory=owner.borrow))
         if profile:
             from .profile_host import claim_setup
             claim_setup(connection, profile.actor_id)
@@ -202,7 +205,9 @@ def main(argv=None):
     finally:
         if server:
             server.server_close()
-        connection.close()
+        if connection:
+            connection.close()
+        owner.close()
 
 
 if __name__ == '__main__':

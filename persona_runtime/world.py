@@ -538,6 +538,8 @@ class WorldStore:
                 from .world_protocol import validate_shape, SCHEMAS
                 from .world_threads import branch_closed_threads
                 validate_shape(value, SCHEMAS[stage])
+                if stage=='outcome' and cycle['value']['results'].get('research_failure') and value['status']!='failed':
+                    raise ValueError('failed research cannot become a successful or partial research outcome')
                 original = value
                 value, links = branch_closed_threads(value, state)
                 if links:
@@ -1023,6 +1025,9 @@ class WorldSession:
                                                    'signal': self.store.director_signal(actor)}
                 if stage == 'outcome' and 'research' in results:
                     payload['research_receipt'] = results['research']
+                if stage == 'outcome' and 'research_failure' in results:
+                    payload['research_failure']=results['research_failure']
+                    instruction+='\nПоиск завершился сбоем без подтверждённого результата. Это не найденные сведения. Не придумывай источники, прочитанное и успех. Разреши только неудачную попытку поиска; чувства и следующий поступок герой выберет сам.'
             elif stage == 'choice' and 'impulse' in results:
                 instruction = INTENT_ADAPTER
                 if lossless:

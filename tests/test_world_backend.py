@@ -80,6 +80,15 @@ class BackendTests(unittest.TestCase):
             start = next(p for m, p in self.backend.client.calls if m == 'turn/start')
             self.assertNotIn('outputSchema', start)
 
+    def test_failed_research_outcome_wire_cannot_select_success(self):
+        from test_world import outcome
+        from persona_runtime.world_protocol import SCHEMAS
+        self.backend.client=Client(outcome(status='failed'))
+        self.backend.generate('outcome','Synthetic role',{'research_failure':{'status':'failed','facts':[]}})
+        start=next(p for m,p in self.backend.client.calls if m=='turn/start')
+        self.assertEqual(start['outputSchema']['properties']['status']['enum'],['failed'])
+        self.assertIn('succeeded',SCHEMAS['outcome']['properties']['status']['enum'])
+
     def test_lossless_metadata_has_partition_schema_instead_of_an_action_summary(self):
         self.backend.client = Client({'parts': []})
         self.backend.generate('intent', 'Technical routing', {})
@@ -200,6 +209,10 @@ class BackendTests(unittest.TestCase):
             with self.assertRaises(CodexError):
                 self.backend.generate('research', 'Synthetic research', {'task_id': 'synthetic', 'question': 'Synthetic'})
             self.assertEqual(sum(m == 'turn/start' for m, _ in self.backend.client.calls), 1)
+            self.assertEqual(self.backend.last_diagnostics['failure_reason'],'missing_web_receipt' if count==0 else 'web_call_limit')
+            if count==3:
+                self.assertEqual(self.backend.last_diagnostics['web_calls_seen'],3)
+                self.assertEqual(len(self.backend.last_diagnostics['web_receipts']),2)
 
     def test_search_cannot_accidentally_run_in_the_character_process(self):
         self.backend.client = Client({'task_id': 'synthetic', 'facts': [], 'caveats': []}, web_calls=1)

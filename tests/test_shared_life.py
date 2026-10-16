@@ -182,6 +182,38 @@ class SharedLifeTests(unittest.TestCase):
         for _ in range(3):self.scheduler.tick()
         self.assertEqual(len(self.backends[actor].inputs),calls+1)
 
+    def test_failed_research_has_no_facts_and_finishes_as_failed_attempt_without_retry(self):
+        from persona_runtime.codex import CodexError
+        cid=self.plan('garik',15,intent='Поищу сведения по вымышленному вопросу.')
+        with self.store.lock,self.store.db:
+            value=self.store.cycle(cid)['value'];value['results']['choice']['kind']='research'
+            self.store.db.execute("UPDATE world_cycles SET status='ready',phase='research',value=? WHERE id=?",(json.dumps(value),cid))
+        self.lives['garik'].lab.session.research_enabled=True
+        self.backends['garik'].answers=[CodexError('synthetic read failure')]
+        self.scheduler._run_cycle(self.store.cycle(cid))
+        cycle=self.store.cycle(cid);self.assertEqual(cycle['status'],'waiting');self.assertEqual(cycle['phase'],'outcome')
+        self.assertEqual(cycle['value']['results']['research_failure']['facts'],[])
+        self.assertNotIn('research',cycle['value']['results'])
+        call=dict(self.store.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='research'",(cid,)).fetchone())
+        self.assertEqual(call['status'],'failed')
+        self.now+=15*60;self.finish('garik',cid,15,status='failed',observation='Поиск прервался; подтверждённых сведений нет.')
+        self.assertEqual(sum(role=='research' for role,_,_ in self.backends['garik'].inputs),1)
+        payload=next(p for role,_,p in self.backends['garik'].inputs if role=='outcome')
+        self.assertEqual(payload['research_failure']['facts'],[]);self.assertNotIn('research_receipt',payload)
+        after=dict(self.store.db.execute('SELECT * FROM world_calls WHERE id=?',(call['id'],)).fetchone())
+        self.assertEqual(call,after)
+
+    def test_cancelled_research_is_not_automatically_resolved(self):
+        from persona_runtime.codex import CodexCancelled
+        cid=self.plan('garik',15,intent='Поищу сведения.')
+        with self.store.lock,self.store.db:
+            value=self.store.cycle(cid)['value'];value['results']['choice']['kind']='research'
+            self.store.db.execute("UPDATE world_cycles SET status='ready',phase='research',value=? WHERE id=?",(json.dumps(value),cid))
+        self.lives['garik'].lab.session.research_enabled=True;self.backends['garik'].answers=[CodexCancelled('synthetic cancellation')]
+        with self.assertRaises(CodexCancelled):self.scheduler._run_cycle(self.store.cycle(cid))
+        self.assertEqual(self.store.cycle(cid)['status'],'blocked')
+        self.assertNotIn('research_failure',self.store.cycle(cid)['value']['results'])
+
     def test_confirmed_comment_consumes_its_source_even_without_read_ids(self):
         post=self.root_post('arkady');self.forward('arkady',post);self.scheduler.circulate_posts()
         source=self.store.peer_context('garik')['unread_ids'][0]

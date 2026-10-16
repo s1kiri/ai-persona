@@ -55,6 +55,9 @@ class WorldBackend(AppServerBackend):
                   'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False}}
         if stage in SCHEMAS:
             params['outputSchema'] = SCHEMAS[stage]
+        if stage=='outcome' and payload.get('research_failure'):
+            params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
+            params['outputSchema']['properties']['status']['enum']=['failed']
         if stage=='horizon':
             params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
             props=params['outputSchema']['properties']['hooks']['items']['properties']
@@ -140,16 +143,19 @@ class WorldBackend(AppServerBackend):
                     item = data.get('item', {})
                     if item.get('type') == 'webSearch' and web:
                         seen_web.add(item['id'])
+                        self.last_diagnostics['web_calls_seen']=len(seen_web)
                         if len(seen_web) > 2:
                             raise CodexError('world research web call limit exceeded')
                         if method == 'item/completed':
                             from .app_server import safe_action
                             web_events.append({'id': item['id'], 'status': 'completed',
                                                'action': safe_action(item.get('action', {}))})
+                            self.last_diagnostics['web_receipts']=copy.deepcopy(web_events)
                     elif (web and item.get('type') == 'functionCallOutput' and
                           item.get('name') in ('exec', 'wait') and item.get('namespace') in (None, 'functions')):
                         pass
                     elif item.get('type') not in ('userMessage', 'reasoning', 'agentMessage'):
+                        self.last_diagnostics['unexpected_item_type']=str(item.get('type',''))[:80]
                         raise CodexError('unexpected operation in world laboratory')
                     if item.get('type') == 'agentMessage' and method == 'item/completed' and item.get('phase') != 'commentary':
                         answers[item['id']] = item.get('text', '')
@@ -189,7 +195,16 @@ class WorldBackend(AppServerBackend):
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
             return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice','world_intervention') else answer), self.last_usage
-        except Exception:
+        except Exception as error:
+            reasons={'world research web call limit exceeded':'web_call_limit',
+                     'unexpected operation in world laboratory':'unexpected_operation',
+                     'world output limit exceeded':'output_limit',
+                     'world call token limit exceeded':'token_limit',
+                     'world stream error; no automatic retry':'stream_error',
+                     'research returned no actual native web receipt':'missing_web_receipt',
+                     'world role returned no answer':'missing_answer',
+                     'world call did not complete':'turn_not_completed'}
+            self.last_diagnostics['failure_reason']=reasons.get(str(error),'unclassified_'+type(error).__name__)
             if turn:
                 try:
                     self.client.rpc('turn/interrupt', {'threadId': thread, 'turnId': turn}, timeout=2)

@@ -38,6 +38,32 @@ class SharedWorldStore(WorldStore):
             "SELECT 1 FROM sqlite_master WHERE name='peer_positions'").fetchone() else []
         return state
 
+    def resolve_failed_research(self,cycle_id):
+        """Retain a failed read-only attempt; advance to its failed outcome, never search again."""
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id);value=cycle['value']
+            if (cycle['status']!='blocked' or cycle['phase']!='research' or
+                    value.get('results',{}).get('choice',{}).get('kind')!='research' or
+                    'research' in value['results'] or not value.get('shared_window')):
+                raise WorldConflict('only a failed shared research attempt can be resolved')
+            if self.db.execute("SELECT 1 FROM world_calls WHERE status='started'").fetchone():
+                raise WorldConflict('wait for active calls before resolving research')
+            call=self.db.execute("SELECT id,usage FROM world_calls WHERE cycle_id=? AND stage='research' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed research call required')
+            failure={'status':'failed','call_id':call['id'],'facts':[],
+                     'diagnostics':value.get('failure',{}).get('diagnostics',{}),
+                     'meaning':'No completed research result. Do not infer or invent facts; no retry was performed.'}
+            audits=self.get('research_failure_resolutions') or []
+            audits.append({'cycle_id':cycle_id,'actor_id':cycle['actor_id'],'at':time.time(),
+                           'call_id':call['id'],'original_failure':value.get('failure'),
+                           'original_usage':json.loads(call['usage']),'no_replay':True})
+            self.put('research_failure_resolutions',audits)
+            value['results']['research_failure']=failure
+            revision=self.get('revision')+1;self.put('revision',revision)
+            status='waiting' if self.get('minute')<value['shared_window']['due_minute'] else 'ready'
+            self.db.execute("UPDATE world_cycles SET status=?,phase='outcome',revision=?,value=? WHERE id=?",(status,revision,json.dumps(value,ensure_ascii=False),cycle_id))
+            self.snapshot();return self.cycle(cycle_id)
+
     def state_for_cycle(self, cycle, state):
         visible = super().state_for_cycle(cycle, state)
         if cycle.get('phase') == 'outcome' and cycle['value'].get('shared_window'):

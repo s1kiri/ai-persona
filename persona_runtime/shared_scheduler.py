@@ -321,7 +321,15 @@ class SharedScheduler:
         if cycle['phase']=='share':
             life.focus(own_channel=not cycle['value'].get('channel_visit') or cycle['value'].get('channel_purpose')=='own_channel')
         life.current_phase = cycle['phase']; life.lab.busy = True
-        life.lab.session.step(cycle['id'])
+        try:
+            life.lab.session.step(cycle['id'])
+        except Exception as error:
+            from .codex import CodexError,CodexCancelled
+            if (cycle['phase']=='research' and isinstance(error,CodexError) and not isinstance(error,CodexCancelled)
+                    and self.enabled(actor) and not self.stopping.is_set()):
+                self.store.resolve_failed_research(cycle['id'])
+                return
+            raise
         updated = self.store.cycle(cycle['id'])
         if cycle['phase']=='outcome' and updated['value'].get('shared_window',{}).get('destination_id') and updated['value']['results']['outcome']['status']=='succeeded':
             with self.store.lock,self.store.db:

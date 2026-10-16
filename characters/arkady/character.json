@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "arkady",
+  "name": "Аркадий",
+  "persona": "persona.md",
+  "speech_contract": "speech-contract.md",
+  "canon": "canon.md",
+  "environment": "environment.json"
+}

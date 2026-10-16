@@ -223,7 +223,8 @@ def validate_result(stage, value, state, brief):
     if stage == 'outcome':
         if sum(t['minutes'] for t in value['time_costs']) != value['elapsed_minutes']:
             raise ValueError('elapsed time must equal travel, waiting and activity costs')
-        state = {**state, 'minute': state['minute'] + value['elapsed_minutes']}
+        if not state.get('outcome_at_current_minute'):
+            state = {**state, 'minute': state['minute'] + value['elapsed_minutes']}
     validate_clock(value['observation'], state['minute'])
     ids, threads = validate_patch(value, state, brief['settings'])
     if stage == 'world':

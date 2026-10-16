@@ -191,7 +191,7 @@ class SocialMemory:
                   for m in self.store.memories(actor)}
         for r in self.store.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE (actor_id=? OR stage IN ('world','outcome')) "
-            "AND stage IN ('audience','post','outcome','world','experience','impulse','choice')", (actor,)):
+            "AND stage IN ('audience','post','outcome','world','experience','impulse','choice','peer')", (actor,)):
             if at_minute is not None and r['minute'] > at_minute:
                 continue
             value=json.loads(r['value'])

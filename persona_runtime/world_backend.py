@@ -15,7 +15,7 @@ class WorldBackend(AppServerBackend):
         super().__init__(*args, **kwargs, minimal_tools=True, code_mode_host=research_host)
 
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review', 'timed_intent', 'timed_choice', 'peer_choice'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
@@ -44,6 +44,14 @@ class WorldBackend(AppServerBackend):
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':
             params['outputSchema'] = INTENT_SCHEMA
+        if stage in ('timed_intent', 'timed_choice', 'peer_choice'):
+            from .shared_protocol import TIMED_INTENT, TIMED_CHOICE, PEER_CHOICE
+            params['outputSchema'] = {'timed_intent': TIMED_INTENT, 'timed_choice': TIMED_CHOICE,
+                                      'peer_choice': PEER_CHOICE}[stage]
+        if stage == 'peer_choice':
+            from .shared_protocol import peer_io
+            params['outputSchema'],model_payload,source_decode=peer_io(payload)
+            params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
         if stage == 'photo_choice':
             from .world_photo import PHOTO_SCHEMA
             params['outputSchema'] = PHOTO_SCHEMA
@@ -106,7 +114,7 @@ class WorldBackend(AppServerBackend):
                 raise CodexError('world role returned no answer')
             answer = list(answers.values())[-1]
             self.last_output = answer[:12000]
-            if stage in ('live_channel','live_experience','social_review'):
+            if stage in ('live_channel','live_experience','social_review','peer_choice'):
                 from .channel_social import map_sources
                 decoded=map_sources(json.loads(answer),source_decode)
                 self.last_output=json.dumps(decoded,ensure_ascii=False)[:12000]
@@ -118,7 +126,7 @@ class WorldBackend(AppServerBackend):
                 if value['task_id'] != payload['task_id']:
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
-            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice') else answer), self.last_usage
+            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice') else answer), self.last_usage
         except Exception:
             if turn:
                 try:

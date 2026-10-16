@@ -345,7 +345,20 @@ class TelegramConnection:
                 self.put('binding', binding)
         return self.state()
 
-    def send(self, key, text, reply_to=None, photo=None):
+    def send_peer_comment(self, key, text, recipient, channel_message_id):
+        """Host-only route to the verified discussion of another connected character."""
+        with recipient.lock:
+            binding = recipient.get('binding')
+            if not binding or recipient is self:
+                raise TelegramError('Нужно отдельное подтверждённое подключение получателя.')
+            root = recipient.db.execute('SELECT group_id,root_id FROM forwards WHERE channel_id=? AND post_id=?',
+                                        (binding['channel']['id'], channel_message_id)).fetchone()
+            if not root or root[0] != binding['discussion']['id']:
+                raise TelegramError('Обсуждение опубликованного поста ещё не получено; отправки не было.')
+            target = (root[0], root[1])
+        return self.send(key, text, _peer_target=target)
+
+    def send(self, key, text, reply_to=None, photo=None, *, _peer_target=None):
         """Publish once to the verified channel or a known comment in its group."""
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,180}', key):
             raise TelegramError('Некорректный ключ отправки.')
@@ -356,7 +369,13 @@ class TelegramConnection:
                 raise TelegramError('Сначала выбери канал и проверь права.')
             chat_id = binding['channel']['id']
             payload = {'chat_id': chat_id}
-            if reply_to is not None:
+            if _peer_target is not None:
+                if (photo is not None or reply_to is not None or not isinstance(_peer_target, tuple) or
+                        len(_peer_target) != 2 or any(type(n) is not int for n in _peer_target)):
+                    raise TelegramError('Некорректное обсуждение другого героя.')
+                chat_id, root = _peer_target
+                payload.update(chat_id=chat_id, reply_parameters={'message_id': root, 'allow_sending_without_reply': False})
+            elif reply_to is not None:
                 if type(reply_to) is not int:
                     raise TelegramError('Нужен ID полученного комментария.')
                 chat_id = binding['discussion']['id']
@@ -395,7 +414,8 @@ class TelegramConnection:
             self.db.execute("UPDATE outbox SET status='sent',message_id=? WHERE key=?", (receipt['message_id'], key))
             if reply_to is not None:
                 self.db.execute('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?)',
-                                (chat_id, receipt['message_id'], comment[0], text, 'Гарик', 'own', self.get('bot')['id'], time.time()))
+                                (chat_id, receipt['message_id'], comment[0], text,
+                                 (self.get('host_profile') or {}).get('actor_id', 'Гарик'), 'own', self.get('bot')['id'], time.time()))
             return dict(self.db.execute('SELECT * FROM outbox WHERE key=?', (key,)).fetchone())
 
     def state(self):

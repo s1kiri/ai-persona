@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "garik",
+  "name": "Гарик",
+  "persona": "persona.md",
+  "speech_contract": "speech-contract.md",
+  "canon": "canon.md",
+  "environment": "environment.json",
+  "memory": "memory.json"
+}

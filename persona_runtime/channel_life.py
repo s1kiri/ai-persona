@@ -144,7 +144,7 @@ class ChannelLife:
                     audience_id TEXT NOT NULL,PRIMARY KEY(chat_id,message_id));
                 CREATE TABLE IF NOT EXISTS channel_read_batches(id TEXT PRIMARY KEY,considered INTEGER NOT NULL DEFAULT 0);
             ''')
-            self.store.db.execute("UPDATE channel_jobs SET status='unknown',error='process stopped before full delivery; no replay' WHERE status='sending'")
+            self.store.db.execute("UPDATE channel_jobs SET status='unknown',error='process stopped before full delivery; no replay' WHERE status='sending' AND post_id IN (SELECT id FROM world_events WHERE actor_id=?)", (self.actor_id,))
             columns={r[1] for r in self.store.db.execute('PRAGMA table_info(channel_read_batches)')}
             if 'deferred_until' not in columns:
                 self.store.db.execute('ALTER TABLE channel_read_batches ADD COLUMN deferred_until REAL')
@@ -164,7 +164,7 @@ class ChannelLife:
     def state(self):
         with self.store.lock:
             status = self.get('life_status')
-            jobs = [dict(r) for r in self.store.db.execute('SELECT * FROM channel_jobs ORDER BY rowid DESC LIMIT 12')]
+            jobs = [dict(r) for r in self.store.db.execute('SELECT j.* FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? ORDER BY j.rowid DESC LIMIT 12', (self.actor_id,))]
             for job in jobs:
                 job['receipts'] = json.loads(job['receipts'])
                 if job['photo']:
@@ -192,7 +192,7 @@ class ChannelLife:
         with self.store.lock, self.store.db:
             status = self.get('life_status')
             if running:
-                if status['status'] == 'error' or self.store.db.execute("SELECT 1 FROM channel_jobs WHERE status IN ('unknown','sending')").fetchone():
+                if status['status'] == 'error' or self.store.db.execute("SELECT 1 FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? AND j.status IN ('unknown','sending')", (self.actor_id,)).fetchone():
                     raise TelegramError('Есть незавершённая операция. Нужна проверка, автоматического повтора нет.')
                 if self.connection.poll_blocked or self.connection.get('binding') is None:
                     raise TelegramError('Сначала восстанови подключение Telegram.')
@@ -237,7 +237,8 @@ class ChannelLife:
             import uuid
             from .world import director
             with self.store.lock,self.store.db:
-                active = [r[0] for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked')")]
+                active = [r[0] for r in (self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running') OR (actor_id=? AND status='blocked')", (self.actor_id,))
+                          if self.store.get('shared_host') else self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked')"))]
                 if active and (not suspended_cycle_id or active != [suspended_cycle_id]):
                     raise WorldConflict('another stage is active')
                 revision = self.store.get('revision')
@@ -279,7 +280,7 @@ class ChannelLife:
         with self.store.lock, self.store.db:
             revision = self.store.get('revision')
             delivered = {}
-            for job in self.store.db.execute("SELECT post_id,receipts FROM channel_jobs WHERE status='sent'"):
+            for job in self.store.db.execute("SELECT j.post_id,j.receipts FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE j.status='sent' AND e.actor_id=?", (self.actor_id,)):
                 for receipt in json.loads(job['receipts']):
                     if receipt['chat_id'] == self.connection.get('binding')['channel']['id']:
                         delivered[receipt['message_id']] = job['post_id']
@@ -288,8 +289,9 @@ class ChannelLife:
                 if row['telegram_post'] not in delivered or self.store.db.execute(
                         'SELECT 1 FROM channel_comments WHERE chat_id=? AND message_id=?', (group, row['id'])).fetchone():
                     continue
-                audience_id = 'tg-comment-' + str(row['id'])
-                cycle_id = 'received-' + str(row['id'])
+                scope = (hashlib.sha256((self.actor_id+':'+str(group)).encode()).hexdigest()[:16]+'-') if self.store.get('shared_host') else ''
+                audience_id = 'tg-comment-' + scope + str(row['id'])
+                cycle_id = 'received-' + scope + str(row['id'])
                 value = {'post_id': delivered[row['telegram_post']],
                          'comments': [{'speaker': row['speaker'][:60], 'text': row['text']}],
                          'simulated': False, 'telegram': {'chat_id': group, 'message_id': row['id'],
@@ -327,10 +329,10 @@ class ChannelLife:
         if not context['sources']:
             return None  # An initial thought has no occurred object scene to photograph.
         context['ready_post'] = post['value']['text']
-        directory = self.store.directory / 'photos' / post['id']
+        directory = self.media_directory / 'photos' / post['id']
         from .world_media import MediaReferenceLibrary
         from .photo_case import AutonomousPhotoCase
-        library = MediaReferenceLibrary(self.store.directory / 'visual-memory')
+        library = MediaReferenceLibrary(self.media_directory / 'visual-memory')
         try:
             factory = self.photo_factory or AutonomousPhotoCase
             case = factory(directory, self.lab.session.backend, self.renderer, self.persona,
@@ -338,6 +340,10 @@ class ChannelLife:
             return case.run(context)
         finally:
             library.close()
+
+    @property
+    def media_directory(self):
+        return self.store.directory / 'media' / self.actor_id if self.store.get('shared_host') else self.store.directory
 
     def deliver(self, post):
         with self.store.lock, self.store.db:
@@ -382,7 +388,7 @@ class ChannelLife:
         photo_summary = {'status': image_result['status'], 'choice': image_result['choice']} if image_result else None
         if image:
             from .world_media import MediaReferenceLibrary
-            library = MediaReferenceLibrary(self.store.directory / 'visual-memory')
+            library = MediaReferenceLibrary(self.media_directory / 'visual-memory')
             try:
                 library.register(image, self.actor_id, image_result['choice']['framing'], source='channel',
                                  channel_post_id=str(receipts[-1]['message_id']))
@@ -424,7 +430,7 @@ class ChannelLife:
             return []
         with self.store.lock:
             ids=[r[0] for r in self.store.db.execute(
-                'SELECT id FROM channel_read_batches WHERE considered=0 AND (deferred_until IS NULL OR deferred_until<=?) ORDER BY rowid LIMIT 8',(self.now(),))]
+                'SELECT b.id FROM channel_read_batches b JOIN world_events e ON e.id=b.id WHERE e.actor_id=? AND b.considered=0 AND (b.deferred_until IS NULL OR b.deferred_until<=?) ORDER BY b.rowid LIMIT 8',(self.actor_id,self.now()))]
             cache=self.get('reaction_capabilities')
         if not ids and not fulfill:
             with self.store.lock,self.store.db:

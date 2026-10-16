@@ -39,10 +39,11 @@ previous_photos, если есть, — какие виды этих предм�
 '''
 
 
-def photo_context(actor_id, entities, events, personal_voice=''):
+def photo_context(actor_id, entities, events, personal_voice='', *, portrait_subjects=()):
     """Only known subjects and observable receipts, never world_note or diary."""
     subjects = [{k: e[k] for k in ('id', 'kind', 'name', 'description', 'condition')}
-                for e in entities if actor_id in e['known_to'] and e['kind'] in ('thing', 'place')]
+                for e in entities if actor_id in e['known_to'] and
+                (e['kind'] in ('thing', 'place') or e['id'] in portrait_subjects)]
     sources = [{'id': e['id'], 'minute': e['minute'], 'observation': e['value']['observation']}
                for e in events if e['stage'] in ('world', 'outcome') and
                actor_id in e['value'].get('visible_to', [e['actor_id']])]

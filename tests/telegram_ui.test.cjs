@@ -13,6 +13,14 @@ function setup(){
  ctx.sample=sample;vm.runInContext('render(sample)',ctx);
  return {ctx,sample,requests,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
 }
+test('Arkady Telegram panel uses own name, memory and world port',()=>{
+ const t=setup();t.run('render({...sample,world_url:"http://127.0.0.1:8866",life:{name:"Аркадий",paused:true,controls:{wake_minutes:15,photos:true},memories:[{text:"<b>origin</b>"}],concerns:[{text:"Продолжить дело.",next_hint:"Проверить запись."}]}})');
+ assert.equal(t.el('character-name').textContent,'Аркадий');
+ assert.match(t.el('intro').textContent,/Аркадий/);
+ assert.equal(t.el('world-link').href,'http://127.0.0.1:8866/#posts');
+ assert.equal(t.el('origin-memory').children[0].textContent,'<b>origin</b>');
+ assert.equal(t.el('origin-section').hidden,false);
+});
 test('token is cleared before sending and is not reinserted after a failed request',async()=>{
  const t=setup();t.el('token').value='synthetic-sensitive-value';
  const promise=t.el('token-form').handlers.submit({preventDefault(){}});

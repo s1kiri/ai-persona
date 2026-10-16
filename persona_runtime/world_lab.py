@@ -19,8 +19,11 @@ ASSETS = Path(__file__).parent / 'world_panel'
 
 
 class Laboratory:
-    def __init__(self, store, session=None):
+    def __init__(self, store, session=None, preparer=None):
         self.store, self.session = store, session
+        self.preparer = preparer
+        profile = store.get('host_profile') or {'actor_id': 'garik', 'name': 'Гарик'}
+        self.actor_id, self.actor_name = profile['actor_id'], profile['name']
         self.cookie, self.csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         self.busy = False
         self.failure = None
@@ -32,6 +35,7 @@ class Laboratory:
     def state(self):
         value = self.store.monitor()
         value.update(csrf=self.csrf, model_enabled=self.session is not None,
+                     actor_id=self.actor_id, actor_name=self.actor_name,
                      pid=os.getpid(),
                      busy=self.busy, failure=self.failure or self.store.get('review_notice'),
                      max_calls=self.session.max_calls if self.session else 24,
@@ -49,12 +53,16 @@ class Laboratory:
         value['active_world'] = bool(self.session.active_world if self.session else
                                     value['cycles'] and value['cycles'][0]['value'].get('active_world'))
         value['night'] = self.store.get('night')
-        value['channel_life'] = self.store.get('channel_life')
+        value['channel_life'] = self.store.actor_get(self.actor_id, 'channel_life')
+        value['telegram_url'] = getattr(self, 'telegram_url', None)
         return value
 
     def prepare(self, actor_id, minutes):
-        if self.session and (self.session.personal_life or self.session.lossless_intentions):
-            return self.session.prepare(actor_id, minutes)
+        if self.store.get('host_profile') and actor_id != self.actor_id:
+            raise WorldConflict('this host is bound to a different actor')
+        runner = self.session or self.preparer
+        if runner and (runner.personal_life or runner.lossless_intentions):
+            return runner.prepare(actor_id, minutes)
         return self.store.prepare(actor_id, minutes)
 
     def step(self, cycle_id, phase, revision):
@@ -135,7 +143,7 @@ def handler(lab):
                 value = json.loads(self.rfile.read(size))
                 if not isinstance(value, dict):
                     raise ValueError('object required')
-                if lab.store.get('channel_life') and self.path not in ('/api/settings', '/api/action'):
+                if lab.store.actor_get(lab.actor_id, 'channel_life') and self.path not in ('/api/settings', '/api/action'):
                     raise WorldConflict('live channel owns its cycle; use pause and settings')
                 if self.path == '/api/settings' and set(value) == {'settings', 'revision'}:
                     lab.store.set_settings(value['settings'], value['revision'])
@@ -170,6 +178,7 @@ def main(argv=None):
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--live', action='store_true', help='explicitly enable manual model-review steps')
     parser.add_argument('--persona', type=Path)
+    parser.add_argument('--profile', type=Path, help='character manifest, including canon, environment and private seed memory')
     parser.add_argument('--speech-contract', type=Path)
     parser.add_argument('--max-calls', type=int, default=24)
     parser.add_argument('--background', action='store_true', help='detach the laboratory from the terminal and wait for readiness')
@@ -182,13 +191,18 @@ def main(argv=None):
     parser.add_argument('--simulated-audience', action='store_true', help='deliver explicitly fictional local reader comments before the next free choice')
     parser.add_argument('--active-world', action='store_true', help='plan resident openings and observe the world before choosing')
     args = parser.parse_args(argv)
+    if args.profile and (args.persona or args.speech_contract):
+        parser.error('--profile cannot be combined with legacy persona/contract overrides')
+    from .character_profile import CharacterProfile
+    from .profile_host import open_world
+    profile = CharacterProfile.load(args.profile) if args.profile else None
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
     root = Path(__file__).resolve().parent.parent
     destination = args.data_dir.expanduser().resolve()
     if destination == root or (root in destination.parents and not any(p == destination or p in destination.parents for p in (root / '.local', root / '.runtime'))):
         parser.error('repository data must live under .local/ or .runtime/')
-    if args.live and (not args.persona or not args.speech_contract):
+    if args.live and not profile and (not args.persona or not args.speech_contract):
         parser.error('live review requires explicit persona and speech contract files')
     if args.lossless_intentions and not (args.personal_life or args.free_intentions):
         parser.error('lossless transfer requires written intentions')
@@ -203,7 +217,11 @@ def main(argv=None):
         command = [sys.executable, '-m', 'persona_runtime.world_lab', '--data-dir', str(destination),
                    '--port', str(args.port), '--max-calls', str(args.max_calls)]
         if args.live:
-            command += ['--live', '--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
+            command += ['--live']
+            if not profile:
+                command += ['--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
+        if profile:
+            command += ['--profile', str(args.profile.resolve())]
         if args.autonomous_posts:
             command += ['--autonomous-posts']
         if args.direct_channel:
@@ -250,7 +268,7 @@ def main(argv=None):
             process.terminate()
             process.wait(timeout=5)
             raise
-    store = WorldStore(destination)
+    store = open_world(destination, profile)
     backend = None
     research_backend = None
     transport_owner = None
@@ -262,7 +280,8 @@ def main(argv=None):
             from .world_backend import WorldBackend
             if not status()['enabled']:
                 raise ValueError('configured proxy required for model review')
-            persona, contract = args.persona.read_text(), args.speech_contract.read_text()
+            persona, contract = ((profile.persona, profile.speech_contract) if profile else
+                                 (args.persona.read_text(), args.speech_contract.read_text()))
             if not persona.strip() or not contract.strip():
                 raise ValueError('empty personality/contract')
             transport_owner = SharedTransport()
@@ -270,13 +289,21 @@ def main(argv=None):
             if args.research:
                 research_backend = WorldBackend(destination / 'research-transport', research_host=True,
                                                 transport_factory=transport_owner.borrow, max_known_tokens=50000)
-            session = WorldSession(store, backend, {'garik': persona}, contract, args.max_calls,
+            session = WorldSession(store, backend, {profile.actor_id if profile else 'garik': persona}, contract, args.max_calls,
                                    autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
                                    personal_life=args.personal_life, research_enabled=args.research,
                                    research_backend=research_backend, lossless_intentions=args.lossless_intentions,
                                    simulated_audience=args.simulated_audience, active_world=args.active_world,
                                    direct_channel=args.direct_channel)
-        lab = Laboratory(store, session)
+        preparer = None
+        if profile and session is None:
+            preparer = WorldSession(store, None, {profile.actor_id: profile.persona}, profile.speech_contract,
+                                    args.max_calls, autonomous_posts=args.autonomous_posts,
+                                    free_intentions=args.free_intentions, personal_life=args.personal_life,
+                                    research_enabled=args.research, lossless_intentions=args.lossless_intentions,
+                                    simulated_audience=args.simulated_audience, active_world=args.active_world,
+                                    direct_channel=args.direct_channel)
+        lab = Laboratory(store, session, preparer=preparer)
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)
         night_worker.start()

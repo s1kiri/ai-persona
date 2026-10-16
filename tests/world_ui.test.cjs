@@ -13,6 +13,14 @@ function setup(){
  ctx.sample=sample;vm.runInContext('render(sample)',ctx);
  return {ctx,sample,posts,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
 }
+test('Arkady panel shows own memory and prepares the selected actor',()=>{
+ const t=setup();t.ctx.memoryText='<script>private origin</script>';
+ t.run('render({...sample,actor_id:"arkady",actor_name:"Аркадий",memories:[{text:memoryText}]})');
+ assert.equal(t.el('character-name').textContent,'Аркадий');
+ assert.equal(t.el('origin-memory').children[0].children[1].textContent,t.ctx.memoryText);
+ t.el('minutes').value='10';t.el('prepare').handlers.click();
+ assert.equal(JSON.parse(t.posts[0].options.body).actor_id,'arkady');
+});
 test('preparation panel clearly disables model stage and updates slider labels',()=>{
  const t=setup();assert.equal(t.el('step').disabled,true);assert.match(t.el('mode').textContent,/без модели/);
  t.el('surprise').value='15';t.el('surprise').handlers.input();

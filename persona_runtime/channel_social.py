@@ -187,14 +187,18 @@ class SocialMemory:
         return {'reader_memory': people, 'own_intentions': intents}
 
     def evidence(self, actor='garik'):
-        result = {}
+        result = {m['id']: {'id': m['id'], 'actor_id': actor, 'stage': 'memory', 'value': m}
+                  for m in self.store.memories(actor)}
         for r in self.store.db.execute(
-            "SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND stage IN ('audience','post','outcome','world','experience','impulse','choice')", (actor,)):
+            "SELECT id,actor_id,stage,minute,value FROM world_events WHERE (actor_id=? OR stage IN ('world','outcome')) "
+            "AND stage IN ('audience','post','outcome','world','experience','impulse','choice')", (actor,)):
             value=json.loads(r['value'])
             if r['stage'] in ('world','outcome'):
                 if actor not in value.get('visible_to',[r['actor_id']]):
                     continue
                 value={'observation':value['observation']}
+            elif r['actor_id'] != actor:
+                continue
             result[r['id']]={**dict(r),'value':value}
         return result
 
@@ -242,7 +246,7 @@ class SocialMemory:
                                   (update['status'], self.now(), actor, update['key']))
 
     def enrich(self, payload, actor):
-        attention = self.store.get('channel_attention') or {}
+        attention = self.store.actor_get(actor, 'channel_attention') or {}
         evidence = self.evidence(actor)
         focus = [evidence[i] for i in attention.get('focus_ids', []) if i in evidence]
         roots = list(dict.fromkeys(e['value']['post_id'] for e in focus))
@@ -259,7 +263,7 @@ class SocialMemory:
                     roots.append(value['text'])
                     if len(roots)==4:break
             payload['previous_posts']=roots
-            payload['publication']={'sharing_appetite':(self.store.get('life_controls') or {}).get('sharing_appetite',50)}
+            payload['publication']={'sharing_appetite':(self.store.actor_get(actor, 'life_controls') or {}).get('sharing_appetite',50)}
         return self.with_source_ids(payload,actor)
 
     def with_source_ids(self,payload,actor='garik'):
@@ -334,7 +338,7 @@ class SocialMemory:
                 self.store.db.execute('INSERT INTO channel_reaction_jobs VALUES(?,?,?,?,?)',
                                       (cycle['id']+'-reaction',r['audience_id'],r['emoji'],'pending',None))
                 self.store.db.execute('UPDATE channel_read_batches SET considered=1 WHERE id=?', (r['audience_id'],))
-            self.store.put('visit_leave_requested',answer['leave'])
+            self.store.actor_put(actor, 'visit_leave_requested',answer['leave'])
         self.store.db.execute('INSERT INTO reader_memory_changes(actor_id,cycle_id,value,created) VALUES(?,?,?,?)',
                               (actor,cycle['id'],json.dumps(answer,ensure_ascii=False),self.now()))
 
@@ -345,26 +349,26 @@ class SocialMemory:
             self.store.db.execute("UPDATE personal_intentions SET status='done',sources=?,updated=? WHERE actor_id=? AND key=?",
                                   (json.dumps([post['id']]),self.now(),post['actor_id'],key))
 
-    def bootstrap(self, backend, persona, cancel=None):
-        if self.store.get('social_review_complete'):
+    def bootstrap(self, backend, persona, cancel=None, actor='garik'):
+        if self.store.actor_get(actor, 'social_review_complete'):
             return
-        cycle_id='reader-memory-bootstrap'
+        cycle_id='reader-memory-bootstrap' if actor == 'garik' else actor + '-reader-memory-bootstrap'
         with self.store.lock,self.store.db:
             if self.store.db.execute('SELECT 1 FROM world_cycles WHERE id=?',(cycle_id,)).fetchone():
                 raise ValueError('memory review was interrupted; no replay')
             value={'inputs':{},'results':{},'service_review':True}
             self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
-                                  (cycle_id,'garik','ready','social_review',self.store.get('revision'),json.dumps(value),self.now()))
+                                  (cycle_id,actor,'ready','social_review',self.store.get('revision'),json.dumps(value),self.now()))
         call_id,_=self.store.claim(cycle_id,None)
         try:
-            evidence=self.evidence()
+            evidence=self.evidence(actor)
             # Only the channel's own utterances and occurred personal evidence.
             selected=list(evidence.values())[-160:]
-            payload=self.with_source_ids({**self.context(),'archive':selected})
+            payload=self.with_source_ids({**self.context(actor),'archive':selected},actor)
             self.store.save_input(cycle_id,payload)
             answer,usage=backend.generate('social_review',persona+'\n'+REVIEW_INSTRUCTIONS,payload,
                                           **({'cancel':cancel} if cancel is not None else {}))
-            validate_shape(answer,SOCIAL_REVIEW);self.validate_people(answer['people'],'garik',evidence)
+            validate_shape(answer,SOCIAL_REVIEW);self.validate_people(answer['people'],actor,evidence)
             for intent in answer['intentions']:
                 identifier(intent['key']);self.sources(intent['source_ids'],evidence,
                     outcome=intent['status']=='done' and intent['kind']=='life')
@@ -373,15 +377,15 @@ class SocialMemory:
                     raise ValueError('review completion needs delivery')
             with self.store.lock,self.store.db:
                 value=self.store.cycle(cycle_id)['value']
-                self.apply_people(answer['people'],'garik')
+                self.apply_people(answer['people'],actor)
                 for intent in answer['intentions']:
                     self.store.db.execute('INSERT OR IGNORE INTO personal_intentions VALUES(?,?,?,?,?,?,?,?,?,?)',
-                        ('garik',intent['key'],intent['kind'],intent['action'],intent['status'],json.dumps(intent['source_ids']),
+                        (actor,intent['key'],intent['kind'],intent['action'],intent['status'],json.dumps(intent['source_ids']),
                          '',self.now(),None,self.now()))
                 value['results']['social_review']=answer
                 self.store.db.execute("UPDATE world_cycles SET status='complete',phase='done',value=? WHERE id=?",(json.dumps(value,ensure_ascii=False),cycle_id))
                 self.store.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?",(json.dumps(usage),call_id))
-                self.store.put('social_review_complete',True)
+                self.store.actor_put(actor, 'social_review_complete',True)
                 self.store.snapshot()
         except Exception:
             self.store.fail(call_id,getattr(backend,'last_usage',{}),getattr(backend,'last_output',None))

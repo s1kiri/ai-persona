@@ -144,6 +144,8 @@ class WorldStore:
             CREATE TABLE IF NOT EXISTS world_repairs(cycle_id TEXT PRIMARY KEY REFERENCES world_cycles(id),
                 call_id TEXT NOT NULL REFERENCES world_calls(id),stage TEXT NOT NULL,reason TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_hooks(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS world_memories(actor_id TEXT NOT NULL REFERENCES world_actors(id),
+                id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(actor_id,id));
         ''')
         with self.lock, self.db:
             if self.get('version') is None:
@@ -186,6 +188,18 @@ class WorldStore:
     @locked
     def put(self, key, value):
         self.db.execute('INSERT OR REPLACE INTO world_meta VALUES(?,?)', (key, json.dumps(value, ensure_ascii=False)))
+
+    def actor_get(self, actor, key):
+        # Preserve the existing Garik database layout. Other actors never inherit it.
+        return self.get(key if actor == 'garik' else 'actor:' + actor + ':' + key)
+
+    def actor_put(self, actor, key, value):
+        self.put(key if actor == 'garik' else 'actor:' + actor + ':' + key, value)
+
+    @locked
+    def memories(self, actor):
+        return [json.loads(r[0]) for r in self.db.execute(
+            'SELECT value FROM world_memories WHERE actor_id=? ORDER BY rowid', (actor,))]
 
     @locked
     def register_actor(self, actor_id, name):
@@ -305,11 +319,12 @@ class WorldStore:
             if len(state['personal_sources']) == 4:
                 break
         state['basis'] = {actor_id: state.get('basis', {}).get(actor_id, '')}
+        state['memories'] = self.memories(actor_id)
         state['channel_context'] = self.channel_context(actor_id)
-        if self.get('channel_connection'):
-            state['channel_connection'] = self.get('channel_connection')
-        if self.get('channel_start'):
-            state['starting_desire'] = self.get('channel_start')
+        if self.actor_get(actor_id, 'channel_connection'):
+            state['channel_connection'] = self.actor_get(actor_id, 'channel_connection')
+        if self.actor_get(actor_id, 'channel_start'):
+            state['starting_desire'] = self.actor_get(actor_id, 'channel_start')
         if hasattr(self,'social_memory'):
             state.update(self.social_memory.context(actor_id))
         visible_ids = {e['id'] for e in state['entities']}
@@ -500,6 +515,7 @@ class WorldStore:
                     if cycle['value'].get('direct_channel'):
                         state['own_expression_ids'] = [r[0] for r in self.db.execute(
                             "SELECT id FROM world_events WHERE actor_id=? AND stage IN ('impulse','choice','experience')",(cycle['actor_id'],))]
+                        state['own_expression_ids'] += [m['id'] for m in self.memories(cycle['actor_id'])]
                     if value.get('decision') == 'reply':
                         targets = [e for e in self.channel_context(cycle['actor_id'])
                                    if e['id'] in value['source_ids'] and e['stage'] == 'audience' and e['value']['comments']]
@@ -655,7 +671,7 @@ class WorldStore:
 
     @locked
     def personal_evidence_ids(self, actor):
-        ids = []
+        ids = [m['id'] for m in self.memories(actor)]
         for row in self.db.execute('SELECT id,actor_id,stage,value FROM world_events'):
             value = json.loads(row['value'])
             if row['stage'] in ('world', 'outcome'):
@@ -755,6 +771,7 @@ class WorldStore:
                 'SELECT * FROM world_undertakings ORDER BY rowid DESC LIMIT 24')]
             state['concerns'] = [{**json.loads(r['value']), 'actor_id': r['actor_id']} for r in self.db.execute(
                 'SELECT * FROM world_concerns ORDER BY rowid DESC LIMIT 32')]
+            state['memories'] = [{**m, 'actor_id': a['id']} for a in state['actors'] for m in self.memories(a['id'])]
             state['director_signals'] = [s for a in state['actors'] if (s := self.director_signal(a['id']))]
             state['unfinished_attempts'] = [{**attempt, 'actor_id': a['id']}
                                             for a in state['actors']
@@ -948,7 +965,7 @@ class WorldSession:
                     spoken = [json.loads(r[0])['text'] for r in rows
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
-            pace=(self.store.get('life_controls') or {}).get('episode_minutes') if self.external_channel else None
+            pace=(self.store.actor_get(actor, 'life_controls') or {}).get('episode_minutes') if self.external_channel else None
             if pace and (stage in ('impulse','outcome') or stage=='choice' and 'impulse' not in results):
                 payload['episode_pace']={'target_minutes':pace,'soft_target':True}
                 instruction+='\nepisode_pace — мягкий ориентир размера одного жизненного эпизода, не таймер поста и не ускорение часов. '

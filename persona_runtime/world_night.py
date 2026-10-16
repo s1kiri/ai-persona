@@ -103,7 +103,7 @@ class Night:
         if now >= plan['next_due']:
             if plan['call_ceiling'] - state['call_count'] < 3:
                 return self.stop('budget', now)
-            self.lab.prepare('garik', plan.get('next_virtual_minutes', plan['virtual_minutes']))
+            self.lab.prepare(getattr(self.lab, 'actor_id', 'garik'), plan.get('next_virtual_minutes', plan['virtual_minutes']))
 
     def loop(self, stopping):
         while not stopping.wait(1):

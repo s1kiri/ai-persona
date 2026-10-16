@@ -5,5 +5,6 @@
   "persona": "persona.md",
   "speech_contract": "speech-contract.md",
   "canon": "canon.md",
-  "environment": "environment.json"
+  "environment": "environment.json",
+  "memory": "memory.json"
 }

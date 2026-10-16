@@ -41,7 +41,7 @@ class AutonomousPhotoCase:
                 previous = self.reference_library.select(context['actor_id'], [s['id'] for s in context['subjects']])
                 context['previous_photos'] = [{k: e[k] for k in ('subject_ids', 'view', 'visual_notes')} for e in previous]
             save_private(self.directory/'scene.json', context)
-            self.observer({'phase': 'garik_chooses'})
+            self.observer({'phase': 'character_chooses', 'actor_id': context['actor_id']})
             choice, usage = self.chooser.generate('photo_choice', self.persona+'\n\n'+PHOTO_CHOICE, context,
                                                   **({'cancel': self.cancel} if self.cancel is not None else {}))
             save_private(self.directory/'choice.json', {'choice': choice, 'usage': usage})
@@ -56,7 +56,7 @@ class AutonomousPhotoCase:
                 request = with_visual_references(request, entries)
                 save_private(self.directory/'request.json', request)
                 save_private(self.directory/'used-references.json', references)
-                self.observer({'phase': 'garik_tool_generates', 'choice': choice, 'references': len(references)})
+                self.observer({'phase': 'character_tool_generates', 'actor_id': context['actor_id'], 'choice': choice, 'references': len(references)})
                 image = self.renderer.render(request, self.directory/'photo.png', references=references,
                                              **({'cancel': self.cancel} if self.cancel is not None else {}))
                 path = Path(image['image_path'])

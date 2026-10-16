@@ -116,7 +116,8 @@ class ArkadyProfileTests(unittest.TestCase):
         self.profile.install(store)
         self.assertEqual(store.get('revision'), revision)
         self.assertEqual(len(store.state()['history']), event_count)
-        self.assertEqual(store.actor_view('arkady')['concerns'], [concern])
+        self.assertIn(concern, store.actor_view('arkady')['concerns'])
+        self.assertEqual(len(store.actor_view('arkady')['memories']), len(self.profile.memories))
         actual = next(e for e in store.actor_view('arkady')['entities']
                       if e['id'] == 'arkady_transmitter')
         self.assertEqual(actual['condition'], inspected['condition'])
@@ -131,7 +132,7 @@ class ArkadyProfileTests(unittest.TestCase):
                               {'decision': 'keep', 'text': '', 'source_ids': []}]
         for _ in range(6):
             run.step(second['id'])
-        self.assertEqual(following.inputs[1][2]['life']['concerns'], [concern])
+        self.assertIn(concern, following.inputs[1][2]['life']['concerns'])
         self.assertEqual(store.cycle(second['id'])['status'], 'complete')
         self.assertEqual(len(store.monitor()['posts']), 1)
         self.assertEqual(store.actor_view('observer')['concerns'], [])

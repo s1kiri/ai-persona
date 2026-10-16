@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const fields=['events_per_hour','surprise','continuity','quiet','max_threads','post_cooldown_minutes','director_empathy'];
-const phaseNames={horizon:'Планы жителей · ещё не события',audience:'Комментарии · вымышленная беседа',experience:'Что осталось важным',research:'Поиск и чтение',world:'Обстоятельства',impulse:'Записка перед поступком',choice:'Выбор Гарика',outcome:'Последствия',speech:'Речь Гарика',share:'Решение о канале',post:'Текст Гарика',done:'Эпизод завершён'};
+const phaseNames={horizon:'Планы жителей · ещё не события',audience:'Комментарии · вымышленная беседа',experience:'Что осталось важным',research:'Поиск и чтение',world:'Обстоятельства',impulse:'Записка перед поступком',choice:'Выбор персонажа',outcome:'Последствия',speech:'Речь персонажа',share:'Решение о канале',post:'Текст персонажа',done:'Эпизод завершён'};
 const executionNames={has_outcome:'Есть результат попытки',interrupted:'Исхода нет · эпизод прерван',blocked:'Исхода нет · этап остановлен',pending:'Намерение · результат ещё не получен'};
 const domainNames={home:'Дом',work:'Работа',food:'Еда',people:'Отношения',leisure:'Увлечения',city:'Город',learning:'Находки',money:'Деньги',rest:'Отдых'};
 let state=null,dirty=false,settingsRevision=null,pending=false;
@@ -33,9 +33,14 @@ function renderControls(){
 }
 function render(value){
  state=value;
+ const name=value.actor_name||'Гарик';
+ document.title=name+' · пульс мира';$('character-name').textContent=name;
+ $('character-initial').textContent=name.slice(0,1);
+ const memory=$('origin-memory');memory.replaceChildren();
+ for(const record of value.memories||[]){const card=el('article',undefined,'note');card.append(el('small','Авторская предыстория'),el('p',record.text));memory.append(card);}
  $('mode').textContent=value.model_enabled?'Совместный модельный просмотр':'Подготовка · без модели';
  $('scope').textContent=value.model_enabled?'Каждая кнопка «Вызвать» выполняет один модельный этап. Автоматических повторов и публикаций нет.':'Подготовка совместного просмотра. Можно настроить мир и подготовить эпизод; модельные вызовы выключены.';
- if(value.channel_life){$('mode').textContent=value.paused?'Telegram · жизнь на паузе':'Telegram · собственная жизнь';$('scope').textContent='Гарик сам живёт и выбирает публикации. Реальные комментарии влияют на дальнейшие решения. Пауза останавливает следующие вызовы и доставки; настройки применяются к следующим эпизодам.';}
+ if(value.channel_life){$('mode').textContent=value.paused?'Telegram · жизнь на паузе':'Telegram · собственная жизнь';$('scope').textContent=name+' сам живёт и выбирает публикации. Реальные комментарии влияют на дальнейшие решения. Пауза останавливает следующие вызовы и доставки; настройки применяются к следующим эпизодам.';}
  $('clock').textContent=clock(value.minute);
  const open=value.threads.filter(t=>t.status!=='closed');$('thread-count').textContent=open.length;
  $('thread-cap').textContent=`Предел новых историй: ${value.settings.max_threads}`;
@@ -51,7 +56,7 @@ function render(value){
  $('pulse-status').textContent=value.busy?'Идёт этап':value.paused?'На паузе':'Готов к просмотру';$('pulse-status').classList.toggle('running',value.busy);
  $('reaction').classList.toggle('hidden',!chosen?.reaction);$('reaction').textContent=chosen?.reaction||'';
  const brief=current?.value.brief;
- $('brief').textContent=brief?(brief.new_event_allowed?'Доступны новое событие и продолжение прежнего. ':'Сейчас продолжаются известные дела и их последствия. ')+`Шанс нового события за выбранный промежуток: ${Math.round(brief.new_event_probability*100)}%. Свободных историй: ${brief.open_slots}. Гарик может сам начать новое.`:'Мир учитывает прошлые поступки, открытые истории и недавние повторы.';
+ $('brief').textContent=brief?(brief.new_event_allowed?'Доступны новое событие и продолжение прежнего. ':'Сейчас продолжаются известные дела и их последствия. ')+`Шанс нового события за выбранный промежуток: ${Math.round(brief.new_event_probability*100)}%. Свободных историй: ${brief.open_slots}. Персонаж может сам начать новое.`:'Мир учитывает прошлые поступки, открытые истории и недавние повторы.';
  if(current?.value.rejected){const rejected=current.value.rejected,answer=rejected.answer;$('brief').append(el('p','Предложение не применено: '+(typeof answer==='string'?answer:answer.observation||answer.action||'Не удалось принять структуру ответа.')));}
  const threads=$('threads');threads.replaceChildren();
  if(!value.threads.length)threads.append(el('p','Истории появятся из происходящего. Готового списка приключений нет.','empty'));
@@ -59,13 +64,13 @@ function render(value){
  const timeline=$('timeline');timeline.replaceChildren();
  if(!value.history.length)timeline.append(el('p','Пока нет событий. Это пустая лаборатория, не пример ответа модели.','empty'));
  for(const event of [...value.history].reverse()){const card=el('article',undefined,'timeline-item'),row=event.value;const text=event.stage==='choice'?row.action:['speech','post','impulse'].includes(event.stage)?row.text:event.stage==='share'?(row.decision==='keep'?'Оставлю при себе':(row.decision==='reply'?'Хочу ответить: ':'Хочу рассказать: ')+(row.text??row.focus)):event.stage==='horizon'?row.hooks.map(h=>h.npc_want+' / '+h.friction).join('\n'):event.stage==='audience'?(row.comments.map(c=>c.speaker+': '+c.text).join('\n')||'Без комментариев.'):event.stage==='experience'?(row.note||'Без новой личной записи.'):event.stage==='research'?row.facts.map(f=>f.claim+' ('+f.url+')').join('\n')||'Надёжных сведений не найдено.':row.observation;card.append(el('div',`${clock(event.minute)} · ${phaseNames[event.stage]}${event.stage==='speech'?' · черновик':''}${event.execution?' · '+executionNames[event.execution]:''}`,'meta'),el('p',text));if(event.recovery){const names={resume:'Выбрал продолжить новым поступком',defer:'Отложил',drop:'Решил бросить'};card.append(el('small',names[event.recovery.decision]));if(event.recovery.note)card.append(el('p',event.recovery.note));}if(row.world_note){const details=el('details');details.append(el('summary','Заметка мира · ненаблюдаемая деталь вымысла'),el('p',row.world_note));card.append(details);}timeline.append(card);}
- const feed=$('post-feed');feed.replaceChildren();$('posts-mode').textContent=value.autonomous_posts?(value.direct_channel?'Гарик сам пишет в канал. Текст сохраняется без переписывания, внешней отправки нет.':'Гарик сам выбирает повод. Сохранено локально, внешней отправки нет.'):'Самостоятельный выбор постов сейчас выключен. Прежние черновики сохранены.';
- if(value.channel_life){$('posts-title').textContent='Записи Гарика';$('posts-mode').textContent='Дословные записи Гарика. Отправка проходит через очередь Telegram; опубликованным считается только текст с квитанцией доставки.';}
+ const feed=$('post-feed');feed.replaceChildren();$('posts-mode').textContent=value.autonomous_posts?(value.direct_channel?name+' сам пишет в канал. Текст сохраняется без переписывания, внешней отправки нет.':name+' сам выбирает повод. Сохранено локально, внешней отправки нет.'):'Самостоятельный выбор постов сейчас выключен. Прежние черновики сохранены.';
+ if(value.channel_life){$('posts-title').textContent='Записи · '+name;$('posts-mode').textContent='Дословные записи · '+name+'. Отправка проходит через очередь Telegram; опубликованным считается только текст с квитанцией доставки.';}
  for(const p of value.posts||[]){if(p.value.reply_to)continue;const card=el('article',undefined,'saved-note');card.append(el('small',clock(p.minute)+(p.value.delivery?.status==='sent'?' · опубликовано в Telegram':value.channel_life?' · подготовлено, доставка не подтверждена':' · самостоятельный черновик')),el('p',p.value.text));
  for(const batch of [...(value.audience||[])].reverse().filter(a=>a.value.post_id===p.id)){
   const discussion=el('div',undefined,'discussion');discussion.append(el('small',clock(batch.minute)+(batch.value.simulated===false?' · Реальные комментарии Telegram':' · Вымышленные комментарии · локальный опыт')));
   for(const c of batch.value.comments)discussion.append(el('p',c.speaker+': '+c.text));
-  for(const reply of [...(value.posts||[])].reverse().filter(r=>r.value.audience_id===batch.id))discussion.append(el('p','Гарик: '+reply.value.text));
+  for(const reply of [...(value.posts||[])].reverse().filter(r=>r.value.audience_id===batch.id))discussion.append(el('p',name+': '+reply.value.text));
   card.append(discussion);
  }feed.append(card);}
  for(const p of value.posts||[]){if(p.value.reply_to&&!(value.posts||[]).some(root=>root.id===p.value.reply_to)){const card=el('article',undefined,'saved-note');card.append(el('small',clock(p.minute)+' · ответ к прежнему черновику'),el('p',p.value.text));feed.append(card);}}
@@ -97,7 +102,7 @@ async function post(path,value){
 }
 for(const key of fields)$(key).addEventListener('input',()=>{dirty=true;labelSliders();renderControls();});
 $('settings-form').addEventListener('submit',async event=>{event.preventDefault();const settings=Object.fromEntries(fields.map(key=>[key,Number($(key).value)]));if(await post('/api/settings',{settings,revision:settingsRevision})){dirty=false;renderControls();}});
-$('prepare').addEventListener('click',()=>post('/api/prepare',{actor_id:'garik',minutes:Number($('minutes').value)}));
+$('prepare').addEventListener('click',()=>post('/api/prepare',{actor_id:state?.actor_id||'garik',minutes:Number($('minutes').value)}));
 $('step').addEventListener('click',()=>{const cycle=active();if(cycle)post('/api/step',{cycle_id:cycle.id,phase:cycle.phase,revision:cycle.revision});});
 $('pause').addEventListener('click',()=>post('/api/action',{paused:!state.paused}));
 $('abandon').addEventListener('click',()=>{const cycle=active();if(cycle)post('/api/abandon',{cycle_id:cycle.id});});

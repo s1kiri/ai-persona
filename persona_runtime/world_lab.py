@@ -177,6 +177,7 @@ def main(argv=None):
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--live', action='store_true', help='explicitly enable manual model-review steps')
+    parser.add_argument('--allow-direct', action='store_true', help='allow direct Codex connection when no proxy is configured; never fall back after proxy failure')
     parser.add_argument('--persona', type=Path)
     parser.add_argument('--profile', type=Path, help='character manifest, including canon, environment and private seed memory')
     parser.add_argument('--speech-contract', type=Path)
@@ -222,6 +223,8 @@ def main(argv=None):
                 command += ['--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
         if profile:
             command += ['--profile', str(args.profile.resolve())]
+        if args.allow_direct:
+            command += ['--allow-direct']
         if args.autonomous_posts:
             command += ['--autonomous-posts']
         if args.direct_channel:
@@ -278,7 +281,7 @@ def main(argv=None):
         if args.live:
             from .proxy import status, SharedTransport
             from .world_backend import WorldBackend
-            if not status()['enabled']:
+            if not status()['enabled'] and not args.allow_direct:
                 raise ValueError('configured proxy required for model review')
             persona, contract = ((profile.persona, profile.speech_contract) if profile else
                                  (args.persona.read_text(), args.speech_contract.read_text()))

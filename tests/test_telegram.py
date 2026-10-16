@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from persona_runtime.telegram import BotAPI, TelegramConnection, TelegramError
 
@@ -291,6 +291,16 @@ class HTTPTests(unittest.TestCase):
         self.assertIn(b'PNGbytes', body)
         self.assertIn(b'{"message_id": 10}', body)
         self.assertNotIn(TOKEN.encode(), body)
+
+    def test_network_error_carries_its_own_redacted_transport_snapshot(self):
+        api=BotAPI(TOKEN,Opener(error=URLError(OSError(60,TOKEN))))
+        with self.assertRaises(TelegramError) as caught:api.call('getChat',{'chat_id':-1})
+        diagnostic=caught.exception.transport
+        api.last_failure={'method':'getUpdates'}
+        self.assertEqual(diagnostic['method'],'getChat')
+        self.assertEqual(diagnostic['reason_type'],type(OSError(60,TOKEN)).__name__)
+        self.assertEqual(diagnostic['errno'],60)
+        self.assertNotIn(TOKEN,json.dumps(diagnostic))
 
 
 if __name__ == '__main__':

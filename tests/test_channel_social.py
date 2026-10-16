@@ -308,6 +308,43 @@ class SocialTests(unittest.TestCase):
         self.assertFalse(self.connection.db.execute('SELECT 1 FROM reactions').fetchone())
         self.assertFalse([c for c in self.connection.api.calls if c[0]=='setMessageReaction'])
 
+    def test_optional_capability_network_failure_allows_reply_without_reactions(self):
+        from persona_runtime.telegram import TelegramError
+        ids=self.prepare_comments(comment())
+        with self.store.lock,self.store.db:self.store.put('reaction_capabilities',None)
+        original=self.connection.api.call
+        checks=[]
+        def failed(method,*args,**kwargs):
+            if method=='getChat':
+                checks.append(method)
+                raise TelegramError('Synthetic network failure',transport={
+                    'method':'getChat','type':'URLError','reason_type':'TimeoutError'})
+            return original(method,*args,**kwargs)
+        self.connection.api.call=failed
+        self.backend.answers=[rich(decision='reply',text='Still answering',source_ids=ids,read_ids=ids)]
+        self.life.tick();self.life.tick()
+        payload=self.backend.inputs[-1][2]
+        self.assertEqual(payload['attention']['allowed_reactions'],[])
+        self.assertEqual(self.store.get('life_status')['status'],'running')
+        self.assertEqual(self.store.get('last_focus_failure')['transport']['reason_type'],'TimeoutError')
+        self.life.tick()
+        self.assertIn('Still answering',[r['text'] for r in self.connection.state()['outbox']])
+        self.assertEqual(checks,['getChat'])
+        self.assertFalse([c for c in self.connection.api.calls if c[0]=='setMessageReaction'])
+
+    def test_optional_capability_permission_failure_still_blocks(self):
+        from persona_runtime.telegram import TelegramError
+        self.prepare_comments(comment())
+        with self.store.lock,self.store.db:self.store.put('reaction_capabilities',None)
+        def failed(*args,**kwargs):raise TelegramError('Synthetic permission failure',403)
+        self.connection.api.call=failed
+        calls=len(self.backend.inputs)
+        self.life.tick()
+        self.assertEqual(self.store.get('life_status')['status'],'error')
+        self.assertEqual(self.store.get('life_error_detail')['phase'],'reaction_capabilities')
+        self.assertEqual(len(self.backend.inputs),calls)
+        self.assertEqual(self.store.get('last_focus_failure')['telegram_code'],403)
+
     def test_failed_dispatched_reaction_stays_uncertain_and_is_not_requeued(self):
         ids=self.prepare_comments(comment())
         self.backend.answers=[rich(reaction={'audience_id':ids[0],'emoji':'🤣'},read_ids=ids)]

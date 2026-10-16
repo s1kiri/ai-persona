@@ -462,7 +462,19 @@ class ChannelLife:
                     self.store.put('channel_attention',{'focus_ids':[],'fulfill_intent':None,'allowed_reactions':[]})
             return []
         if not cache or self.now()-cache['checked']>300:
-            cache={'checked':self.now(),'emojis':self.connection.reaction_options()}
+            self.current_phase='reaction_capabilities'
+            try:
+                cache={'checked':self.now(),'emojis':self.connection.reaction_options()}
+            except TelegramError as error:
+                # Optional read-only discovery must not stop life on a network outage.
+                # Authentication/rights/API errors and actual reaction sends still block.
+                transport=getattr(error,'transport',None)
+                with self.store.lock,self.store.db:
+                    self.store.put('last_focus_failure',{'at':self.now(),'type':type(error).__name__,
+                        'telegram_code':error.code,'method':'getChat','transport':transport})
+                if error.code is not None or not transport or transport.get('method')!='getChat':
+                    raise
+                cache={'checked':self.now(),'emojis':[],'degraded':True}
         with self.store.lock,self.store.db:
             self.store.put('reaction_capabilities',cache)
             self.store.put('channel_attention',{'purpose':'comments','focus_ids':ids,'fulfill_intent':fulfill,'allowed_reactions':cache['emojis']})

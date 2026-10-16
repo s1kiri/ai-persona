@@ -18,7 +18,7 @@ function render(value){
   const li=document.createElement('li');line(li,event.text);line(li,eventStatuses[event.status]||event.status,'muted');
   if(event.result?.summary)line(li,event.result.summary);
   if(event.result?.reason)line(li,event.result.reason,'muted');
-  for(const observation of event.result?.observations||[]){const name=value.actors.find(a=>a.id===observation.actor_id)?.name||observation.actor_id;line(li,`${name}: ${observation.via==='unaware'?'пока не узнал':observation.via==='news'?'узнал из сообщения':'наблюдает'}${observation.observation?' · '+observation.observation:''}`,'muted');}
+  for(const observation of event.result?.observations||[]){const name=value.actors.find(a=>a.id===observation.actor_id)?.name||observation.actor_id;line(li,`${name}: ${observation.via==='unaware'?'пока не узнал':observation.via==='news'?'узнал из сообщения':observation.via==='felt'?'ощущает':'наблюдает'}${observation.observation?' · '+observation.observation:''}`,'muted');}
   if(event.error)line(li,event.error);
   if(event.status==='queued'){const button=document.createElement('button');button.textContent='Отменить';button.disabled=sending;button.addEventListener('click',()=>cancelWorldEvent(event.id));li.appendChild(button);}
   $('world-events').appendChild(li);

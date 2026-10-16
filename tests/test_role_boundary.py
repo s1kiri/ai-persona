@@ -11,7 +11,8 @@ class BoundaryTests(unittest.TestCase):
         for text in ['так я и есть ИИ-персонаж. Гарик. жизнь тут вымышленная',
                      'Я — языковая модель.','Как ИИ-персонаж я не ем.',
                      'Мои ответы генерирует нейросеть.','Моя жизнь — симуляция.',
-                     'Гарик — вымышленный персонаж.',"I'm an AI character.",'I am a language model.', 'Я ChatGPT.']:
+                     'Гарик — вымышленный персонаж.',"I'm an AI character.",'I am a language model.', 'Я ChatGPT.',
+                     'Без персонажа я не отвечаю — я сюда Аркадием пришёл.']:
             with self.subTest(text=text),self.assertRaises(RoleBoundaryError):check_character_speech(text,'Гарик')
         for text in ['почитал про ИИ, любопытно.','ты опять про ИИ спрашиваешь?',
                      'я чиню электронику по ночам.','он написал: «я ИИ-персонаж». ну и что?',

@@ -68,7 +68,7 @@ class LoopbackProxyHandler(ProxyHandler):
 
 
 class BotAPI:
-    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto', 'setMessageReaction', 'deleteMessage'}
+    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'getFile', 'sendMessage', 'sendPhoto', 'setMessageReaction', 'deleteMessage'}
 
     def __init__(self, token, opener=None, *, transport_factory=None):
         self._token = checked_token(token)
@@ -148,6 +148,23 @@ class BotAPI:
             if fragment in description:self.last_failure['reason']=reason;break
         raise TelegramError(messages.get(status, 'Telegram вернул ошибку. Запрос автоматически не повторяется.'), status,transport=dict(self.last_failure))
 
+    def download_photo(self, file_id):
+        file=self.call('getFile',{'file_id':file_id});path=file.get('file_path','')
+        if (not isinstance(path,str) or not re.fullmatch(r'[A-Za-z0-9_./-]+',path)
+                or path.startswith('/') or '..' in path.split('/') or file.get('file_size',0)>8_000_000):
+            raise TelegramError('Некорректный файл фотографии Telegram.')
+        try:
+            with self.open(Request('https://api.telegram.org/file/bot'+self._token+'/'+path)) as response:
+                data=response.read(8_000_001)
+            if not 0<len(data)<=8_000_000:raise ValueError('size')
+            if data.startswith(b'\xff\xd8\xff'):suffix='.jpg'
+            elif data.startswith(b'\x89PNG\r\n\x1a\n'):suffix='.png'
+            elif data[:4]==b'RIFF' and data[8:12]==b'WEBP':suffix='.webp'
+            else:raise ValueError('image format')
+            return data,suffix
+        except Exception:
+            raise TelegramError('Не удалось прочитать фотографию Telegram; токен скрыт.') from None
+
 
 def chat_summary(chat):
     return {k: chat[k] for k in ('id', 'type', 'title', 'username') if k in chat}
@@ -185,6 +202,8 @@ class TelegramConnection:
             CREATE TABLE IF NOT EXISTS messages(chat_id INTEGER NOT NULL,id INTEGER NOT NULL,
                 root_id INTEGER,text TEXT NOT NULL,speaker TEXT NOT NULL,kind TEXT NOT NULL,
                 user_id INTEGER,received REAL NOT NULL,PRIMARY KEY(chat_id,id));
+            CREATE TABLE IF NOT EXISTS message_photos(chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+                value TEXT NOT NULL,PRIMARY KEY(chat_id,message_id));
             CREATE TABLE IF NOT EXISTS forwards(channel_id INTEGER NOT NULL,post_id INTEGER NOT NULL,
                 group_id INTEGER NOT NULL,root_id INTEGER NOT NULL,PRIMARY KEY(channel_id,post_id));
             CREATE TABLE IF NOT EXISTS outbox(key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,
@@ -352,6 +371,35 @@ class TelegramConnection:
         self.db.execute('INSERT OR IGNORE INTO messages VALUES(?,?,?,?,?,?,?,?)',
                         (chat['id'], message['message_id'], root_id, message.get('text') or message.get('caption') or '',
                          speaker, kind, None if sender_chat else sender.get('id'), time.time()))
+        if kind=='comment' and isinstance(message.get('photo'),list):
+            photos=[p for p in message['photo'] if isinstance(p,dict) and isinstance(p.get('file_id'),str)
+                    and type(p.get('file_size',0)) is int and 0<=p.get('file_size',0)<=8_000_000]
+            if photos:
+                selected=max(photos,key=lambda p:p.get('width',0)*p.get('height',0))
+                self.db.execute('INSERT OR IGNORE INTO message_photos VALUES(?,?,?)',
+                    (chat['id'],message['message_id'],json.dumps({'status':'pending','file_id':selected['file_id']})))
+
+    def comment_photo(self, chat_id, message_id):
+        """Read-only download, stored once; failure never blocks a character's life."""
+        with self.lock:
+            row=self.db.execute('SELECT value FROM message_photos WHERE chat_id=? AND message_id=?',(chat_id,message_id)).fetchone()
+            value=json.loads(row[0]) if row else None
+        if not value:return None
+        if value['status']=='pending':
+            try:
+                data,suffix=self.api.download_photo(value['file_id'])
+                digest=hashlib.sha256(data).hexdigest();folder=self.directory/'received-photos';folder.mkdir(mode=0o700,exist_ok=True)
+                path=folder/(digest+suffix)
+                if not path.exists():
+                    fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+                    with os.fdopen(fd,'wb') as stream:stream.write(data)
+                value={'status':'available','image_path':str(path.resolve()),'sha256':digest}
+            except Exception as error:
+                value={'status':'unavailable','error_type':type(error).__name__}
+            with self.lock,self.db:
+                self.db.execute('UPDATE message_photos SET value=? WHERE chat_id=? AND message_id=?',
+                    (json.dumps(value),chat_id,message_id))
+        return value
 
     def bind(self, channel):
         if isinstance(channel, str) and re.fullmatch(r'-[0-9]{1,20}', channel):
@@ -519,9 +567,11 @@ class TelegramConnection:
         try:
             result=self.api.call('setMessageReaction',{'chat_id':group,'message_id':message_id,'reaction':[{'type':'emoji','emoji':emoji}]})
             if result is not True:raise TelegramError('Telegram не подтвердил реакцию.')
-        except Exception:
+        except Exception as error:
             with self.lock,self.db:self.db.execute("UPDATE reactions SET status='unknown',error='receipt missing; no replay' WHERE key=?",(key,))
-            raise TelegramError('Реакция не подтверждена; автоматического повтора нет.') from None
+            raise TelegramError('Реакция не подтверждена; автоматического повтора нет.',
+                error.code if isinstance(error,TelegramError) else None,
+                transport=getattr(error,'transport',None)) from None
         with self.lock,self.db:
             self.db.execute("UPDATE reactions SET status='sent' WHERE key=?",(key,))
             return dict(self.db.execute('SELECT * FROM reactions WHERE key=?',(key,)).fetchone())

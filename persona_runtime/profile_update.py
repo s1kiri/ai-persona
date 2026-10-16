@@ -70,6 +70,7 @@ def revise_profile(store, previous, updated, reason, *, shared_owner=False):
                  'previous_contract': previous.speech_contract, 'contract': updated.speech_contract,
                  'previous_canon': previous.canon, 'canon': updated.canon,
                  'previous_runtime': previous.runtime, 'runtime': updated.runtime,
+                 'previous_photo_style':previous.photo_style,'photo_style':updated.photo_style,
                  'previous_memories': list(previous.memories), 'memories': list(updated.memories),
                  'pending_cycle_ids': [c['id'] for c in pending],
                  'concerns_policy': 'preserve all lived concerns; do not re-seed'}

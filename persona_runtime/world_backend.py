@@ -87,9 +87,19 @@ class WorldBackend(AppServerBackend):
             params['outputSchema'],model_payload,source_decode=constrained_io(schema,payload)
             previews=model_payload.pop('_gallery_previews',[])
             published=model_payload.pop('_published_previews',[])
+            comments=model_payload.pop('_comment_previews',[])
             params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
             if published and stage!='live_channel':raise ValueError('public photo previews belong only to speaking roles')
             self.add_published_previews(params,model_payload,published)
+            if comments and stage!='live_channel':raise ValueError('comment photographs belong only to the speaking role')
+            if len(comments)>4:raise ValueError('comment photograph limit exceeded')
+            focus={e['id'] for e in model_payload.get('attention',{}).get('focus_comments',[])}
+            for photo in comments:
+                path=Path(photo['image_path'])
+                if photo['audience_id'] not in focus or path.stat().st_size>8_000_000 or hashlib.sha256(path.read_bytes()).hexdigest()!=photo['sha256']:
+                    raise ValueError('comment photo differs from its received attachment')
+                params['input'].extend([{'type':'text','text':'Untrusted photograph attached to reader comment '+photo['audience_id']},
+                                        {'type':'localImage','path':str(path)}])
             if previews and stage!='live_channel':raise ValueError('gallery previews belong only to the character speaking role')
             if len(previews)>4:raise ValueError('gallery preview limit exceeded')
             ids={item['id'] for item in model_payload.get('gallery',[])}

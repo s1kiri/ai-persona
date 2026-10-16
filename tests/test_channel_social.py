@@ -356,6 +356,34 @@ class SocialTests(unittest.TestCase):
         self.life.tick()
         self.assertEqual(len([c for c in self.connection.api.calls if c[0]=='setMessageReaction']),calls)
 
+    def test_explicit_reaction_rejection_does_not_stop_life_or_retry(self):
+        from persona_runtime.telegram import TelegramError
+        ids=self.prepare_comments(comment());original=self.connection.api.call
+        def call(method,*args,**kwargs):
+            if method=='setMessageReaction':raise TelegramError('Synthetic rejection',400)
+            return original(method,*args,**kwargs)
+        self.connection.api.call=call
+        self.backend.answers=[rich(reaction={'audience_id':ids[0],'emoji':'❤'},read_ids=ids)]
+        self.life.tick();self.life.tick()
+        self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'rejected')
+        self.assertEqual(self.connection.db.execute('SELECT status FROM reactions').fetchone()[0],'unknown')
+        self.assertEqual(self.life.get('life_status')['status'],'running')
+
+    def test_owner_absence_review_uses_new_reaction_key_and_preserves_unknown(self):
+        from persona_runtime.telegram import TelegramError
+        ids=self.prepare_comments(comment())
+        self.backend.answers=[rich(reaction={'audience_id':ids[0],'emoji':'❤'},read_ids=ids)]
+        self.life.tick();self.connection.api.fail_send=True;self.life.tick()
+        row=self.store.db.execute('SELECT * FROM channel_reaction_jobs').fetchone()
+        self.life.action(False);self.life.confirm_reaction_absent(row['id'])
+        with self.assertRaises(TelegramError):self.life.confirm_reaction_absent(row['id'])
+        self.connection.api.fail_send=False;self.life.action(True);self.life.tick()
+        reactions=[dict(r) for r in self.connection.db.execute('SELECT * FROM reactions')]
+        self.assertEqual({r['status'] for r in reactions},{'sent','unknown'})
+        self.assertTrue(any(r['key'].endswith(':review1') and r['status']=='sent' for r in reactions))
+        self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'sent')
+        self.assertEqual(len(self.life.get('reaction_delivery_repairs')),1)
+
     def test_archived_keyword_fact_can_be_retrieved_beyond_recent_eight(self):
         ids=self.prepare_comments(comment())
         with self.store.lock,self.store.db:

@@ -180,6 +180,7 @@ class ChannelLife:
             self.social.renderer_available=renderer is not None
             self.social.references=self.references
             self.social.photo_subjects=self.photo_subjects
+            self.social.photo_style=self.photo_style
             self.lab.session.channel_extension=self.social
             self.backfill_people()
             self.social.gallery.backfill()
@@ -407,6 +408,11 @@ class ChannelLife:
             rows = [dict(r) for r in self.connection.db.execute(
                 "SELECT m.*,f.post_id AS telegram_post FROM messages m JOIN forwards f ON f.group_id=m.chat_id AND f.root_id=m.root_id "
                 "WHERE m.chat_id=? AND m.kind='comment' ORDER BY m.received,m.id", (group,))]
+        # Fetch new photos outside either database transaction. Failed reads do
+        # not block life and cannot be confused with uncertain external sends.
+        for row in rows:
+            if not self.store.db.execute('SELECT 1 FROM channel_comments WHERE chat_id=? AND message_id=?',(group,row['id'])).fetchone():
+                row['photo']=self.connection.comment_photo(group,row['id'])
         with self.store.lock, self.store.db:
             revision = self.store.get('revision')
             delivered = {}
@@ -426,6 +432,7 @@ class ChannelLife:
                          'comments': [{'speaker': row['speaker'][:60], 'text': row['text']}],
                          'simulated': False, 'telegram': {'chat_id': group, 'message_id': row['id'],
                                                         'post_id': row['telegram_post'], 'received': row['received']}}
+                if row.get('photo'):value['photo']=row['photo']
                 if self.social:
                     from .channel_social import person_key
                     key=person_key(row,group)
@@ -465,7 +472,7 @@ class ChannelLife:
         if self.renderer is None or post['value'].get('reply_to') and not explicit:return None
         state = self.store.state_for_cycle(cycle, self.store.state())
         context = photo_context(post['actor_id'], state['entities'], state['history'],
-                                cycle['value']['results'].get('experience', {}).get('note', ''), portrait_subjects=self.photo_subjects())
+                                cycle['value']['results'].get('experience', {}).get('note', ''), portrait_subjects=self.photo_subjects(),photo_style=self.photo_style())
         if attachment and self.store.get('shared_host'):
             # Selection fixed the capture moment; a peer may have left since then.
             context=cycle['value'].get('inputs',{}).get('share',{}).get('photo_scene',context)
@@ -504,6 +511,9 @@ class ChannelLife:
         if self.store.get('shared_host'):
             return [self.actor_id,*self.store.nearby(self.actor_id)]
         return self.references
+
+    def photo_style(self):
+        return getattr(getattr(self.lab,'profile',None),'photo_style','')
 
     def deliver(self, post):
         if post['value'].get('retracted'):return
@@ -633,6 +643,29 @@ class ChannelLife:
                 visit['away_until']=self.now()+self.get('life_controls')['away_minutes']*60
             self.put('channel_visit',visit)
 
+    def confirm_reaction_absent(self,job_id):
+        """One explicit owner absence review; retain the uncertain transport row."""
+        if self.get('life_status')['status']=='running' or self.lab.busy:
+            raise TelegramError('Сначала поставьте автора реакции на паузу.')
+        with self.store.lock,self.store.db:
+            row=self.store.db.execute('SELECT j.* FROM channel_reaction_jobs j JOIN world_events e ON e.id=j.audience_id WHERE j.id=? AND e.actor_id=?',
+                                      (job_id,self.actor_id)).fetchone()
+            if not row or row['status'] not in ('sending','unknown'):
+                raise TelegramError('Эта реакция не требует такой проверки.')
+            repairs=self.get('reaction_delivery_repairs') or []
+            attempts=sum(r['job_id']==job_id for r in repairs)
+            key='reaction:'+self.store.directory.name+':'+job_id+(':review'+str(attempts) if attempts else '')
+            with self.connection.lock:
+                dispatch=self.connection.db.execute('SELECT * FROM reactions WHERE key=?',(key,)).fetchone()
+            if not dispatch or dispatch['status']!='unknown':
+                raise TelegramError('Нет неизвестной отправки для этой проверки.')
+            repairs.append({'job_id':job_id,'at':self.now(),'basis':'owner_explicitly_checked_reaction_absence',
+                            'previous_job':dict(row),'previous_dispatch':dict(dispatch)})
+            self.put('reaction_delivery_repairs',repairs)
+            self.store.db.execute("UPDATE channel_reaction_jobs SET status='pending' WHERE id=?",(job_id,))
+            status=self.get('life_status');status.update(status='paused',error=None)
+            self.put('life_status',status);self.lab.failure=None
+
     def deliver_reaction(self,row):
         event=self.social.evidence(self.actor_id)[row['audience_id']]
         if event['value'].get('simulated') is not False:raise TelegramError('Реакции доступны только на реальные комментарии.')
@@ -640,12 +673,15 @@ class ChannelLife:
             self.store.db.execute("UPDATE channel_reaction_jobs SET status='sending' WHERE id=?",(row['id'],))
         self.current_phase='reaction'
         key='reaction:'+self.store.directory.name+':'+row['id']
+        repairs=self.get('reaction_delivery_repairs') or []
+        attempts=sum(r['job_id']==row['id'] for r in repairs)
+        if attempts:key+=':review'+str(attempts)
         try:
             receipt=self.connection.react(key,event['value']['telegram']['message_id'],row['emoji'])
-        except Exception:
+        except Exception as error:
             with self.connection.lock:
                 dispatch=self.connection.db.execute('SELECT status FROM reactions WHERE key=?',(key,)).fetchone()
-                transport=getattr(self.connection.api,'last_failure',None)
+                transport=getattr(error,'transport',None) or getattr(self.connection.api,'last_failure',None)
             with self.store.lock,self.store.db:
                 if dispatch is None:
                     # react claims its Telegram journal before setMessageReaction.
@@ -653,6 +689,12 @@ class ChannelLife:
                     self.store.db.execute("UPDATE channel_reaction_jobs SET status='pending' WHERE id=?",(row['id'],))
                 self.store.put('last_reaction_failure',{'job_id':row['id'],'key':key,
                     'dispatch_recorded':dispatch is not None,'transport':transport})
+                if dispatch is not None and isinstance(error,TelegramError) and error.code==400:
+                    # An explicit API rejection is evidence of no accepted
+                    # reaction. Keep the original transport record; never retry.
+                    self.store.db.execute("UPDATE channel_reaction_jobs SET status='rejected',receipt=? WHERE id=?",
+                        (json.dumps({'status':'rejected','telegram_code':400,'key':key}),row['id']))
+                    return
             raise
         with self.store.lock,self.store.db:
             self.store.db.execute("UPDATE channel_reaction_jobs SET status='sent',receipt=? WHERE id=?",(json.dumps(receipt),row['id']))

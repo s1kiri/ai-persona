@@ -257,6 +257,8 @@ def panel_handler(panel):
                                                   lives=panel.lives.values(),scheduler=panel.scheduler)
                 elif self.path=='/api/peer-confirm-absent' and set(value)=={'actor_id','job_id','confirmation'} and value['confirmation']=='owner_checked_absent' and panel.scheduler and value['actor_id'] in panel.lives:
                     panel.scheduler.confirm_peer_absent(value['actor_id'],value['job_id'])
+                elif self.path=='/api/reaction-confirm-absent' and set(value)=={'actor_id','job_id','confirmation'} and value['confirmation']=='owner_checked_absent' and value['actor_id'] in panel.lives:
+                    panel.lives[value['actor_id']].confirm_reaction_absent(value['job_id'])
                 else:raise ValueError('Персонажи запускаются только в режиме --live; проверьте оба подключения.')
                 return self.reply(200,{'ok':True})
             except (ValueError,WorldConflict,TelegramError,KeyError,TypeError) as error:

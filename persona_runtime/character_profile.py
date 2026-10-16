@@ -21,13 +21,14 @@ class CharacterProfile:
     concerns: tuple = ()
     references: dict = field(default_factory=dict)
     runtime: dict = field(default_factory=dict)
+    photo_style: str = ''
 
     @classmethod
     def load(cls, manifest):
         path = Path(manifest).resolve()
         value = json.loads(path.read_text(encoding='utf-8'))
         required = {'version', 'id', 'name', 'persona', 'speech_contract', 'canon', 'environment'}
-        optional = {'memory', 'visual_references', 'persona_sections', 'runtime'}
+        optional = {'memory', 'visual_references', 'persona_sections', 'runtime', 'photo_style'}
         if (not isinstance(value, dict) or not required <= set(value) or set(value) - required - optional or
                 type(value['version']) is not int or value['version'] != 1):
             raise ValueError('character manifest needs the exact version 1 fields')
@@ -66,6 +67,7 @@ class CharacterProfile:
                               ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')))):
             raise ValueError('runtime needs a model and a supported reasoning_effort')
         contract = read('speech_contract', 16_000)
+        photo_style = read('photo_style', 4_000) if 'photo_style' in value else ''
         canon = read('canon', 16_000)
         environment = json.loads(read('environment', 256_000))
         if not isinstance(environment, list) or len(environment) > 64:
@@ -129,9 +131,11 @@ class CharacterProfile:
             normalized['visual_references'] = reference_digests
         if runtime:
             normalized['runtime'] = runtime
+        if photo_style:
+            normalized['photo_style'] = photo_style
         digest = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         return cls(value['id'], value['name'], persona, contract, canon, tuple(environment), digest,
-                   tuple(memories), tuple(concerns), references, runtime)
+                   tuple(memories), tuple(concerns), references, runtime, photo_style)
 
     def install(self, store):
         """Host operation on a paused world; atomic, idempotent, never resets lived state."""

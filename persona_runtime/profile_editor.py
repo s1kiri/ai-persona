@@ -16,12 +16,16 @@ from .world import WorldConflict
 def editor_state(profile, *, paused, busy=False):
     return None if profile is None else {'persona': profile.persona, 'digest': profile.digest,
         'model': profile.runtime.get('model'), 'reasoning_effort': profile.runtime.get('reasoning_effort'),
+        'photo_style': profile.photo_style,
         'can_save': paused and not busy,
         'hint': 'Сначала пауза и завершение текущего вызова. В общем мире — пауза обоих персонажей. '
                 'Изменения сохраняются локально с резервной копией; жизнь остаётся на паузе.'}
 
 
-def private_package(directory, previous, persona, model, effort):
+def private_package(directory, previous, persona, model, effort, *, photo_style=None):
+    photo_style = previous.photo_style if photo_style is None else photo_style
+    if not isinstance(photo_style,str) or len(photo_style.encode())>4_000:
+        raise ValueError('invalid photo style')
     if (not isinstance(persona,str) or not persona.strip() or len(persona.encode())>100_000 or
             not isinstance(model,str) or not re.fullmatch(r'[A-Za-z0-9._:-]{1,100}',model) or
             effort not in ('none','minimal','low','medium','high','xhigh','max')):
@@ -33,6 +37,8 @@ def private_package(directory, previous, persona, model, effort):
     files={'persona.md':persona,'speech-contract.md':previous.speech_contract,'canon.md':previous.canon,
         'environment.json':json.dumps(previous.environment,ensure_ascii=False),
         'memory.json':json.dumps({'version':1,'records':previous.memories,'concerns':previous.concerns},ensure_ascii=False)}
+    if photo_style.strip():
+        manifest['photo_style']='photo-style.md';files['photo-style.md']=photo_style
     if previous.references:
         refs={}
         for key,source in previous.references.items():
@@ -45,7 +51,8 @@ def private_package(directory, previous, persona, model, effort):
 
 
 def edit_profile(store, previous, value, connections, *, lives=(), scheduler=None):
-    if not isinstance(value,dict) or set(value)!={'digest','persona','model','reasoning_effort'}:
+    required={'digest','persona','model','reasoning_effort'}
+    if not isinstance(value,dict) or not required<=set(value) or set(value)-required-{'photo_style'}:
         raise ValueError('exact author fields required')
     if value['digest']!=previous.digest:
         raise WorldConflict('Авторская версия изменилась в другой вкладке. Сначала обновите редактор.')
@@ -72,7 +79,7 @@ def edit_profile(store, previous, value, connections, *, lives=(), scheduler=Non
                 if store.db.execute("SELECT 1 FROM channel_jobs WHERE status IN ('sending','unknown')").fetchone():
                     raise WorldConflict('Сначала разберите неизвестную доставку.')
         folder=store.directory/'profiles'/previous.actor_id/uuid.uuid4().hex
-        updated=private_package(folder,previous,value['persona'],value['model'],value['reasoning_effort'])
+        updated=private_package(folder,previous,value['persona'],value['model'],value['reasoning_effort'],photo_style=value.get('photo_style'))
         backup=folder/'backup';backup.mkdir(mode=0o700)
         for name,source in [('world',store), *((f'telegram-{i}',c) for i,c in enumerate(connections))]:
             with source.lock, sqlite3.connect(backup/(name+'.sqlite3')) as target:

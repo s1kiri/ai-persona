@@ -30,12 +30,46 @@ def peer_io(payload):
     for field,options in [('source_ids',list(decode)),('read_ids',outgoing['peer_context']['unread_ids'])]:
         if options:schema['properties'][field]['items']['enum']=options
         else:schema['properties'][field]['maxItems']=0
-    schema['properties']['recipient_actor_id']['enum']=[None,*payload['peer_context']['available_actor_ids']]
-    return schema,outgoing,decode
+    peers=outgoing['peer_context'];others=peers['available_actor_ids'];branches=[]
+    def route(decision, recipients=(), *, place_ids=(None,), invitation=None, post=None, sources=None):
+        branch=copy.deepcopy(schema);props=branch['properties']
+        def select(field,values):
+            props[field]['enum']=list(values)
+            props[field]['type']='null' if values==[None] else ['string','null'] if None in values else 'string'
+        props['decision']['enum']=[decision]
+        select('recipient_actor_id',list(recipients) if recipients else [None])
+        select('place_id',list(place_ids));select('invitation_id',[invitation]);select('post_id',[post])
+        if decision=='keep':props['text']['maxLength']=0
+        else:props['text']['minLength']=1
+        if sources is not None:
+            props['source_ids']['items']['enum']=sources;props['source_ids']['minItems']=1
+        branches.append(branch)
+    route('keep')
+    if others:route('message',others)
+    nearby=[a for a in peers['nearby_actor_ids'] if a in others]
+    if nearby:route('say',nearby)
+    places=[e['id'] for e in outgoing['life']['entities'] if e['kind']=='place']
+    if others and places:route('invite',others,place_ids=places)
+    for invite in peers['invitations']:
+        if invite['status']=='pending' and invite['sender'] in others:
+            for decision in ('accept','decline'):
+                route(decision,[invite['sender']],place_ids=[None,invite['place_id']],invitation=invite['id'])
+    comments={}
+    for event in peers['events']:
+        value=event['value']
+        # An incoming comment on OUR post is answered through our own share role.
+        is_owner_post=value['kind']=='public_post' or value['kind']=='comment' and value.get('media_post_id')
+        if is_owner_post and not value['outbound'] and value['sender_actor_id'] in others and event['id'] in decode:
+            comments.setdefault((value['sender_actor_id'],value['post_id']),[]).append(event['id'])
+    for (owner,post),sources in comments.items():route('comment',[owner],post=post,sources=sources)
+    # The wire union binds action, recipient and destination in one selection.
+    # Persistence and host validators continue using the normalized PEER_CHOICE.
+    return obj({'choice':{'anyOf':branches}}),outgoing,decode
 
 PEER_INSTRUCTIONS = '''
 Ты выбираешь, хочется ли сейчас общения с другим подключённым персонажем.
-Верни решение схемы. Никаких чужих реплик и согласия за другого человека.
+Верни решение в поле choice по предложенной схеме доступных маршрутов.
+Никаких чужих реплик и согласия за другого человека.
 keep — заняться своим, text пустой. message — личное сообщение, не публикация.
 say — собственная реплика при подтверждённом присутствии обоих в одной локации.
 invite — предложение встретиться в доступном place_id; ответ ещё неизвестен.

@@ -243,8 +243,11 @@ class PeerProtocolTests(unittest.TestCase):
     def test_source_handles_are_scoped_and_do_not_rewrite_spoken_text(self):
         from persona_runtime.shared_protocol import peer_io
         from persona_runtime.channel_social import map_sources
-        payload={'available_source_ids':['actual-source'], 'peer_context':{'unread_ids':['actual-source'],'available_actor_ids':['garik']}}
+        payload={'available_source_ids':['actual-source'],'life':{'entities':[]},
+                 'peer_context':{'unread_ids':['actual-source'],'available_actor_ids':['garik'],
+                                 'nearby_actor_ids':[],'invitations':[],'events':[]}}
         schema,outgoing,decode=peer_io(payload)
+        schema=next(b for b in schema['properties']['choice']['anyOf'] if b['properties']['decision']['enum']==['message'])
         self.assertEqual(outgoing['peer_context']['unread_ids'],['s1'])
         value=peer_answer(decision='message',recipient_actor_id='garik',text='s1',source_ids=['s1'],read_ids=['s1'])
         validate_shape(value,schema)

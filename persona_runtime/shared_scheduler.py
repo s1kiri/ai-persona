@@ -115,8 +115,15 @@ class SharedScheduler:
                                           (tg.get('chat_id'),tg.get('message_id'),'comment')).fetchone()
         recipient=next((a for a,life in self.lives.items() if a!=sender and message and message[0]==life.connection.get('bot')['id']),None)
         if not recipient:return
-        self.store.relay(sender,recipient,'comment',value['text'],delivery_id='public-reply:'+post['id']+':'+recipient,
-                         details={'post_id':value['reply_to'],'media_post_id':post['id'],'receipt':value['delivery']})
+        with self.store.lock,self.store.db:
+            # This incoming peer utterance was answered with a confirmed own reply.
+            for job in self.store.db.execute("SELECT id,receipt FROM peer_jobs WHERE sender=? AND recipient=? AND status='sent' AND receipt IS NOT NULL",(recipient,sender)).fetchall():
+                receipt=json.loads(job['receipt'])
+                if (receipt.get('chat_id'),receipt.get('message_id'))!=(tg.get('chat_id'),tg.get('message_id')):continue
+                incoming=self.store.db.execute('SELECT in_event FROM peer_deliveries WHERE id=?',(job['id'],)).fetchone()
+                if incoming:self.store.db.execute('INSERT OR IGNORE INTO peer_reads VALUES(?,?)',(sender,incoming[0]))
+            self.store.relay(sender,recipient,'comment',value['text'],delivery_id='public-reply:'+post['id']+':'+recipient,
+                             details={'post_id':value['reply_to'],'media_post_id':post['id'],'receipt':value['delivery']})
 
     def peer_turn(self, actor):
         life = self.lives[actor]

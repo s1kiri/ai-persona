@@ -164,7 +164,11 @@ class WorldBackend(AppServerBackend):
             self.last_output = answer[:12000]
             if stage in ('live_channel','live_experience','social_review','peer_choice'):
                 from .channel_social import map_sources
-                decoded=map_sources(json.loads(answer),source_decode)
+                wire=json.loads(answer)
+                if stage=='peer_choice':
+                    if not isinstance(wire,dict) or set(wire)!={'choice'}:raise ValueError('peer output needs one typed route choice')
+                    wire=wire['choice']
+                decoded=map_sources(wire,source_decode)
                 self.last_output=json.dumps(decoded,ensure_ascii=False)[:12000]
                 return decoded,self.last_usage
             if web:

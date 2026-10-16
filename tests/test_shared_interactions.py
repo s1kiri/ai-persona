@@ -30,6 +30,7 @@ class SharedCommentExchangeTests(unittest.TestCase):
         replies=[e for e in f.store.peer_context('garik')['events'] if e['value']['kind']=='comment' and not e['value']['outbound']]
         self.assertEqual(len(replies),1);self.assertEqual(replies[0]['value']['text'],'Да, а ты что предлагаешь?')
         self.assertEqual(replies[0]['value']['post_id'],root)
+        self.assertEqual(f.store.peer_context('arkady')['unread_ids'],[])
         f.job('garik',fixtures.peer_answer(decision='comment',recipient_actor_id='arkady',text='Сейчас подумаю.',post_id=root,source_ids=[replies[0]['id']]))
         self.assertEqual(f.store.db.execute("SELECT COUNT(*) FROM peer_jobs WHERE status='sent'").fetchone()[0],2)
 

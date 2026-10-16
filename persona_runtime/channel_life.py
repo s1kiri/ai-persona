@@ -23,6 +23,20 @@ START_DESIRE = 'Хочу завести свой Telegram-канал и дели
 DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5, 'episode_minutes': 15, 'sharing_appetite': 50}
 
 
+def live_interpreter(root, executable, platform):
+    """Avoid the Apple CLT Python/SQLite runtime observed spinning in cache purge.
+
+    Keep the configured venv path (not its resolved base binary) so its packages
+    are available. Other hosts and already configured interpreters are unchanged.
+    """
+    if platform=='darwin' and executable.startswith('/Library/Developer/CommandLineTools/'):
+        candidate=Path(root)/'.venv/bin/python'
+        if not candidate.is_file():
+            raise ValueError('Configure .venv and start channel_life with .venv/bin/python')
+        return str(candidate)
+    return None
+
+
 def controls_checked(value):
     if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),set(DEFAULT_CONTROLS)-{'sharing_appetite'},set(DEFAULT_CONTROLS)-{'sharing_appetite','episode_minutes'},{'wake_minutes','photos'}):
         raise ValueError('invalid live life controls')
@@ -652,6 +666,9 @@ def main(argv=None):
     parser.add_argument('--background', action='store_true')
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
+    interpreter=live_interpreter(root,sys.executable,sys.platform)
+    if interpreter:
+        os.execv(interpreter,[interpreter,'-m','persona_runtime.channel_life',*(argv if argv is not None else sys.argv[1:])])
     directory = args.data_dir.expanduser().resolve()
     if root / '.local' not in directory.parents or not 0 <= args.awake_hours <= 12:
         parser.error('live world must be under .local/; awake duration is 1–12 hours, or 0 while process runs')
@@ -721,7 +738,8 @@ def main(argv=None):
         worker.start()
         threads.append(worker)
         descriptor = {'pid': os.getpid(), 'world_url': 'http://127.0.0.1:8766', 'telegram_url': 'http://127.0.0.1:8767',
-                      'data': str(directory), 'model_enabled': True}
+                      'data': str(directory), 'model_enabled': True,
+                      'python':sys.executable,'sqlite_version':sqlite3.sqlite_version}
         private_json(directory/'live.json', descriptor)
         private_json(directory/'lab.json', {'pid': os.getpid(), 'port': 8766, 'model_enabled': True})
         private_json(connection.directory/'panel.json', {'pid': os.getpid(), 'port': 8767})

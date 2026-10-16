@@ -291,6 +291,34 @@ class SocialTests(unittest.TestCase):
         self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'sent')
         self.assertEqual(len(self.store.monitor()['posts']),1)
 
+    def test_failed_reaction_capability_check_is_not_an_uncertain_send(self):
+        from persona_runtime.telegram import TelegramError
+        ids=self.prepare_comments(comment())
+        self.backend.answers=[rich(reaction={'audience_id':ids[0],'emoji':'🤣'},read_ids=ids)]
+        self.life.tick()
+        original=self.connection.api.call
+        def failed(method,*args,**kwargs):
+            if method=='getChat':raise TelegramError('Synthetic preflight failure')
+            return original(method,*args,**kwargs)
+        self.connection.api.call=failed
+        self.life.tick()
+        self.assertEqual(self.store.get('life_status')['status'],'error')
+        self.assertFalse(self.store.get('last_reaction_failure')['dispatch_recorded'])
+        self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'pending')
+        self.assertFalse(self.connection.db.execute('SELECT 1 FROM reactions').fetchone())
+        self.assertFalse([c for c in self.connection.api.calls if c[0]=='setMessageReaction'])
+
+    def test_failed_dispatched_reaction_stays_uncertain_and_is_not_requeued(self):
+        ids=self.prepare_comments(comment())
+        self.backend.answers=[rich(reaction={'audience_id':ids[0],'emoji':'🤣'},read_ids=ids)]
+        self.life.tick();self.connection.api.fail_send=True;self.life.tick()
+        self.assertTrue(self.store.get('last_reaction_failure')['dispatch_recorded'])
+        self.assertEqual(self.store.db.execute('SELECT status FROM channel_reaction_jobs').fetchone()[0],'sending')
+        self.assertEqual(self.connection.db.execute('SELECT status FROM reactions').fetchone()[0],'unknown')
+        calls=len([c for c in self.connection.api.calls if c[0]=='setMessageReaction'])
+        self.life.tick()
+        self.assertEqual(len([c for c in self.connection.api.calls if c[0]=='setMessageReaction']),calls)
+
     def test_archived_keyword_fact_can_be_retrieved_beyond_recent_eight(self):
         ids=self.prepare_comments(comment())
         with self.store.lock,self.store.db:

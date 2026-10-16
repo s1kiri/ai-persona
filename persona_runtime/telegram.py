@@ -103,7 +103,12 @@ class BotAPI:
                 status = result['error_code']
         except Exception as error:
             # urllib exception strings contain the URL and therefore the token.
-            self.last_failure = {'type': type(error).__name__, 'status': status}
+            self.last_failure = {'type': type(error).__name__, 'status': status,
+                                 'method': method, 'at': time.time()}
+            reason=getattr(error,'reason',None)
+            if reason is not None:
+                self.last_failure['reason_type']=type(reason).__name__
+                if type(getattr(reason,'errno',None)) is int:self.last_failure['errno']=reason.errno
             raise TelegramError('Не удалось связаться с Telegram. Проверь интернет; токен скрыт.') from None
         messages = {401: 'Telegram не принял токен. Проверь его в BotFather.',
                     403: 'Telegram отказал в доступе. Проверь, что бот добавлен и получил права.',

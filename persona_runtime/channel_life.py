@@ -485,7 +485,21 @@ class ChannelLife:
         with self.store.lock,self.store.db:
             self.store.db.execute("UPDATE channel_reaction_jobs SET status='sending' WHERE id=?",(row['id'],))
         self.current_phase='reaction'
-        receipt=self.connection.react('reaction:'+self.store.directory.name+':'+row['id'],event['value']['telegram']['message_id'],row['emoji'])
+        key='reaction:'+self.store.directory.name+':'+row['id']
+        try:
+            receipt=self.connection.react(key,event['value']['telegram']['message_id'],row['emoji'])
+        except Exception:
+            with self.connection.lock:
+                dispatch=self.connection.db.execute('SELECT status FROM reactions WHERE key=?',(key,)).fetchone()
+                transport=getattr(self.connection.api,'last_failure',None)
+            with self.store.lock,self.store.db:
+                if dispatch is None:
+                    # react claims its Telegram journal before setMessageReaction.
+                    # A failed getChat preflight is not an uncertain mutation.
+                    self.store.db.execute("UPDATE channel_reaction_jobs SET status='pending' WHERE id=?",(row['id'],))
+                self.store.put('last_reaction_failure',{'job_id':row['id'],'key':key,
+                    'dispatch_recorded':dispatch is not None,'transport':transport})
+            raise
         with self.store.lock,self.store.db:
             self.store.db.execute("UPDATE channel_reaction_jobs SET status='sent',receipt=? WHERE id=?",(json.dumps(receipt),row['id']))
 

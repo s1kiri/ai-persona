@@ -884,6 +884,7 @@ class WorldSession:
         call_id, cycle = self.store.claim(cycle_id, self.max_calls)
         answer = None
         social_answer = None
+        usage = None
         active_backend = self.backend
         try:
             actor = cycle['actor_id']
@@ -1045,11 +1046,20 @@ class WorldSession:
                     instruction+='\nintent_updates отмечает судьбу твоих собственных незаконченных намерений из life.own_intentions. Выполнение дела требует подтверждённого outcome; реплика о планах им не является. Можно отказаться от затеи, не подменяя это выполнением.'
                     output_role='live_experience'
                     payload=self.channel_extension.with_source_ids(payload,actor)
+            recall=getattr(self.channel_extension,'recall',None)
+            if recall and stage in ('impulse','experience'):
+                query='\n'.join(str(payload.get(k) or '') for k in ('moment','outcome','attempt'))
+                payload['recalled_memories']=recall.search(actor,query[:3000])
+                payload=self.channel_extension.with_source_ids(payload,actor)
             self.store.save_input(cycle_id, payload)
             answer, usage = active_backend.generate(output_role, instruction, payload, **({'cancel': self.cancel} if self.cancel is not None else {}))
             social_answer=answer if social_role else None
             if social_role:
                 answer=self.channel_extension.validate(stage,answer,payload,actor)
+                if stage=='share':
+                    social_answer=self.channel_extension.review_draft(cycle_id,social_answer,active_backend,instruction,payload,actor,
+                        cancel=self.cancel,limit=self.max_calls)
+                    answer=self.channel_extension.validate(stage,social_answer,payload,actor)
             if stage == 'choice' and lossless:
                 from .world_intent import adapt
                 answer = adapt(answer, results['impulse'])
@@ -1075,5 +1085,5 @@ class WorldSession:
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = social_answer if social_answer is not None else answer if answer is not None else getattr(active_backend, 'last_output', None)
-            self.store.fail(call_id, getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__)
+            self.store.fail(call_id, usage if usage is not None else getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__)
             raise

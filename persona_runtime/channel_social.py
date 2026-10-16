@@ -3,6 +3,7 @@ import json
 import re
 import time
 import copy
+import uuid
 
 from .protocol import obj
 from .world_protocol import array, enum, string, CHANNEL_SCHEMA, EXPERIENCE_SCHEMA, validate_shape, identifier
@@ -101,6 +102,18 @@ publication.sharing_appetite — мягкая готовность делить�
 историй, не дожидаясь итога или особенно эффектного случая. При низкой чаще
 оставлять их себе. keep допустим всегда. Не выдумывай происшествие ради поста,
 не повторяй одно и то же и не объясняй читателям настройки.
+channel_recent — краткая лента за последние сутки с временем и фотографиями;
+recalled_memories — найденные прежние эпизоды, свои записи и слова читателей.
+Это память с источниками, не новые события. Продолжение старой истории уместно,
+если есть новое развитие; ещё раз объявлять прежнюю находку новой не надо.
+Старая запись описывает тогдашнее положение дел; текущее подтверждённое
+состояние важнее. Слова читателя остаются его словами, не установленным фактом.
+Канал — место общения со своими. Можешь обратиться к подписчикам, спросить
+совет, показать результат чужого предложения или позвать конкретного знакомого
+читателя по имени, если есть повод в reader_memory/общении. Не выдумывай его
+интерес, ответ или близость. Его отказ нормален. Обращение может быть частью
+собственной записи, не только ответом на свежий комментарий. Не вставляй
+опрос, вопрос или имя ради активности в каждый пост; можно просто поделиться.
 
 attention — небольшой заход в Telegram, не новое занятие на весь день.
 focus_comments — очередь доступных реплик вместе с исходными постами.
@@ -127,6 +140,10 @@ photo_scene и framing нового кадра; твой инструмент д
 Фотография — твой выбор, не обязанность иллюстрировать каждый ответ или
 исполнять просьбу. media_capabilities описывает доступные возможности;
 технические поля не надо обсуждать с читателем.
+Иногда хочется именно щёлкнуть то, что видишь: похвастаться едой, показать
+странную деталь, следы своей затеи или пойманный момент. Такая фотография
+вполне самостоятельна; подпись может быть короткой или отсутствовать.
+Не жди идеальной композиции, но и не снимай каждый предмет ради вложения.
 
 reader_memory — твои прежние впечатления и запомненные слова людей, с
 источниками. people меняет только впечатление об известном person_key.
@@ -196,6 +213,7 @@ class SocialMemory:
         from .channel_media import Gallery
         self.gallery=Gallery(store)
         self.renderer_available=False
+        self.recall=None
 
     def register(self, name, key, anonymous, actor='garik'):
         self.store.db.execute('INSERT INTO reader_people VALUES(?,?,?,?,?,?,?) ON CONFLICT(actor_id,key) DO UPDATE SET name=excluded.name',
@@ -309,7 +327,62 @@ class SocialMemory:
                     if len(roots)==4:break
             payload['previous_posts']=roots
             payload['publication']={'sharing_appetite':(self.store.get('life_controls') or {}).get('sharing_appetite',50)}
+            if self.recall:
+                payload['channel_recent']=self.recall.recent(actor)
+        if self.recall:
+            query='\n'.join(str(payload.get(k) or '') for k in ('moment','outcome','personal_voice'))+'\n'+query
+            payload['recalled_memories']=self.recall.search(actor,query[:3000])
         return self.with_source_ids(payload,actor)
+
+    def review_draft(self, cycle_id, answer, backend, instructions, payload, actor, *, cancel=None, limit=None):
+        """One recorded self-review if historical publications resemble a draft.
+
+        This is neither a retry nor a delivery filter. The actor may keep,
+        change or withhold the draft; only the final choice creates effects.
+        """
+        if not self.recall or payload.get('attention',{}).get('purpose')!='own_channel' or answer['decision']!='post' or not answer['text']:
+            return answer
+        from .channel_recall import terms
+        matches=self.recall.search(actor,answer['text'],publications_only=True,limit=4)
+        close=[m for m in matches if (m.get('semantic_similarity') or 0)>=.9 or
+               len(set(terms(answer['text'])) & set(terms(m['text'])))>=4]
+        if not close:return answer
+        review=self.with_source_ids({**payload,'publication_draft':answer,'similar_publications':close},actor)
+        call_id='call-'+uuid.uuid4().hex
+        with self.store.lock,self.store.db:
+            if limit is not None and self.store.db.execute('SELECT COUNT(*) FROM world_calls').fetchone()[0]>=limit:
+                from .world import WorldConflict
+                raise WorldConflict('explicit laboratory call limit reached before publication review')
+            cycle=self.store.cycle(cycle_id)
+            if cycle['status']!='running' or cycle['phase']!='share':raise ValueError('review requires an active draft')
+            if 'publication_review' in cycle['value']:raise ValueError('publication review already started; no replay')
+            cycle['value']['publication_review']={'draft':answer,'input':review,'call_id':call_id}
+            self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(cycle['value'],ensure_ascii=False),cycle_id))
+            self.store.db.execute('INSERT INTO world_calls VALUES(?,?,?,?,?,?,?)',(call_id,cycle_id,'publication_review','started','{}',self.now(),None))
+        try:
+            text='''\npublication_draft — твой ещё не отправленный черновик. По нему нашлись
+similar_publications — твои настоящие прошлые записи. Вспомни их и ещё раз
+реши, хочется ли отправлять этот текст. Сходство темы нормально: новый
+поступок, результат, фото или изменение мнения могут быть продолжением.
+Если нового для читателя нет, можешь оставить мысль себе. Не пересказывай
+старую находку как новую. Можно сохранить исходный текст, изменить его
+своим голосом или выбрать keep. Не сочиняй происшествие для отличия и не
+объясняй проверку памяти. Верни полное решение live_channel. Это последняя
+проверка собственного решения, дополнительных попыток не будет.'''
+            revised,usage=backend.generate('live_channel',instructions+text,review,**({'cancel':cancel} if cancel is not None else {}))
+            self.validate('share',revised,review,actor)
+            with self.store.lock,self.store.db:
+                self.store.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?",(json.dumps(usage),call_id))
+                cycle=self.store.cycle(cycle_id);cycle['value']['publication_review']['answer']=revised
+                self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(cycle['value'],ensure_ascii=False),cycle_id))
+            return revised
+        except Exception as error:
+            with self.store.lock,self.store.db:
+                self.store.db.execute("UPDATE world_calls SET status='failed',usage=?,error=? WHERE id=?",(json.dumps(getattr(backend,'last_usage',{})),type(error).__name__,call_id))
+                cycle=self.store.cycle(cycle_id)
+                cycle['value']['publication_review']['rejected']=getattr(backend,'last_output',None)
+                self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(cycle['value'],ensure_ascii=False),cycle_id))
+            raise
 
     def with_source_ids(self,payload,actor='garik'):
         known=self.evidence(actor);found=[]

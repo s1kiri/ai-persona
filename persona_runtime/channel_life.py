@@ -90,7 +90,7 @@ def split_text(text, limit=3500):
 
 
 class ChannelLife:
-    def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None, social_enabled=False, lively_world=None):
+    def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None, social_enabled=False, lively_world=None, recall_enabled=False):
         self.lab, self.store, self.connection = lab, lab.store, connection
         self.persona, self.renderer, self.now = persona, renderer, now
         self.cancel = lab.session.cancel
@@ -121,6 +121,9 @@ class ChannelLife:
         if social_enabled:
             from .channel_social import SocialMemory
             self.social=SocialMemory(self.store,now=self.now)
+            if recall_enabled:
+                from .channel_recall import ChannelRecall
+                self.social.recall=ChannelRecall(self.store)
             self.social.renderer_available=renderer is not None
             self.lab.session.channel_extension=self.social
             self.backfill_people()
@@ -178,6 +181,7 @@ class ChannelLife:
             if self.social:
                 value.update(self.social.context())
                 value['attention']=self.store.get('channel_visit')
+                value['recall']=self.social.recall.report if self.social.recall else {'mode':'disabled'}
             return value
 
     def configure(self, value):
@@ -699,7 +703,7 @@ def main(argv=None):
                            free_intentions=True, research_enabled=True, research_backend=research, lossless_intentions=True,
                            active_world=True, direct_channel=True, continuous=True, external_channel=True, cancel=stopping)
     lab = Laboratory(store, session)
-    life = ChannelLife(lab, connection, persona, renderer, social_enabled=True, lively_world=args.lively_world)
+    life = ChannelLife(lab, connection, persona, renderer, social_enabled=True, lively_world=args.lively_world, recall_enabled=True)
     setup = Setup(connection, life=life)
     servers, threads, awake = [], [], AwakeGuard(life, args.awake_hours)
     try:

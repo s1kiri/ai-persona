@@ -232,21 +232,29 @@ class ChannelLife:
         epoch = self.get('channel_epoch')
         return epoch['minute'] + max(0, int((self.now() - epoch['wall']) // 60))
 
-    def channel_cycle(self, *, bootstrap=False):
+    def channel_cycle(self, *, bootstrap=False, suspended_cycle_id=None):
         if self.social:
             import uuid
             from .world import director
             with self.store.lock,self.store.db:
-                if self.store.db.execute("SELECT 1 FROM world_cycles WHERE status IN ('ready','running','blocked')").fetchone():
+                active = [r[0] for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked')")]
+                if active and (not suspended_cycle_id or active != [suspended_cycle_id]):
                     raise WorldConflict('another stage is active')
+                revision = self.store.get('revision')
                 self.store.put('minute',max(self.store.get('minute'),self.minute_now()))
                 self.store.put('revision',self.store.get('revision')+1)
+                if suspended_cycle_id:
+                    self.store.rebase_waiting_cycle(suspended_cycle_id, self.actor_id, revision)
                 cid='cycle-'+uuid.uuid4().hex
                 value={'brief':director(self.store.state(),self.actor_id,1,1),'inputs':{},'results':{},
                        'personal_life':self.lab.session.personal_life,'lossless_intentions':self.lab.session.lossless_intentions,
                        'direct_channel':True,'active_world':self.lab.session.active_world,'entry_phase':'share',
                        'bootstrap':bootstrap,'channel_visit':True,
                        'channel_purpose':(self.get('channel_attention') or {}).get('purpose','comments')}
+                if suspended_cycle_id:
+                    value.update(suspended_cycle_id=suspended_cycle_id, service_minute=self.minute_now())
+                    visible = self.store.state_for_cycle({'actor_id': self.actor_id, 'value': value}, self.store.state())
+                    value['brief'] = director(visible, self.actor_id, 1, 1)
                 self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
                                       (cid,self.actor_id,'ready','share',self.store.get('revision'),json.dumps(value),self.now()))
                 self.put('bootstrap_prepared',True)
@@ -261,7 +269,7 @@ class ChannelLife:
             self.put('bootstrap_prepared', True)
         return self.store.cycle(cycle['id'])
 
-    def import_comments(self):
+    def import_comments(self, *, suspended_cycle_id=None):
         """Only replies to posts delivered by this fresh life enter its memory."""
         with self.connection.lock:
             group = self.connection.get('binding')['discussion']['id']
@@ -269,6 +277,7 @@ class ChannelLife:
                 "SELECT m.*,f.post_id AS telegram_post FROM messages m JOIN forwards f ON f.group_id=m.chat_id AND f.root_id=m.root_id "
                 "WHERE m.chat_id=? AND m.kind='comment' ORDER BY m.received,m.id", (group,))]
         with self.store.lock, self.store.db:
+            revision = self.store.get('revision')
             delivered = {}
             for job in self.store.db.execute("SELECT post_id,receipts FROM channel_jobs WHERE status='sent'"):
                 for receipt in json.loads(job['receipts']):
@@ -294,12 +303,15 @@ class ChannelLife:
                 self.store.db.execute('INSERT INTO world_cycles VALUES(?,?,?,?,?,?,?)',
                                       (cycle_id, self.actor_id, 'complete', 'done', self.store.get('revision'), json.dumps(cycle_value, ensure_ascii=False), row['received']))
                 self.store.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
-                                      (audience_id, cycle_id, self.actor_id, 'audience', self.store.get('minute'), json.dumps(value, ensure_ascii=False)))
+                                      (audience_id, cycle_id, self.actor_id, 'audience',
+                                       min(self.store.get('minute'), self.minute_now()), json.dumps(value, ensure_ascii=False)))
                 self.store.db.execute('INSERT INTO channel_comments VALUES(?,?,?)', (group, row['id'], audience_id))
                 self.store.db.execute('INSERT INTO channel_read_batches(id) VALUES(?)', (audience_id,))
                 count += 1
             if count:
                 self.store.put('revision', self.store.get('revision') + 1)
+                if suspended_cycle_id:
+                    self.store.rebase_waiting_cycle(suspended_cycle_id, self.actor_id, revision)
                 self.store.snapshot()
             return count
 
@@ -308,7 +320,7 @@ class ChannelLife:
             return None
         from .world_photo import photo_context
         cycle = self.store.cycle(post['cycle_id'])
-        state = self.store.state()
+        state = self.store.state_for_cycle(cycle, self.store.state())
         context = photo_context(self.actor_id, state['entities'], state['history'],
                                 cycle['value']['results'].get('experience', {}).get('note', ''),
                                 portrait_subjects=self.references)
@@ -453,13 +465,34 @@ class ChannelLife:
             return self.social.bootstrap(self.lab.session.backend,self.persona,self.cancel,actor=self.actor_id)
         with self.store.lock:
             uncertain=self.store.db.execute("SELECT 1 FROM channel_jobs WHERE status='unknown' UNION ALL SELECT 1 FROM channel_reaction_jobs WHERE status IN ('sending','unknown')").fetchone()
-            cycles=[self.store.cycle(r[0]) for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid LIMIT 1")]
+            cycles=[self.store.cycle(r[0]) for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid")]
             pending=[{**dict(r),'value':json.loads(r['value'])} for r in self.store.db.execute(
                 "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY rowid LIMIT 1")]
             reactions=[dict(r) for r in self.store.db.execute("SELECT * FROM channel_reaction_jobs WHERE status='pending' ORDER BY rowid LIMIT 1")]
-        if uncertain or (cycles and cycles[0]['status']=='blocked'):
+        if uncertain or any(c['status']=='blocked' for c in cycles):
             return self.block('Есть незавершённая операция. Автоматического повтора нет.')
+        visiting = next((c for c in cycles if c['value'].get('suspended_cycle_id')), None)
+        if visiting:
+            self.current_phase='share'; self.lab.busy=True
+            self.lab.session.step(visiting['id'])
+            self.finish_visit_turn()
+            return
         if self.store.get('minute')>self.minute_now() and not (cycles and cycles[0]['value'].get('bootstrap')):
+            if pending and self.store.cycle(pending[0]['cycle_id'])['value'].get('suspended_cycle_id'):
+                self.lab.busy=True; self.deliver(pending[0]); return
+            if reactions:
+                self.lab.busy=True; self.deliver_reaction(reactions[0]); return
+            waiting = next((c for c in cycles if c['status']=='ready' and c['phase']=='experience' and
+                            'outcome' in c['value']['results']), None)
+            if waiting:
+                self.import_comments(suspended_cycle_id=waiting['id'])
+                visit = self.get('channel_visit') or {}
+                if visit.get('away_until', 0) <= self.now() and self.focus():
+                    if not visit or visit.get('away_until', 0):
+                        with self.store.lock, self.store.db:
+                            self.put('channel_visit', {'started': self.now(), 'turns': 0, 'away_until': 0})
+                    self.channel_cycle(suspended_cycle_id=waiting['id'])
+                    return
             self.current_phase='living';return
         if pending:
             self.lab.busy=True;self.deliver(pending[0]);return

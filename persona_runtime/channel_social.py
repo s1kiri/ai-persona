@@ -186,12 +186,14 @@ class SocialMemory:
             "SELECT * FROM personal_intentions WHERE actor_id=? AND status IN ('pending','awaiting_delivery') ORDER BY due,updated LIMIT 12", (actor,))]
         return {'reader_memory': people, 'own_intentions': intents}
 
-    def evidence(self, actor='garik'):
+    def evidence(self, actor='garik', at_minute=None):
         result = {m['id']: {'id': m['id'], 'actor_id': actor, 'stage': 'memory', 'value': m}
                   for m in self.store.memories(actor)}
         for r in self.store.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE (actor_id=? OR stage IN ('world','outcome')) "
             "AND stage IN ('audience','post','outcome','world','experience','impulse','choice')", (actor,)):
+            if at_minute is not None and r['minute'] > at_minute:
+                continue
             value=json.loads(r['value'])
             if r['stage'] in ('world','outcome'):
                 if actor not in value.get('visible_to',[r['actor_id']]):
@@ -247,7 +249,7 @@ class SocialMemory:
 
     def enrich(self, payload, actor):
         attention = self.store.actor_get(actor, 'channel_attention') or {}
-        evidence = self.evidence(actor)
+        evidence = self.evidence(actor, at_minute=payload.get('life', {}).get('minute'))
         focus = [evidence[i] for i in attention.get('focus_ids', []) if i in evidence]
         roots = list(dict.fromkeys(e['value']['post_id'] for e in focus))
         payload['attention'] = {**attention, 'focus_comments': focus,
@@ -267,7 +269,7 @@ class SocialMemory:
         return self.with_source_ids(payload,actor)
 
     def with_source_ids(self,payload,actor='garik'):
-        known=self.evidence(actor);found=[]
+        known=self.evidence(actor, at_minute=payload.get('life', {}).get('minute'));found=[]
         def walk(value,field=None):
             if isinstance(value,dict):
                 for k,v in value.items():walk(v,k)
@@ -283,7 +285,7 @@ class SocialMemory:
     def validate(self, stage, answer, payload, actor):
         schema = LIVE_CHANNEL if stage=='share' else LIVE_EXPERIENCE
         validate_shape(answer, schema)
-        evidence = self.evidence(actor)
+        evidence = self.evidence(actor, at_minute=payload.get('life', {}).get('minute'))
         if stage=='share':
             self.validate_people(answer['people'], actor, evidence)
             attention = payload['attention']; focus = set(attention.get('focus_ids', []))

@@ -202,6 +202,38 @@ class WorldStore:
             'SELECT value FROM world_memories WHERE actor_id=? ORDER BY rowid', (actor,))]
 
     @locked
+    def rebase_waiting_cycle(self, cycle_id, actor, previous_revision):
+        """Only channel bookkeeping may rebase an already committed, still-awaited outcome."""
+        cycle = self.cycle(cycle_id)
+        if (cycle['actor_id'] != actor or cycle['status'] != 'ready' or cycle['phase'] != 'experience' or
+                'outcome' not in cycle['value']['results'] or cycle['revision'] != previous_revision):
+            raise WorldConflict('waiting action changed; do not rebase or repeat it')
+        self.db.execute('UPDATE world_cycles SET revision=? WHERE id=?', (self.get('revision'), cycle_id))
+
+    @locked
+    def state_for_cycle(self, cycle, state):
+        """A short comment visit during an action cannot observe its computed future outcome."""
+        suspended = cycle['value'].get('suspended_cycle_id')
+        if not suspended:
+            return state
+        original = self.cycle(suspended)
+        value = original['value']
+        before = value.get('inputs', {}).get('outcome', {}).get('world')
+        if (original['actor_id'] != cycle['actor_id'] or original['status'] != 'ready' or
+                original['phase'] != 'experience' or original['revision'] != state['revision'] or
+                not before or 'outcome' not in value['results'] or
+                type(cycle['value'].get('service_minute')) is not int or
+                not before['minute'] <= cycle['value']['service_minute'] <= state['minute']):
+            raise WorldConflict('comment visit requires an unchanged waiting action')
+        visible = copy.deepcopy(state)
+        visible['minute'] = cycle['value']['service_minute']
+        for key in ('entities', 'threads', 'thread_links', 'hooks'):
+            visible[key] = copy.deepcopy(before[key])
+        visible['history'] = [e for e in state['history'] if e['minute'] <= visible['minute'] and
+                              e['id'] != suspended + '-outcome']
+        return visible
+
+    @locked
     def register_actor(self, actor_id, name):
         """Host operation only. A second persona is not a model-created NPC."""
         identifier(actor_id)
@@ -479,8 +511,10 @@ class WorldStore:
                 base={k:saved[k] for k in ('decision','text','source_ids') if k in saved} if isinstance(saved,dict) else None
                 if _reviewed_experience or stage!='share' or not cycle['value'].get('direct_channel') or value!=base:
                     raise WorldConflict('review can only apply the saved direct expression')
-            state = self.state()
+            state = self.state_for_cycle(cycle, self.state())
             brief = cycle['value']['brief']
+            if cycle['value'].get('suspended_cycle_id') and (stage != 'share' or not cycle['value'].get('direct_channel')):
+                raise WorldConflict('a waiting visit can only choose direct channel speech')
             links = []
             if stage in ('world', 'outcome'):
                 from .world_protocol import validate_shape, SCHEMAS
@@ -511,10 +545,11 @@ class WorldStore:
                             "SELECT value FROM world_events WHERE actor_id=? AND stage='audience'", (cycle['actor_id'],))):
                         raise ValueError('reader delivery already recorded; no replay')
                 if stage == 'share':
-                    state['public_evidence_ids'] = self.public_evidence_ids(cycle['actor_id'])
+                    state['public_evidence_ids'] = self.public_evidence_ids(cycle['actor_id'], at_minute=state['minute'])
                     if cycle['value'].get('direct_channel'):
                         state['own_expression_ids'] = [r[0] for r in self.db.execute(
-                            "SELECT id FROM world_events WHERE actor_id=? AND stage IN ('impulse','choice','experience')",(cycle['actor_id'],))]
+                            "SELECT id FROM world_events WHERE actor_id=? AND minute<=? AND stage IN ('impulse','choice','experience')",
+                            (cycle['actor_id'], state['minute']))]
                         state['own_expression_ids'] += [m['id'] for m in self.memories(cycle['actor_id'])]
                     if value.get('decision') == 'reply':
                         targets = [e for e in self.channel_context(cycle['actor_id'])
@@ -589,7 +624,9 @@ class WorldStore:
             if stage == 'audience':
                 stored = {**value, 'simulated': True}
             self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
-                            (event_id, cycle['id'], cycle['actor_id'], stage, self.get('minute'), json.dumps(stored, ensure_ascii=False)))
+                            (event_id, cycle['id'], cycle['actor_id'], stage,
+                             state['minute'] if cycle['value'].get('suspended_cycle_id') else self.get('minute'),
+                             json.dumps(stored, ensure_ascii=False)))
             cycle['value']['results'][stage] = value
             if stage == 'share' and cycle['value'].get('direct_channel') and value['decision'] != 'keep':
                 # The text itself is the character's choice. No editorial
@@ -597,7 +634,9 @@ class WorldStore:
                 posted = self.channel_message(value['text'], value, cycle['actor_id'])
                 posted['direct'] = True
                 self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
-                                (cycle['id']+'-post', cycle['id'], cycle['actor_id'], 'post', self.get('minute'), json.dumps(posted, ensure_ascii=False)))
+                                (cycle['id']+'-post', cycle['id'], cycle['actor_id'], 'post',
+                                 state['minute'] if cycle['value'].get('suspended_cycle_id') else self.get('minute'),
+                                 json.dumps(posted, ensure_ascii=False)))
                 cycle['value']['results']['post'] = value['text']
             next_phase = {'horizon': 'world', 'world': after_world, 'impulse': 'choice', 'choice': after_choice, 'outcome': after_outcome,
                           'research': 'outcome', 'experience': after_experience,
@@ -610,6 +649,8 @@ class WorldStore:
                 extra_apply(cycle)
             revision = state['revision'] + 1
             self.put('revision', revision)
+            if cycle['value'].get('suspended_cycle_id'):
+                self.rebase_waiting_cycle(cycle['value']['suspended_cycle_id'], cycle['actor_id'], state['revision'])
             self.db.execute('UPDATE world_cycles SET status=?,phase=?,revision=?,value=? WHERE id=?',
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if reviewed:
@@ -682,9 +723,11 @@ class WorldStore:
         return ids
 
     @locked
-    def public_evidence_ids(self, actor):
+    def public_evidence_ids(self, actor, at_minute=None):
         ids = []
-        for row in self.db.execute('SELECT id,actor_id,stage,value FROM world_events'):
+        for row in self.db.execute('SELECT id,actor_id,stage,minute,value FROM world_events'):
+            if at_minute is not None and row['minute'] > at_minute:
+                continue
             value = json.loads(row['value'])
             if row['stage'] in ('world', 'outcome') and actor in value.get('visible_to', [row['actor_id']]):
                 ids.append(row['id'])
@@ -846,7 +889,7 @@ class WorldSession:
             active_backend = self.research_backend if stage == 'research' else self.backend
             if actor not in self.actor_prompts:
                 raise ValueError('actor has no configured personality')
-            state = self.store.state()
+            state = self.store.state_for_cycle(cycle, self.store.state())
             results = cycle['value']['results']
             personal = cycle['value'].get('personal_life', False)
             if personal != self.personal_life:
@@ -940,6 +983,9 @@ class WorldSession:
                            'moment': results.get('world', {}).get('observation'),
                            'outcome': results.get('outcome', {}).get('observation'),
                            'request': cycle['value'].get('speech_request'), 'clock': clock}
+                if cycle['value'].get('suspended_cycle_id'):
+                    original = self.store.cycle(cycle['value']['suspended_cycle_id'])
+                    payload['ongoing_action'] = original['value']['results']['choice']['action']
                 if stage == 'experience':
                     payload['attempt'] = results['choice']
                 if stage == 'share':
@@ -965,6 +1011,8 @@ class WorldSession:
                     spoken = [json.loads(r[0])['text'] for r in rows
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
+            if cycle['value'].get('suspended_cycle_id'):
+                instruction += '\nТы ненадолго читаешь комментарии во время начатого дела. ongoing_action — что начал делать, а не готовый результат. Дело продолжается; итог ещё не наступил и тебе неизвестен. Ответить, отреагировать или промолчать можешь сейчас, не объявляя работу законченной.'
             pace=(self.store.actor_get(actor, 'life_controls') or {}).get('episode_minutes') if self.external_channel else None
             if pace and (stage in ('impulse','outcome') or stage=='choice' and 'impulse' not in results):
                 payload['episode_pace']={'target_minutes':pace,'soft_target':True}

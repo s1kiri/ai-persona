@@ -39,8 +39,8 @@ class ProfileHostTests(unittest.TestCase):
         self.addCleanup(store.close)
         self.profile.install(store)
         own = store.actor_view('arkady')
-        self.assertEqual(len(own['memories']), 7)
-        self.assertEqual(len(own['concerns']), 2)
+        self.assertEqual(len(own['memories']), 8)
+        self.assertEqual(len(own['concerns']), 3)
         self.assertTrue(all(m['provenance'] == 'author_backstory' for m in own['memories']))
         self.assertFalse(store.state()['history'])
         self.assertEqual(store.actor_view('garik')['memories'], [])
@@ -109,7 +109,7 @@ class ProfileHostTests(unittest.TestCase):
         self.assertNotIn('Гарик', setup.test_post)
         connection.send('setup-text-v1', setup.test_post)
         bind_connection(connection, 'arkady', self.root / 'life')
-        self.assertEqual(setup.state()['actor_name'], 'Аркадий')
+        self.assertEqual(setup.state()['actor_name'], 'Аркадий Кедров')
         with self.assertRaises(TelegramError):
             claim_setup(connection, 'garik')
 
@@ -171,9 +171,9 @@ class ProfileHostTests(unittest.TestCase):
             state = json.loads(client.open(origin + '/api/state', timeout=3).read())
             self.assertIn('origin-memory', html)
             self.assertEqual(state['actor_id'], 'arkady')
-            self.assertEqual(state['actor_name'], 'Аркадий')
+            self.assertEqual(state['actor_name'], 'Аркадий Кедров')
             self.assertEqual([a['id'] for a in state['actors']], ['arkady'])
-            self.assertEqual(len(state['memories']), 7)
+            self.assertEqual(len(state['memories']), 8)
             self.assertFalse(state['model_enabled'])
             self.assertEqual(state['call_count'], 0)
         finally:
@@ -201,14 +201,17 @@ class ProfileHostTests(unittest.TestCase):
                            '--world-port', '0', '--telegram-port', '0'])
                 model.return_value.generate.assert_not_called()
                 image.return_value.render.assert_not_called()
+                for call in [*model.call_args_list, *image.call_args_list]:
+                    self.assertEqual(call.kwargs['model'], 'gpt-6-luna')
+                    self.assertEqual(call.kwargs['reasoning_effort'], 'low')
                 transport.return_value.close.assert_called_once()
             descriptor = json.loads((directory / 'life/live.json').read_text())
             self.assertEqual(descriptor['actor_id'], 'arkady')
-            self.assertEqual(descriptor['name'], 'Аркадий')
+            self.assertEqual(descriptor['name'], 'Аркадий Кедров')
             self.assertNotEqual(descriptor['world_url'], descriptor['telegram_url'])
             store = open_world(directory / 'life', self.profile)
             try:
-                self.assertEqual(len(store.actor_view('arkady')['memories']), 7)
+                self.assertEqual(len(store.actor_view('arkady')['memories']), 8)
                 self.assertTrue(store.actor_get('arkady', 'channel_epoch'))
                 self.assertFalse(store.monitor()['calls'])
             finally:
@@ -294,8 +297,8 @@ class ArkadyLifeTests(unittest.TestCase):
         calls = self.store.monitor()['call_count']
         self.restart()
         state = self.life.state()
-        self.assertEqual(state['name'], 'Аркадий')
-        self.assertEqual(len(state['memories']), 7)
+        self.assertEqual(state['name'], 'Аркадий Кедров')
+        self.assertEqual(len(state['memories']), 8)
         self.assertEqual(state['reader_memory'][0]['impression'], 'Интересуется передатчиком.')
         self.assertEqual(state['own_intentions'][0]['key'], 'show_scheme')
         self.assertEqual(self.store.monitor()['call_count'], calls)
@@ -325,7 +328,7 @@ class ArkadyLifeTests(unittest.TestCase):
         for _ in range(6):
             self.session.step(cycle['id'])
         impulse = next(payload for stage, _, payload in self.backend.inputs if stage == 'impulse')
-        self.assertEqual(len(impulse['life']['memories']), 7)
+        self.assertEqual(len(impulse['life']['memories']), 8)
         self.assertEqual(impulse['episode_pace']['target_minutes'], 25)
         captured = {}
         class Photo:

@@ -40,7 +40,8 @@ class Laboratory:
                      busy=self.busy, failure=self.failure or self.store.get('review_notice'),
                      max_calls=self.session.max_calls if self.session else 24,
                      mode='model-review' if self.session else 'preparation',
-                     model=getattr(self.session.backend, 'model', None) if self.session else None)
+                     model=getattr(self.session.backend, 'model', None) if self.session else None,
+                     reasoning_effort=getattr(self.session.backend, 'reasoning_effort', None) if self.session else None)
         value['autonomous_posts'] = bool(self.session and self.session.autonomous_posts)
         value['direct_channel'] = bool(self.session.direct_channel if self.session else
                                        value['cycles'] and value['cycles'][0]['value'].get('direct_channel'))
@@ -288,10 +289,11 @@ def main(argv=None):
             if not persona.strip() or not contract.strip():
                 raise ValueError('empty personality/contract')
             transport_owner = SharedTransport()
-            backend = WorldBackend(destination / 'transport', transport_factory=transport_owner.borrow)
+            model_settings = profile.runtime if profile else {}
+            backend = WorldBackend(destination / 'transport', transport_factory=transport_owner.borrow, **model_settings)
             if args.research:
                 research_backend = WorldBackend(destination / 'research-transport', research_host=True,
-                                                transport_factory=transport_owner.borrow, max_known_tokens=50000)
+                                                transport_factory=transport_owner.borrow, max_known_tokens=50000, **model_settings)
             session = WorldSession(store, backend, {profile.actor_id if profile else 'garik': persona}, contract, args.max_calls,
                                    autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
                                    personal_life=args.personal_life, research_enabled=args.research,

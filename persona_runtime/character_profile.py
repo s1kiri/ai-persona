@@ -20,13 +20,14 @@ class CharacterProfile:
     memories: tuple = ()
     concerns: tuple = ()
     references: dict = field(default_factory=dict)
+    runtime: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, manifest):
         path = Path(manifest).resolve()
         value = json.loads(path.read_text(encoding='utf-8'))
         required = {'version', 'id', 'name', 'persona', 'speech_contract', 'canon', 'environment'}
-        optional = {'memory', 'visual_references'}
+        optional = {'memory', 'visual_references', 'persona_sections', 'runtime'}
         if (not isinstance(value, dict) or not required <= set(value) or set(value) - required - optional or
                 type(value['version']) is not int or value['version'] != 1):
             raise ValueError('character manifest needs the exact version 1 fields')
@@ -34,8 +35,7 @@ class CharacterProfile:
         if not isinstance(value['name'], str) or not value['name'].strip() or len(value['name']) > 100:
             raise ValueError('character name is empty or too long')
 
-        def read(field, limit):
-            relative = value[field]
+        def read_path(relative, limit):
             if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
                 raise ValueError('character files must use relative package paths')
             target = (path.parent / relative).resolve()
@@ -43,10 +43,28 @@ class CharacterProfile:
                 raise ValueError('character file escapes package or exceeds size limit')
             text = target.read_text(encoding='utf-8')
             if not text.strip():
-                raise ValueError('character file is empty: ' + field)
+                raise ValueError('character file is empty: ' + relative)
             return text
 
+        def read(field, limit):
+            return read_path(value[field], limit)
+
         persona = read('persona', 100_000)
+        if 'persona_sections' in value:
+            sections = value['persona_sections']
+            if (not isinstance(sections, list) or not 1 <= len(sections) <= 8 or
+                    any(not isinstance(s, str) for s in sections) or len(set(sections)) != len(sections) or
+                    value['persona'] in sections):
+                raise ValueError('persona_sections needs unique relative package paths')
+            persona = '\n\n'.join([persona, *(read_path(s, 100_000) for s in sections)])
+            if len(persona.encode('utf-8')) > 100_000:
+                raise ValueError('assembled persona exceeds size limit')
+        runtime = value.get('runtime', {})
+        if (not isinstance(runtime, dict) or (runtime and set(runtime) != {'model', 'reasoning_effort'}) or
+                (runtime and (not isinstance(runtime['model'], str) or not runtime['model'].strip() or
+                              len(runtime['model']) > 100 or runtime['reasoning_effort'] not in
+                              ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')))):
+            raise ValueError('runtime needs a model and a supported reasoning_effort')
         contract = read('speech_contract', 16_000)
         canon = read('canon', 16_000)
         environment = json.loads(read('environment', 256_000))
@@ -109,9 +127,11 @@ class CharacterProfile:
             normalized['memory'] = {'records': memories, 'concerns': concerns}
         if 'visual_references' in value:
             normalized['visual_references'] = reference_digests
+        if runtime:
+            normalized['runtime'] = runtime
         digest = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         return cls(value['id'], value['name'], persona, contract, canon, tuple(environment), digest,
-                   tuple(memories), tuple(concerns), references)
+                   tuple(memories), tuple(concerns), references, runtime)
 
     def install(self, store):
         """Host operation on a paused world; atomic, idempotent, never resets lived state."""

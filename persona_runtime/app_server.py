@@ -227,8 +227,8 @@ class AppServerBackend(CodexBackend):
     supports_research = True
 
     def __init__(self, directory, binary=None, model=None, timeout=180, max_known_tokens=500000, transport_factory=None, minimal_tools=False,
-                 code_mode_host=None):
-        super().__init__(binary, model, timeout)
+                 code_mode_host=None, reasoning_effort='medium'):
+        super().__init__(binary, model, timeout, reasoning_effort=reasoning_effort)
         if type(minimal_tools) is not bool:
             raise ValueError('invalid minimal tool setting')
         self.minimal_tools = minimal_tools

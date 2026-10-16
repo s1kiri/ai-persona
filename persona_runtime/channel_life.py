@@ -728,12 +728,13 @@ def main(argv=None):
                 store.actor_put(actor, 'life_controls', {**store.actor_get(actor, 'life_controls'), 'photos': False})
         owner = SharedTransport()
         resources.callback(owner.close)
-        backend = WorldBackend(directory/'transport', transport_factory=owner.borrow)
+        model_settings = profile.runtime if profile else {}
+        backend = WorldBackend(directory/'transport', transport_factory=owner.borrow, **model_settings)
         resources.callback(backend.close)
         research = WorldBackend(directory/'research-transport', research_host=True,
-                                transport_factory=owner.borrow, max_known_tokens=50000)
+                                transport_factory=owner.borrow, max_known_tokens=50000, **model_settings)
         resources.callback(research.close)
-        renderer = CodexImageBackend(directory/'image-transport', transport_factory=owner.borrow)
+        renderer = CodexImageBackend(directory/'image-transport', transport_factory=owner.borrow, **model_settings)
         resources.callback(renderer.close)
         session = WorldSession(store, backend, {actor: persona}, contract, autonomous_posts=True, personal_life=True,
                                free_intentions=True, research_enabled=True, research_backend=research, lossless_intentions=True,

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Персонаж · пульс мира</title><link rel="stylesheet" href="/world.css"><script src="/world.js" defer></script></head>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Персонаж · пульс мира</title><link rel="stylesheet" href="/world.css"><script src="/character-settings.js" defer></script><script src="/world.js" defer></script></head>
 <body>
 <aside class="rail"><a class="brand" href="/">п<span>•</span><small>PERSONA LAB</small></a><div class="rail-label">ЛАБОРАТОРИЯ МИРА</div><a class="nav active" href="#pulse">◉ Пульс жизни</a><a class="nav" href="#stories">↗ Открытые истории</a><a class="nav" href="#controls">☷ Пульт</a><a class="nav" href="#posts">✎ Черновики</a><div class="rail-bottom"><span class="portrait" id="character-initial">П</span><strong><span id="character-name">Персонаж</span><small>Один герой. Свой мир.</small></strong></div></aside>
 <main id="pulse">
@@ -17,8 +17,8 @@
 <section class="card" id="posts"><p class="eyebrow">СОБСТВЕННЫЙ КАНАЛ</p><h2 id="posts-title">Самостоятельные черновики</h2><p class="hint" id="posts-mode">Решение рассказать принимает персонаж. Все тексты остаются здесь.</p><div id="post-feed"></div></section>
 <section class="card"><div class="card-head"><div><p class="eyebrow">СЛЕДЫ ЖИЗНИ</p><h2>Лента мира и решений</h2></div><span class="subtle">Сохраняется после остановки</span></div><div id="timeline" class="timeline"><p class="empty">Пока нет событий. Это пустая лаборатория, не пример ответа модели.</p></div></section>
 </div><aside class="side-column">
-<section class="card controls" id="controls"><div class="card-head"><div><p class="eyebrow">ПУЛЬТ</p><h2>Ритм и характер мира</h2></div></div><p class="hint">Изменения действуют со следующего эпизода. Темп задаёт вероятность новых событий; прежние последствия продолжаются отдельно.</p>
-<form id="settings-form">
+<section class="card controls" id="controls"><div class="card-head"><div><p class="eyebrow">ПУЛЬТ</p><h2>Повествователь и персонажи</h2></div></div><p class="hint">Изменения действуют со следующего эпизода. Темп задаёт вероятность новых событий; прежние последствия продолжаются отдельно.</p>
+<nav id="settings-tabs" class="settings-tabs"></nav><div id="character-settings" hidden></div><div id="narrator-settings"><h3>Основной повествователь</h3><form id="settings-form">
 <label class="slider"><span>Новые события<output id="events_per_hour-value">2 / час</output></span><input id="events_per_hour" type="range" min="0" max="6" step="0.5"><small>Частота поводов за виртуальный час, без обязательной квоты</small></label>
 <label class="slider"><span>Неожиданность<output id="surprise-value">45</output></span><input id="surprise" type="range" min="0" max="100" step="5"><small>Предел неожиданности, а не требование поворота</small></label>
 <label class="slider"><span>Продолжать начатое<output id="continuity-value">70</output></span><input id="continuity" type="range" min="0" max="100" step="5"><small>Предпочтение последствиям и возвращениям</small></label>
@@ -26,7 +26,7 @@
 <label class="slider"><span>Одновременно открытых историй<output id="max_threads-value">4</output></span><input id="max_threads" type="range" min="1" max="8" step="1"><small>Уменьшение не стирает уже начатые истории</small></label>
 <label class="slider"><span>Минимум между постами<output id="post_cooldown_minutes-value">90 мин</output></span><input id="post_cooldown_minutes" type="range" min="0" max="360" step="15"><small>Виртуальные минуты. Возможность написать, без обязательной квоты.</small></label>
 <label class="slider"><span>Внимание к интересам персонажа<output id="director_empathy-value">50</output></span><input id="director_empathy" type="range" min="0" max="100" step="5"><small>Подсказка режиссёру из личного опыта. 0 — без подсказки; жители не читают его записки.</small></label>
-<button id="save-settings" class="button full" type="submit" disabled>Параметры сохранены</button></form></section>
+<button id="save-settings" class="button full" type="submit" disabled>Параметры сохранены</button></form></div></section>
 <section class="card" id="night"><p class="eyebrow">ПРОГОН ВО ВРЕМЕНИ</p><h2>Прогон во времени</h2><p id="night-status" class="hint">Не запущен. Остановка по сроку, лимиту или ошибке.</p><form id="night-form">
 <label class="slider"><span>Длительность<output id="night-hours-value">8 ч</output></span><input id="night-hours" type="range" min="1" max="12" step="1" value="8"></label>
 <label class="slider"><span>Реальная пауза для базового шага<output id="night-interval_minutes-value">30 мин</output></span><input id="night-interval_minutes" type="range" min="1" max="90" step="1" value="30"></label>

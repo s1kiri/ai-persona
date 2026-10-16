@@ -15,8 +15,9 @@ import threading
 import time
 
 from .character_profile import CharacterProfile
-from .channel_life import DEFAULT_CONTROLS, MOSCOW, START_DESIRE
+from .channel_life import DEFAULT_CONTROLS, MOSCOW, START_DESIRE, controls_checked
 from .daemon import same_secret
+from .local_http import local_request, local_navigation
 from .profile_host import bind_connection
 from .shared_world import SharedWorldStore, SharedTimeline
 from .shared_scheduler import SharedScheduler, SharedChannelLife
@@ -46,7 +47,8 @@ def load_config(path):
     for item in value['actors']:
         if not isinstance(item,dict) or set(item) != {'profile','telegram_dir','setup_port','initial_place'}:
             raise ValueError('invalid actor host configuration')
-        profile_path = resolve(item['profile']); profile = CharacterProfile.load(profile_path)
+        from .profile_host import effective_profile
+        profile_path = resolve(item['profile']); profile = effective_profile(directory,CharacterProfile.load(profile_path))
         telegram = resolve(item['telegram_dir'])
         if telegram == directory or telegram in directory.parents or directory in telegram.parents:
             raise ValueError('use separate world and Telegram directories')
@@ -138,7 +140,7 @@ def attach_channel(store, item, connection, now):
         if not store.actor_get(actor,'channel_epoch'):
             store.actor_put(actor,'channel_epoch',store.get('shared_epoch'))
             store.actor_put(actor,'channel_start',{'desire':START_DESIRE,'basis':'author_requested_starting_desire'})
-            store.actor_put(actor,'life_controls',dict(DEFAULT_CONTROLS))
+            store.actor_put(actor,'life_controls',{**DEFAULT_CONTROLS, **(store.actor_get(actor,'life_controls') or {})})
         status = store.actor_get(actor,'life_status') or {'next_wake':now,'last_cycle':None,'error':None}
         # Host startup stays paused. It never clears an unresolved error.
         status['status'] = 'error' if status.get('error') else 'paused'
@@ -172,6 +174,7 @@ class SharedPanel:
         self.urls = {}
 
     def state(self):
+        from .profile_editor import editor_state
         actors = []
         for item in self.config['actors']:
             p=item['profile'];actor=p.actor_id;life=self.lives.get(actor)
@@ -179,10 +182,13 @@ class SharedPanel:
                 'reasoning_effort':getattr(life.lab.session.backend,'reasoning_effort',None) if life else p.runtime.get('reasoning_effort'),
                 'configured':bool(self.connections[actor].get('binding')),'panel_url':self.urls.get(actor),
                 'life':life.state() if life else None,'peer_context':self.store.peer_context(actor),
+                'controls': life.get('life_controls') if life else {**DEFAULT_CONTROLS, **(self.store.actor_get(actor,'life_controls') or {})},
+                'profile':editor_state(p,paused=self.store.get('paused'),busy=any(l.lab.busy for l in self.lives.values())),
                 'memories':len(self.store.memories(actor))})
         return {'csrf':self.csrf,'pid':os.getpid(),'live':bool(self.scheduler),'paused':self.store.get('paused'),
                 'error':self.store.get('shared_error'),
                 'minute':self.store.get('minute'),'revision':self.store.get('revision'),'actors':actors,
+                'settings':self.store.get('settings'), 'settings_revision':self.store.get('settings_revision'),
                 'cycles':[{k:c[k] for k in ('id','actor_id','status','phase','revision')}
                           for c in self.store.monitor()['cycles'] if c['status'] not in ('complete','abandoned')],
                 'peer_jobs':[{**dict(r),'value':json.loads(r['value'])} for r in self.store.db.execute('SELECT id,sender,recipient,status,error,value FROM peer_jobs ORDER BY rowid DESC LIMIT 20')]}
@@ -207,8 +213,9 @@ def panel_handler(panel):
             key=f'shared_{self.server.server_port}'
             return key in cookie and same_secret(cookie[key].value,panel.cookie)
         def do_GET(self):
-            if self.headers.get('Host')!=f'127.0.0.1:{self.server.server_port}':return self.reply(403,{'error':'localhost only'})
+            if not local_request(self) and not local_navigation(self):return self.reply(403,{'error':'localhost only'})
             assets={'/':('index.html','text/html; charset=utf-8'),'/shared.js':('shared.js','text/javascript; charset=utf-8'),'/shared.css':('shared.css','text/css; charset=utf-8')}
+            if self.path == '/character-settings.js':return self.reply(200,(ASSETS.parent/'character_settings.js').read_text(),'text/javascript; charset=utf-8')
             if self.path in assets:
                 file,mime=assets[self.path];return self.reply(200,(ASSETS/file).read_text(),mime,self.path=='/')
             if not self.auth():return self.reply(401,{'error':'Сначала откройте пульт.'})
@@ -216,14 +223,29 @@ def panel_handler(panel):
             return self.reply(404,{'error':'Не найдено.'})
         def do_POST(self):
             origin=f'http://127.0.0.1:{self.server.server_port}'
-            if self.headers.get('Host')!=origin[7:] or self.headers.get('Origin')!=origin or not self.auth() or not same_secret(self.headers.get('X-Shared-CSRF',''),panel.csrf):
+            if not local_request(self) or self.headers.get('Origin')!=origin or not self.auth() or not same_secret(self.headers.get('X-Shared-CSRF',''),panel.csrf):
                 return self.reply(403,{'error':'Откройте локальный пульт заново.'})
             try:
                 size=int(self.headers.get('Content-Length','0'))
-                if self.headers.get('Content-Type')!='application/json' or not 0<size<=8000:raise ValueError('invalid request')
+                if self.headers.get('Content-Type')!='application/json' or not 0<size<=(128000 if self.path=='/api/character-profile' else 8000):raise ValueError('invalid request')
                 value=json.loads(self.rfile.read(size))
                 if self.path=='/api/action' and set(value)=={'actor_id','running'} and value['actor_id'] in panel.lives:
                     panel.lives[value['actor_id']].action(value['running'])
+                elif self.path=='/api/settings' and set(value)=={'settings','revision'}:
+                    panel.store.set_settings(value['settings'],value['revision'])
+                elif self.path=='/api/character-settings' and set(value)=={'actor_id','controls'} and value['actor_id'] in panel.connections:
+                    actor=value['actor_id']
+                    if actor in panel.lives:
+                        panel.lives[actor].configure(value['controls'])
+                    else:
+                        controls=controls_checked({**DEFAULT_CONTROLS, **(panel.store.actor_get(actor,'life_controls') or {}), **value['controls']})
+                        with panel.store.lock,panel.store.db:panel.store.actor_put(actor,'life_controls',controls)
+                elif self.path=='/api/character-profile' and set(value)=={'actor_id','profile'}:
+                    from .profile_editor import edit_profile
+                    item=next((a for a in panel.config['actors'] if a['profile'].actor_id==value['actor_id']),None)
+                    if item is None:raise WorldConflict('unknown character')
+                    item['profile']=edit_profile(panel.store,item['profile'],value['profile'],panel.connections.values(),
+                                                  lives=panel.lives.values(),scheduler=panel.scheduler)
                 elif self.path=='/api/peer-confirm-absent' and set(value)=={'actor_id','job_id','confirmation'} and value['confirmation']=='owner_checked_absent' and panel.scheduler and value['actor_id'] in panel.lives:
                     panel.scheduler.confirm_peer_absent(value['actor_id'],value['job_id'])
                 else:raise ValueError('Персонажи запускаются только в режиме --live; проверьте оба подключения.')
@@ -294,6 +316,7 @@ def main(argv=None):
                     free_intentions=True,research_enabled=True,research_backend=research,lossless_intentions=True,active_world=True,
                     direct_channel=True,continuous=True,external_channel=True,timeline=SharedTimeline(store))
                 lab=Laboratory(store,session);lab.actor_id,lab.actor_name=actor,p.name
+                lab.profile=p
                 lives[actor]=SharedChannelLife(lab,connection,p.persona,renderer,social_enabled=True,actor_id=actor,references=p.references)
             scheduler=SharedScheduler(store,lives);resources.callback(scheduler.stopping.set)
             for life in lives.values():life.lab.session.cancel=scheduler.stopping;life.cancel=scheduler.stopping

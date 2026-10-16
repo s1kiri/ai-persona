@@ -7,6 +7,10 @@ const domainNames={home:'Дом',work:'Работа',food:'Еда',people:'От�
 let state=null,dirty=false,settingsRevision=null,pending=false;
 const nightFields=['hours','interval_minutes','virtual_minutes','max_calls','speech_every'];
 let nightDirty=false;
+const characterSettings=globalThis.CharacterSettings?new globalThis.CharacterSettings({
+ tabs:$('settings-tabs'),narrator:$('narrator-settings'),editor:$('character-settings'),
+ save:async(actor_id,kind,value)=>{if(!await post(kind==='profile'?'/api/character-profile':'/api/character-settings',
+  {actor_id,[kind]:value}))throw Error($('banner').textContent||'Изменения не подтверждены.');}}):null;
 function nightLabels(){for(const key of nightFields)$('night-'+key+'-value').textContent=$('night-'+key).value+(key==='hours'?' ч':key.includes('minutes')?' мин':key==='speech_every'?' эпизода':'');}
 function el(tag,text,cls){const item=document.createElement(tag);if(text!==undefined)item.textContent=text;if(cls)item.className=cls;return item;}
 function clock(minute){const day=Math.floor(minute/1440)+1,h=Math.floor(minute%1440/60),m=minute%60;return `День ${day} · ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;}
@@ -99,6 +103,7 @@ function render(value){
  const entities=$('entities');entities.replaceChildren();for(const e of value.entities){const card=el('article',undefined,'entity');card.append(el('strong',e.name),el('p',e.condition));entities.append(card);}
  $('banner').textContent=value.failure||'';$('banner').classList.toggle('hidden',!value.failure);
  renderControls();
+ characterSettings?.update(value.character_settings||[]);
 }
 async function refresh(){try{const response=await fetch('/api/state');if(!response.ok)throw Error();render(await response.json());}catch{ $('banner').textContent='Панель не получила состояние. Действия не повторяются автоматически.';$('banner').classList.remove('hidden');}}
 async function post(path,value){

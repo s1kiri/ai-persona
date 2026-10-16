@@ -71,6 +71,20 @@ class SetupTests(unittest.TestCase):
         with self.assertRaises(HTTPError):
             self.request('/bot-token.json')
 
+    def test_link_from_another_local_port_can_open_page_but_cannot_read_api_or_post(self):
+        client=build_opener(ProxyHandler({}),HTTPCookieProcessor(CookieJar()))
+        headers={'Sec-Fetch-Site':'same-site','Sec-Fetch-Mode':'navigate','Sec-Fetch-Dest':'document'}
+        page=client.open(Request(self.url+'/',headers=headers))
+        self.assertEqual(page.status,200)
+        self.assertIn('garik_telegram_',page.headers['Set-Cookie'])
+        self.assertFalse(json.load(client.open(self.url+'/api/state'))['configured'])
+        with self.assertRaises(HTTPError) as err:
+            client.open(Request(self.url+'/api/state',headers=headers))
+        self.assertEqual(err.exception.code,403)
+        with self.assertRaises(HTTPError) as err:
+            self.request('/api/token',{'token':TOKEN},{'Sec-Fetch-Site':'same-site'})
+        self.assertEqual(err.exception.code,403)
+
 
 if __name__ == '__main__':
     unittest.main()

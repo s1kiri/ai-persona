@@ -13,6 +13,7 @@ import threading
 import time
 
 from .daemon import same_secret
+from .local_http import local_request, local_navigation
 from .telegram import TelegramConnection, TelegramError, private_json
 
 ASSETS = Path(__file__).parent / 'telegram_panel'
@@ -65,10 +66,7 @@ def handler(setup):
                 pass
 
         def origin_ok(self):
-            origin = 'http://127.0.0.1:' + str(self.server.server_port)
-            return (self.headers.get('Host') == origin[7:] and
-                    self.headers.get('Origin', origin) == origin and
-                    self.headers.get('Sec-Fetch-Site', 'none') not in ('cross-site', 'same-site'))
+            return local_request(self)
 
         def authenticated(self):
             try:
@@ -78,7 +76,7 @@ def handler(setup):
                 return False
 
         def do_GET(self):
-            if not self.origin_ok():
+            if not self.origin_ok() and not local_navigation(self):
                 return self.reply(403, {'error': 'Локальное подключение обязательно.'})
             assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                       '/telegram.js': ('telegram.js', 'text/javascript; charset=utf-8'),

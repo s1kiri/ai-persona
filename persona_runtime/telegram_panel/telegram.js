@@ -4,12 +4,13 @@ let state=null,busy=false,candidateSignature='',lifeDirty=false;
 function notice(text){$('notice').textContent=text||'';$('notice').hidden=!text;}
 function render(value){
  state=value;
+ $('world-link').hidden=!value.world_url;
+ if(value.world_url)$('world-link').href=value.world_url+'/#posts';
  if(value.actor_name){document.title=value.actor_name+' · Telegram';$('character-name').textContent=value.actor_name;}
  $('life-section').hidden=!value.life;
  if(value.life){
   const life=value.life;
   const name=life.name||'Гарик';document.title=name+' · Telegram';$('character-name').textContent=name;
-  if(value.world_url)$('world-link').href=value.world_url+'/#posts';
   $('origin-section').hidden=!(life.memories?.length||life.concerns?.length);
   $('origin-memory').replaceChildren();$('own-concerns').replaceChildren();
   for(const record of life.memories||[]){const card=document.createElement('p');card.textContent=record.text;$('origin-memory').append(card);}

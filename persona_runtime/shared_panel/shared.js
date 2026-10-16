@@ -1,9 +1,18 @@
 'use strict';
 let state=null, sending=false;
 const $=id=>document.getElementById(id);
+const settingFields=['events_per_hour','surprise','continuity','quiet','max_threads','post_cooldown_minutes','director_empathy'];
+let settingsDirty=false,settingsRevision=null;
+const characterSettings=globalThis.CharacterSettings?new globalThis.CharacterSettings({
+ tabs:$('settings-tabs'),narrator:$('narrator-settings'),editor:$('character-settings'),
+ save:(actor_id,kind,value)=>saveSettings(kind==='profile'?'/api/character-profile':'/api/character-settings',{actor_id,[kind]:value})}):null;
+function settingsLabels(){for(const key of settingFields)$(key+'-value').textContent=$(key).value;}
 function line(parent,text,cls){const p=document.createElement('p');p.textContent=text;if(cls)p.className=cls;parent.appendChild(p);return p;}
 function render(value){
  state=value;
+ if(value.settings&&!settingsDirty){for(const key of settingFields)$(key).value=value.settings[key];settingsRevision=value.settings_revision;settingsLabels();}
+ $('save-settings').disabled=sending||!settingsDirty;
+ characterSettings?.update(value.actors.map(a=>({...a,editable:true,description:value.live?'Настройки собственного канала и темпа жизни.':'Подготовка отдельного профиля. Рабочая жизнь и её история сюда ещё не перенесены.'})));
  if(value.error)$('error').textContent=value.error;
  $('mode').textContent=value.live?'Совместная жизнь · каждый выбирает свои слова и дела':'Подготовка · модельные вызовы и автономные публикации выключены. Настройте обоих ботов, затем запустите общий хост с --live.';
  const m=value.minute;$('clock').textContent=`День ${Math.floor(m/1440)+1} · ${String(Math.floor(m%1440/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
@@ -23,8 +32,15 @@ function render(value){
  if(!value.cycles.length){const li=document.createElement('li');li.textContent='Незавершённых этапов нет';$('cycles').appendChild(li);}
  $('jobs').replaceChildren();for(const job of value.peer_jobs){const li=document.createElement('li');li.textContent=`${job.sender} → ${job.recipient}: ${job.status}${job.error?' · '+job.error:''}`;if(job.value?.text){const quote=document.createElement('blockquote');quote.textContent=job.value.text;li.appendChild(quote);}if(job.status==='unknown'){const button=document.createElement('button');button.textContent='Проверил: комментария нет';button.disabled=sending;button.addEventListener('click',()=>repair(job));li.appendChild(button);}$('jobs').appendChild(li);}
 }
-async function refresh(){try{const r=await fetch('/api/state');if(!r.ok)throw Error('Откройте пульт заново');render(await r.json());}catch(e){$('error').textContent=e.message;}}
+async function refresh(){try{const r=await fetch('/api/state');if(!r.ok)throw Error('Откройте пульт заново');render(await r.json());return true;}catch(e){$('error').textContent=e.message;return false;}}
 async function action(actor_id,running){if(sending||!state)return;sending=true;render(state);try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Shared-CSRF':state.csrf},body:JSON.stringify({actor_id,running})});const v=await r.json();if(!r.ok)throw Error(v.error);$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{sending=false;await refresh();}}
+async function saveSettings(path,value){
+ if(sending||!state)throw Error('Дождитесь текущего сохранения.');sending=true;
+ try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Shared-CSRF':state.csrf},body:JSON.stringify(value)});const result=await r.json();if(!r.ok)throw Error(result.error||'Не удалось сохранить.');if(!await refresh())throw Error('Изменения приняты, но новое состояние не получено. Черновик сохранён; обновите страницу для проверки.');}
+ finally{sending=false;if(state)render(state);}
+}
+for(const key of settingFields)$(key).addEventListener('input',()=>{settingsDirty=true;settingsLabels();$('save-settings').disabled=false;});
+$('settings-form').addEventListener('submit',async e=>{e.preventDefault();if(sending)return;try{await saveSettings('/api/settings',{settings:Object.fromEntries(settingFields.map(k=>[k,Number($(k).value)])),revision:settingsRevision});settingsDirty=false;render(state);}catch(error){$('error').textContent=error.message;}});
 refresh();setInterval(refresh,2000);
 
 async function repair(job){if(sending||!state)return;if(!window.confirm('Проверьте обсуждение получателя. Подтвердить, что этого комментария там нет, и разрешить новую попытку после продолжения автора?'))return;sending=true;render(state);try{const r=await fetch('/api/peer-confirm-absent',{method:'POST',headers:{'Content-Type':'application/json','X-Shared-CSRF':state.csrf},body:JSON.stringify({actor_id:job.sender,job_id:job.id,confirmation:'owner_checked_absent'})});const v=await r.json();if(!r.ok)throw Error(v.error);$('error').textContent='Отсутствие отмечено. Автор остаётся на паузе до вашего продолжения.';}catch(e){$('error').textContent=e.message;}finally{sending=false;await refresh();}}

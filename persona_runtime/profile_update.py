@@ -5,38 +5,50 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import hashlib
+from contextlib import nullcontext
 
 from .character_profile import CharacterProfile
 from .world import WorldConflict, WorldStore
 
 
-def revise_profile(store, previous, updated, reason):
+def revise_profile(store, previous, updated, reason, *, shared_owner=False):
     """Change author material only. Accepted outcomes, deadlines and deliveries survive."""
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError('an author revision needs a reason')
+    def reference_bytes(profile):
+        return {key: hashlib.sha256(Path(path).read_bytes()).hexdigest() for key,path in profile.references.items()}
     if (previous.actor_id != updated.actor_id or previous.environment != updated.environment or
-            previous.references != updated.references):
+            reference_bytes(previous) != reference_bytes(updated)):
         raise WorldConflict('identity, environment or visual changes require a separate migration')
     old_memories = {r['id']: r for r in previous.memories}
     new_memories = {r['id']: r for r in updated.memories}
     if not old_memories.keys() <= new_memories.keys():
         raise WorldConflict('an author revision cannot remove memories')
-    with store.lock, store.db:
+    with store.lock, (nullcontext() if store.db.in_transaction else store.db):
         actor = previous.actor_id
         binding = store.get('host_profile')
         packages = store.get('character_packages') or {}
-        if (not binding or binding != {'actor_id': actor, 'name': previous.name, 'digest': previous.digest} or
-                packages.get(actor) != previous.digest or
+        shared = store.get('shared_host') if shared_owner else None
+        binding_matches = (shared and shared['profiles'].get(actor) == previous.digest) if shared_owner else (
+            binding == {'actor_id': actor, 'name': previous.name, 'digest': previous.digest})
+        if (not binding_matches or packages.get(actor) != previous.digest or
                 (store.get('basis') or {}).get(actor) != previous.canon):
             raise WorldConflict('previous profile does not match installed author material')
         if not store.get('paused'):
             raise WorldConflict('pause and stop the host before revising its profile')
         revision = store.get('revision')
         pending = [dict(r) for r in store.db.execute(
-            "SELECT * FROM world_cycles WHERE status IN ('ready','running','blocked')")]
+            "SELECT * FROM world_cycles WHERE status IN ('ready','running','blocked','waiting','held')")]
         # Only a fully committed physical result may cross this author boundary.
         # Do not rebase an unfinished call or a speech service with old evidence.
-        if (len(pending) > 1 or any(c['actor_id'] != actor or c['status'] != 'ready' or
+        if shared_owner:
+            if (any((store.actor_get(a['id'], 'life_status') or {}).get('status') == 'running' for a in store.state()['actors']) or
+                    any(c['status'] not in ('waiting','held') or c['phase'] != 'outcome' or
+                        not json.loads(c['value']).get('shared_window') or
+                        'outcome' in json.loads(c['value']).get('results', {}) for c in pending)):
+                raise WorldConflict('pause both characters and finish pending stages before author revision')
+        elif (len(pending) > 1 or any(c['actor_id'] != actor or c['status'] != 'ready' or
                 c['phase'] != 'experience' or c['revision'] != revision or
                 'outcome' not in json.loads(c['value']).get('results', {}) or
                 json.loads(c['value']).get('suspended_cycle_id') for c in pending)):
@@ -71,10 +83,16 @@ def revise_profile(store, previous, updated, reason):
             store.db.execute('INSERT OR REPLACE INTO world_memories VALUES(?,?,?)',
                              (actor, key, json.dumps(record, ensure_ascii=False)))
         store.put('character_packages', {**packages, actor: updated.digest})
-        store.put('host_profile', {'actor_id': actor, 'name': updated.name, 'digest': updated.digest})
+        if shared_owner:
+            store.put('shared_host', {**shared, 'profiles': {**shared['profiles'], actor: updated.digest}})
+        else:
+            store.put('host_profile', {'actor_id': actor, 'name': updated.name, 'digest': updated.digest})
         store.put('revision', revision + 1)
         for cycle in pending:
-            store.rebase_waiting_cycle(cycle['id'], actor, revision)
+            if shared_owner:
+                store.db.execute('UPDATE world_cycles SET revision=? WHERE id=?', (revision+1, cycle['id']))
+            else:
+                store.rebase_waiting_cycle(cycle['id'], actor, revision)
         store.snapshot()
         return {k: audit[k] for k in ('actor_id', 'at', 'reason', 'previous_digest', 'digest', 'pending_cycle_ids')}
 

@@ -15,6 +15,7 @@ import time
 from .daemon import same_secret
 from .world import WorldStore, WorldSession, WorldConflict
 from .telegram import TelegramError
+from .local_http import local_request, local_navigation
 
 ASSETS = Path(__file__).parent / 'world_panel'
 
@@ -57,11 +58,14 @@ class Laboratory:
         value['night'] = self.store.get('night')
         value['channel_life'] = self.store.actor_get(self.actor_id, 'channel_life')
         value['telegram_url'] = getattr(self, 'telegram_url', None)
+        from .panel_settings import character_settings
+        value['character_settings'] = character_settings(self)
         if getattr(self, 'life', None):
             value['live_status'] = {**self.life.get('life_status'),
                                     'phase': self.life.current_phase,
                                     'activity': self.life.activity(),
                                     'can_skip_failed_expression': self.life.failed_expression() is not None}
+            value['failure'] = value['failure'] or value['live_status'].get('error')
         return value
 
     def prepare(self, actor_id, minutes):
@@ -113,8 +117,7 @@ def handler(lab):
                 pass
 
         def origin_ok(self):
-            host = '127.0.0.1:' + str(self.server.server_port)
-            return self.headers.get('Host') == host and self.headers.get('Origin', 'http://' + host) == 'http://' + host and self.headers.get('Sec-Fetch-Site', 'none') not in ('cross-site', 'same-site')
+            return local_request(self)
 
         def authenticated(self):
             try:
@@ -124,11 +127,13 @@ def handler(lab):
                 return False
 
         def do_GET(self):
-            if not self.origin_ok():
+            if not self.origin_ok() and not local_navigation(self):
                 return self.reply(403, {'error': 'origin rejected'})
             assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                       '/world.css': ('world.css', 'text/css; charset=utf-8'),
                       '/world.js': ('world.js', 'text/javascript; charset=utf-8')}
+            if self.path == '/character-settings.js':
+                return self.reply(200, (ASSETS.parent / 'character_settings.js').read_text(), 'text/javascript; charset=utf-8')
             if self.path in assets:
                 file, mime = assets[self.path]
                 return self.reply(200, (ASSETS / file).read_text(), mime, self.path == '/')
@@ -145,15 +150,24 @@ def handler(lab):
                 if self.headers.get('Content-Type') != 'application/json':
                     raise ValueError('JSON required')
                 size = int(self.headers.get('Content-Length', 0))
-                if not 0 < size <= 16000:
+                if not 0 < size <= (128000 if self.path == '/api/character-profile' else 16000):
                     raise ValueError('invalid request size')
                 value = json.loads(self.rfile.read(size))
                 if not isinstance(value, dict):
                     raise ValueError('object required')
-                if lab.store.actor_get(lab.actor_id, 'channel_life') and self.path not in ('/api/settings', '/api/action'):
+                if lab.store.actor_get(lab.actor_id, 'channel_life') and self.path not in ('/api/settings', '/api/action', '/api/character-settings', '/api/character-profile'):
                     raise WorldConflict('live channel owns its cycle; use pause and settings')
                 if self.path == '/api/settings' and set(value) == {'settings', 'revision'}:
                     lab.store.set_settings(value['settings'], value['revision'])
+                elif self.path == '/api/character-settings' and set(value) == {'actor_id', 'controls'}:
+                    if value['actor_id'] != lab.actor_id or not getattr(lab, 'life', None):
+                        raise WorldConflict('this character is not connected to this host')
+                    lab.life.configure(value['controls'])
+                elif self.path == '/api/character-profile' and set(value) == {'actor_id','profile'}:
+                    if value['actor_id'] != lab.actor_id or not getattr(lab,'profile',None) or not getattr(lab,'life',None):
+                        raise WorldConflict('this character has no editable live profile')
+                    from .profile_editor import edit_profile
+                    lab.profile = edit_profile(lab.store,lab.profile,value['profile'],[lab.life.connection],lives=[lab.life])
                 elif self.path == '/api/prepare' and set(value) == {'actor_id', 'minutes'}:
                     lab.prepare(value['actor_id'], value['minutes'])
                 elif self.path == '/api/action' and set(value) == {'paused'}:
@@ -209,8 +223,8 @@ def main(argv=None):
     if args.profile and (args.persona or args.speech_contract):
         parser.error('--profile cannot be combined with legacy persona/contract overrides')
     from .character_profile import CharacterProfile
-    from .profile_host import open_world
-    profile = CharacterProfile.load(args.profile) if args.profile else None
+    from .profile_host import open_world, effective_profile
+    profile = effective_profile(args.data_dir, CharacterProfile.load(args.profile)) if args.profile else None
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
     root = Path(__file__).resolve().parent.parent
@@ -322,6 +336,7 @@ def main(argv=None):
                                     simulated_audience=args.simulated_audience, active_world=args.active_world,
                                     direct_channel=args.direct_channel)
         lab = Laboratory(store, session, preparer=preparer)
+        lab.profile = profile
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)
         night_worker.start()

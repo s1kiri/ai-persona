@@ -2,6 +2,31 @@
 from .world import WorldConflict, WorldStore
 
 
+def effective_profile(directory, requested):
+    """Follow only an audited private editor revision belonging to this source profile."""
+    import json
+    from pathlib import Path
+    import sqlite3
+    from .character_profile import CharacterProfile
+    directory = Path(directory).resolve()
+    database = directory / 'world.sqlite3'
+    if requested is None or not database.exists():
+        return requested
+    with sqlite3.connect(database.as_uri()+'?mode=ro', uri=True) as db:
+        row = db.execute('SELECT value FROM world_meta WHERE key=?', ('profile_overrides',)).fetchone()
+    record = (json.loads(row[0]) if row else {}).get(requested.actor_id)
+    if not record:
+        return requested
+    path = (directory / record['manifest']).resolve()
+    if (not path.is_relative_to(directory / 'profiles') or
+            requested.digest not in (record['base_digest'], record['digest'])):
+        raise WorldConflict('source profile changed; review its private author revision first')
+    profile = CharacterProfile.load(path)
+    if profile.actor_id != requested.actor_id or profile.digest != record['digest']:
+        raise WorldConflict('private author revision does not match its audit')
+    return profile
+
+
 def open_world(directory, profile=None):
     store = WorldStore(directory, seed_garik=profile is None)
     try:

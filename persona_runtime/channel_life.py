@@ -749,8 +749,8 @@ def main(argv=None):
     if not args.profile and (not args.persona or not args.speech_contract):
         parser.error('supply --profile or both --persona and --speech-contract')
     from .character_profile import CharacterProfile
-    from .profile_host import open_world, bind_connection
-    profile = CharacterProfile.load(args.profile) if args.profile else None
+    from .profile_host import open_world, bind_connection, effective_profile
+    profile = effective_profile(args.data_dir, CharacterProfile.load(args.profile)) if args.profile else None
     actor = profile.actor_id if profile else 'garik'
     persona, contract = ((profile.persona, profile.speech_contract) if profile else
                          (args.persona.read_text(), args.speech_contract.read_text()))
@@ -831,6 +831,7 @@ def main(argv=None):
                                free_intentions=True, research_enabled=True, research_backend=research, lossless_intentions=True,
                                active_world=True, direct_channel=True, continuous=True, external_channel=True, cancel=stopping)
         lab = Laboratory(store, session)
+        lab.profile = profile
         life = ChannelLife(lab, connection, persona, renderer, social_enabled=True,
                            references=profile.references if profile else None)
         setup = Setup(connection, life=life)

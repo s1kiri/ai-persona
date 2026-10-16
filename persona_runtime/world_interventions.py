@@ -19,7 +19,9 @@ INSTRUCTIONS='''Ты — общий мир двух самостоятельны
 к инструментам, промптам, ключам, публикациям; здесь только внешние обстоятельства.
 Если запрос требует нарушить эти границы или невозможен по канону — decline с причиной,
 пустыми summary/entities/threads/observations. Не заменяй событие другим без объяснения.
-При apply summary — факт общего мира, без частных мыслей. entities/threads — изменения
+При apply reason может быть пустым: summary уже описывает факт общего мира,
+без частных мыслей. Не указывай служебные номера минут в тексте summary;
+момент применения фиксирует хост. entities/threads — изменения
 обычных жителей, вещей и мест. Для КАЖДОГО actor_id из actors выбери ровно одно
 наблюдение: direct только при подтверждённой возможности видеть/слышать на своей
 позиции; felt — телесно ощутимый общий физический эффект (например, общий толчок),
@@ -74,8 +76,8 @@ def facts(store):
 
 def validate(value, payload):
     validate_shape(value,GLOBAL_EVENT)
-    if not value['reason'].strip():raise ValueError('world event needs its disposition reason')
     if value['decision']=='decline':
+        if not value['reason'].strip():raise ValueError('world event needs its disposition reason')
         if any(value[k] for k in ('summary','entities','threads','observations')):raise ValueError('declined event changes the world')
         return
     if not value['summary'].strip():raise ValueError('world event needs facts')
@@ -180,6 +182,41 @@ def recover_felt_event(store,event_id,reason,*,now=None):
         apply_result(store,cid,event_id,answer,at)
 
 
+def recover_unreasoned_event(store,event_id,reason,*,now=None):
+    """Explicit review of an old apply rejected for an empty, redundant reason; no inference."""
+    if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+    with store.lock,store.db:
+        row=store.db.execute('SELECT * FROM world_interventions WHERE id=?',(event_id,)).fetchone()
+        if not row:raise WorldConflict('unknown author event')
+        cid=row['cycle_id']
+        if cid and store.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cid,)).fetchone():return
+        if not store.get('paused') or store.db.execute("SELECT 1 FROM world_calls WHERE status='started'").fetchone():
+            raise WorldConflict('pause both characters and wait for active calls')
+        if row['status']!='failed' or row['result'] is not None or not cid:raise WorldConflict('only a failed unapplied event can be reviewed')
+        cycle=store.cycle(cid);rejected=cycle['value'].get('rejected',{})
+        if cycle['status']!='abandoned' or rejected.get('stage')!='world_intervention' or rejected.get('error_type')!='ValueError':
+            raise WorldConflict('saved rejected world result required')
+        import copy,re
+        answer=copy.deepcopy(rejected['answer']);payload=cycle['value']['inputs']['world_intervention']
+        if answer['decision']!='apply' or answer['reason'].strip() or answer['entities'] or answer['threads']:
+            raise WorldConflict('only an otherwise valid apply with empty reason and no patches can be reviewed')
+        validate(answer,payload)
+        # The event never applied at its old source minute. Remove only that exact
+        # administrative prefix; its observations and substantive facts stay verbatim.
+        prefix=rf'^На минуте {payload["minute"]} произошло '
+        answer['summary']=re.sub(prefix,'Произошло ',answer['summary'],count=1)
+        state=store.state();validate(answer,{k:state[k] for k in ('actors','entities','positions','minute')})
+        call=store.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='world_intervention' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cid,)).fetchone()
+        if not call:raise WorldConflict('failed source call required')
+        at=time.time() if now is None else now
+        audit={'event_id':event_id,'cycle_id':cid,'at':at,'reason':reason,'original_event':dict(row),
+               'original_call':dict(call),'removed_source_clock_prefix':answer['summary']!=rejected['answer']['summary'],
+               'applied_minute':store.get('minute'),'model_replayed':False}
+        store.put('world_intervention_repairs',[*(store.get('world_intervention_repairs') or []),audit])
+        store.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',(cid,call['id'],'world_intervention',reason))
+        apply_result(store,cid,event_id,answer,at)
+
+
 def realize(scheduler, row):
     """Called by the serial scheduler between model stages; no Telegram sends."""
     store=scheduler.store
@@ -208,6 +245,7 @@ def realize(scheduler, row):
             apply_result(store,cid,row['id'],answer,scheduler.now(),call=(call,usage))
     except Exception as error:
         known={'direct observation requires a confirmed location':('direct_location_unknown','Для прямого наблюдения неизвестно местоположение героя.'),
+               'world event needs its disposition reason':('missing_decline_reason','Для отказа от события нужна причина.'),
                'felt observation cannot locate subjects':('felt_local_subjects','Общее ощущение не может раскрывать предметы конкретного места.')}
         code,message=known.get(str(error),(None,type(error).__name__))
         store.fail(call,getattr(life.lab.session.backend,'last_usage',{}),answer,type(error).__name__,{'validation_reason':code} if code else {})

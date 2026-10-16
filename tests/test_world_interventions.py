@@ -2,6 +2,7 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
 import test_shared_life as fixtures
 from persona_runtime.world_interventions import enqueue,cancel,catalog,facts
@@ -129,6 +130,40 @@ class InterventionTests(unittest.TestCase):
         self.queue();self.f.backends['arkady'].answers=[answer];self.f.scheduler.tick();self.store.pause(True)
         with self.assertRaises(WorldConflict):recover_felt_event(self.store,'author-event-1','Cannot infer location')
         self.assertEqual(catalog(self.store)[0]['status'],'failed')
+
+    def test_apply_can_omit_redundant_reason_but_decline_needs_one(self):
+        from persona_runtime.world_interventions import validate
+        answer=event();answer['reason']='';self.queue()
+        self.f.backends['arkady'].answers=[answer];self.f.scheduler.tick()
+        self.assertEqual(catalog(self.store)[0]['status'],'applied')
+        state=self.store.state();payload={k:state[k] for k in ('actors','entities','positions','minute')}
+        answer.update(decision='decline',summary='',observations=[])
+        with self.assertRaisesRegex(ValueError,'disposition reason'):validate(answer,payload)
+
+    def test_review_empty_apply_reason_preserves_knowledge_call_and_old_rejection(self):
+        from persona_runtime.world_interventions import recover_unreasoned_event
+        answer=event();answer['reason']='';old_minute=self.store.get('minute')
+        answer['summary']=f'На минуте {old_minute} произошло краткое сотрясение. Позже в новостях сообщили о толчках.'
+        answer['observations'][0].update(via='felt',observation='Почувствовал краткий толчок.')
+        answer['observations'][1].update(via='unaware',observation='',entity_ids=[])
+        self.queue();self.f.backends['arkady'].answers=[answer]
+        with patch('persona_runtime.world_interventions.validate',side_effect=ValueError('world event needs its disposition reason')):
+            self.f.scheduler.tick()
+        cid=catalog(self.store)[0]['cycle_id'];original_call=dict(self.store.db.execute('SELECT * FROM world_calls').fetchone())
+        rejected=copy.deepcopy(self.store.cycle(cid)['value']['rejected'])
+        self.store.pause(True)
+        with self.store.db:self.store.put('minute',old_minute+5)
+        recover_unreasoned_event(self.store,'author-event-1','Explicit legacy reason review')
+        recover_unreasoned_event(self.store,'author-event-1','No repeat')
+        row=catalog(self.store)[0]
+        self.assertEqual(row['status'],'applied');self.assertEqual(row['minute'],old_minute+5)
+        self.assertTrue(row['result']['summary'].startswith('Произошло краткое сотрясение.'))
+        self.assertEqual(row['result']['observations'],answer['observations'])
+        self.assertEqual(self.store.cycle(cid)['value']['rejected'],rejected)
+        self.assertEqual(dict(self.store.db.execute('SELECT * FROM world_calls').fetchone()),original_call)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM world_events WHERE stage='world'").fetchone()[0],1)
+        self.assertFalse(self.store.actor_view('garik')['history'])
+        self.assertEqual(len(self.f.backends['arkady'].inputs),1)
 
     def test_native_backend_uses_closed_world_event_schema(self):
         backend=WorldBackend(self.f.root/'backend');backend._start=lambda:None;backend.client=Client(event())

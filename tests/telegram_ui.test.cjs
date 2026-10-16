@@ -98,3 +98,13 @@ test('sharing appetite is independent from episode length and never defines a po
  assert.equal(body.sharing_appetite,80);assert.equal(body.episode_minutes,15);assert.equal(body.post_every,undefined);
  t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
 });
+test('physical wait explains its deadline and displays action text literally',()=>{
+ const t=setup();t.ctx.live={paused:false,controls:{wake_minutes:5,photos:true},world_calls:41,phase:'living',
+  activity:{action:'Разбирать <b>приёмник</b>.',remaining_minutes:17,until:1792150800}};
+ t.run('render({...sample,life:live})');
+ assert.equal(t.el('life-activity').hidden,false);
+ assert.match(t.el('life-activity').textContent,/<b>приёмник<\/b>/);
+ assert.match(t.el('life-activity').textContent,/17 мин/);
+ t.run('render({...sample,life:{...live,activity:null}})');
+ assert.equal(t.el('life-activity').hidden,true);
+});

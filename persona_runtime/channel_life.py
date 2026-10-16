@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -174,12 +175,31 @@ class ChannelLife:
                     'phase': self.current_phase, 'controls': self.get('life_controls'),
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
                     'awake': self.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
+            value['activity'] = self.activity()
             view = self.store.actor_view(self.actor_id)
             value.update(memories=view['memories'], concerns=view['concerns'], undertakings=view['undertakings'])
             if self.social:
                 value.update(self.social.context(self.actor_id))
                 value['attention']=self.get('channel_visit')
             return value
+
+    def activity(self):
+        """Owner-visible accepted action and deadline; never expose its future result."""
+        with self.store.lock:
+            rows = self.store.db.execute(
+                "SELECT id,status,phase,value FROM world_cycles WHERE actor_id=? "
+                "AND status IN ('ready','waiting') ORDER BY rowid", (self.actor_id,)).fetchall()
+            for row in rows:
+                cycle = json.loads(row['value'])
+                if row['status'] != 'ready' or row['phase'] != 'experience' or cycle.get('suspended_cycle_id'):
+                    continue
+                if 'outcome' not in cycle.get('results', {}) or self.store.get('minute') <= self.minute_now():
+                    continue
+                epoch = self.get('channel_epoch')
+                until = epoch['wall'] + (self.store.get('minute') - epoch['minute']) * 60
+                return {'cycle_id': row['id'], 'action': cycle['results']['choice']['action'],
+                        'until': until, 'remaining_minutes': max(0, math.ceil((until-self.now())/60))}
+            return None
 
     def configure(self, value):
         checked = controls_checked({**self.get('life_controls'),**value})
@@ -498,6 +518,20 @@ class ChannelLife:
                         with self.store.lock, self.store.db:
                             self.put('channel_visit', {'started': self.now(), 'turns': 0, 'away_until': 0})
                     self.channel_cycle(suspended_cycle_id=waiting['id'])
+                    return
+                # A long physical action must not suppress the actor's own channel.
+                # Use a separate persisted check; never move the accepted action deadline.
+                with self.store.lock:
+                    goal = self.store.db.execute("SELECT key FROM personal_intentions WHERE actor_id=? AND kind='post' AND status='pending' AND due<=? ORDER BY due LIMIT 1", (self.actor_id, self.now())).fetchone()
+                requested = self.get('own_channel_check_requested')
+                next_check = self.get('waiting_channel_next_check')
+                due = (0 if goal else status['next_wake']) if next_check is None else next_check
+                if requested or self.now() >= due:
+                    self.focus(goal[0] if goal else None, own_channel=True)
+                    with self.store.lock, self.store.db:
+                        self.channel_cycle(suspended_cycle_id=waiting['id'])
+                        self.put('waiting_channel_next_check', self.now()+self.get('life_controls')['wake_minutes']*60)
+                        self.put('own_channel_check_requested', False)
                     return
             self.current_phase='living';return
         if pending:

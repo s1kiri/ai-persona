@@ -1020,7 +1020,7 @@ class WorldSession:
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
             if cycle['value'].get('suspended_cycle_id'):
-                instruction += '\nТы ненадолго читаешь комментарии во время начатого дела. ongoing_action — что начал делать, а не готовый результат. Дело продолжается; итог ещё не наступил и тебе неизвестен. Ответить, отреагировать или промолчать можешь сейчас, не объявляя работу законченной.'
+                instruction += '\nТы ненадолго заглянул в Telegram во время начатого дела. ongoing_action — что начал делать, а не готовый результат. Дело продолжается; итог ещё не наступил и тебе неизвестен. По attention.purpose можешь выбрать собственную запись или ответ читателю; можно и промолчать. Нового физического действия здесь нет. Не объявляй начатое дело законченным.'
             if self.timeline:
                 payload = self.timeline.enrich(stage, payload, cycle)
                 if stage == 'outcome':

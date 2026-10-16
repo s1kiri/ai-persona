@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from persona_runtime.telegram import BotAPI, TelegramConnection, TelegramError
 
@@ -40,6 +40,9 @@ class API:
             return {'message_id': 100 + len(self.calls), 'chat': {'id': payload['chat_id']}}
         if method=='setMessageReaction':
             if self.fail_send:raise RuntimeError('synthetic reaction timeout')
+            return True
+        if method=='deleteMessage':
+            if self.fail_send:raise RuntimeError('synthetic deletion timeout')
             return True
         raise AssertionError(method)
 
@@ -205,6 +208,24 @@ class TelegramTests(unittest.TestCase):
         with self.assertRaises(TelegramError):
             Connection(self.temp.name, API)
 
+    def test_explicit_delete_only_own_receipt_is_idempotent_after_restart(self):
+        self.bind();receipt=self.connection.send('delete-me','synthetic own text')
+        result=self.connection.delete_own(receipt['chat_id'],receipt['message_id'])
+        self.assertEqual(result['status'],'deleted')
+        self.assertEqual(self.api.calls[-1][0],'deleteMessage')
+        with self.assertRaises(TelegramError):self.connection.delete_own(GROUP['id'],51)
+        self.connection.close();self.connection=Connection(self.temp.name,API)
+        self.assertEqual(self.connection.delete_own(receipt['chat_id'],receipt['message_id']),result)
+        self.assertFalse(self.connection.api.calls)
+        self.assertEqual(self.connection.state()['outbox'][0]['status'],'sent')
+
+    def test_unknown_deletion_is_not_repeated(self):
+        self.bind();receipt=self.connection.send('delete-unknown','synthetic own text');self.api.fail_send=True
+        with self.assertRaises(TelegramError):self.connection.delete_own(receipt['chat_id'],receipt['message_id'])
+        calls=len(self.api.calls)
+        with self.assertRaises(TelegramError):self.connection.delete_own(receipt['chat_id'],receipt['message_id'])
+        self.assertEqual(len(self.api.calls),calls)
+
     def test_reaction_targets_known_comment_and_duplicate_does_not_touch_network(self):
         self.bind();self.receive(comment())
         first=self.connection.react('reaction:51',51,'🤣')
@@ -270,6 +291,16 @@ class HTTPTests(unittest.TestCase):
         self.assertIn(b'PNGbytes', body)
         self.assertIn(b'{"message_id": 10}', body)
         self.assertNotIn(TOKEN.encode(), body)
+
+    def test_network_error_carries_its_own_redacted_transport_snapshot(self):
+        api=BotAPI(TOKEN,Opener(error=URLError(OSError(60,TOKEN))))
+        with self.assertRaises(TelegramError) as caught:api.call('getChat',{'chat_id':-1})
+        diagnostic=caught.exception.transport
+        api.last_failure={'method':'getUpdates'}
+        self.assertEqual(diagnostic['method'],'getChat')
+        self.assertEqual(diagnostic['reason_type'],type(OSError(60,TOKEN)).__name__)
+        self.assertEqual(diagnostic['errno'],60)
+        self.assertNotIn(TOKEN,json.dumps(diagnostic))
 
 
 if __name__ == '__main__':

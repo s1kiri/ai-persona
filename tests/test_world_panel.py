@@ -101,6 +101,15 @@ class PanelTests(unittest.TestCase):
             self.assertTrue(self.opener.open(self.url+asset).read())
         self.assertFalse(self.store.monitor()['calls'])
 
+    def test_navigation_between_panels_keeps_private_requests_protected(self):
+        headers={'Sec-Fetch-Site':'same-site','Sec-Fetch-Mode':'navigate','Sec-Fetch-Dest':'document'}
+        self.assertEqual(self.opener.open(Request(self.url+'/',headers=headers)).status,200)
+        self.assertTrue(self.request('/api/state')['paused'])
+        for path in ('/api/state','/world.js'):
+            with self.assertRaises(HTTPError) as err:
+                self.opener.open(Request(self.url+path,headers=headers))
+            self.assertEqual(err.exception.code,403)
+
 
 if __name__ == '__main__':
     unittest.main()

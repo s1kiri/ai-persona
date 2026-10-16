@@ -1,9 +1,12 @@
 """Bounded world-lab calls; only the research role can use native web."""
 import json
+import hashlib
+import copy
+from pathlib import Path
 import time
 
 from .app_server import AppServerBackend, cumulative_delta
-from .codex import CodexError, CodexCancelled
+from .codex import CodexError, CodexCancelled, safe_cli_error
 from .world_protocol import SCHEMAS
 from . import research
 from .world_intent import INTENT_SCHEMA
@@ -15,10 +18,11 @@ class WorldBackend(AppServerBackend):
         super().__init__(*args, **kwargs, minimal_tools=True, code_mode_host=research_host)
 
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review', 'timed_intent', 'timed_choice', 'peer_choice'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
+        self.last_diagnostics = {'events': [], 'turn_completed': False, 'turn_failed': False}
         web = stage == 'research'
         if web != self.research_host:
             raise ValueError('native research requires its separate web-enabled process')
@@ -40,10 +44,24 @@ class WorldBackend(AppServerBackend):
                   'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False}}
         if stage in SCHEMAS:
             params['outputSchema'] = SCHEMAS[stage]
+        if stage=='horizon':
+            params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
+            props=params['outputSchema']['properties']['hooks']['items']['properties']
+            for field,table in (('actor_ids','actors'),('anchor_ids','entities')):
+                choices=[item['id'] for item in payload.get('world',{}).get(table,[])]
+                if choices:props[field]['items']['enum']=choices
         if web:
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':
             params['outputSchema'] = INTENT_SCHEMA
+        if stage in ('timed_intent', 'timed_choice', 'peer_choice'):
+            from .shared_protocol import TIMED_INTENT, TIMED_CHOICE, PEER_CHOICE
+            params['outputSchema'] = {'timed_intent': TIMED_INTENT, 'timed_choice': TIMED_CHOICE,
+                                      'peer_choice': PEER_CHOICE}[stage]
+        if stage == 'peer_choice':
+            from .shared_protocol import peer_io
+            params['outputSchema'],model_payload,source_decode=peer_io(payload)
+            params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
         if stage == 'photo_choice':
             from .world_photo import PHOTO_SCHEMA
             params['outputSchema'] = PHOTO_SCHEMA
@@ -51,7 +69,17 @@ class WorldBackend(AppServerBackend):
             from .channel_social import LIVE_CHANNEL,LIVE_EXPERIENCE,SOCIAL_REVIEW,constrained_io
             schema={'live_channel':LIVE_CHANNEL,'live_experience':LIVE_EXPERIENCE,'social_review':SOCIAL_REVIEW}[stage]
             params['outputSchema'],model_payload,source_decode=constrained_io(schema,payload)
+            previews=model_payload.pop('_gallery_previews',[])
             params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
+            if previews and stage!='live_channel':raise ValueError('gallery previews belong only to the character speaking role')
+            if len(previews)>4:raise ValueError('gallery preview limit exceeded')
+            ids={item['id'] for item in model_payload.get('gallery',[])}
+            for photo in previews:
+                path=Path(photo['image_path'])
+                if photo['id'] not in ids or path.stat().st_size>10_000_000 or hashlib.sha256(path.read_bytes()).hexdigest()!=photo['sha256']:
+                    raise ValueError('gallery preview differs from host receipt')
+                params['input'].extend([{'type':'text','text':'Gallery photo '+photo['id']},
+                                        {'type':'localImage','path':str(path)}])
         turn = None
         try:
             if cancel and cancel.is_set():
@@ -97,8 +125,17 @@ class WorldBackend(AppServerBackend):
                     if item.get('type') == 'agentMessage' and method == 'item/completed' and item.get('phase') != 'commentary':
                         answers[item['id']] = item.get('text', '')
                 elif method == 'error':
+                    diagnostic = safe_cli_error('error', data.get('error', {}).get('message', ''))
+                    diagnostic['will_retry'] = data.get('willRetry') is True
+                    self.last_diagnostics['events'].append(diagnostic)
+                    # The server is still executing this SAME turn. Do not start
+                    # another request or discard its valid eventual result.
+                    if diagnostic['will_retry'] and data.get('turnId') == turn and len(self.last_diagnostics['events']) <= 8:
+                        continue
                     raise CodexError('world stream error; no automatic retry')
                 elif method == 'turn/completed':
+                    self.last_diagnostics['turn_completed'] = data['turn']['status'] == 'completed'
+                    self.last_diagnostics['turn_failed'] = data['turn']['status'] != 'completed'
                     if data['turn']['status'] != 'completed':
                         raise CodexError('world call did not complete')
                     break
@@ -106,7 +143,7 @@ class WorldBackend(AppServerBackend):
                 raise CodexError('world role returned no answer')
             answer = list(answers.values())[-1]
             self.last_output = answer[:12000]
-            if stage in ('live_channel','live_experience','social_review'):
+            if stage in ('live_channel','live_experience','social_review','peer_choice'):
                 from .channel_social import map_sources
                 decoded=map_sources(json.loads(answer),source_decode)
                 self.last_output=json.dumps(decoded,ensure_ascii=False)[:12000]
@@ -118,7 +155,7 @@ class WorldBackend(AppServerBackend):
                 if value['task_id'] != payload['task_id']:
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
-            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice') else answer), self.last_usage
+            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice') else answer), self.last_usage
         except Exception:
             if turn:
                 try:

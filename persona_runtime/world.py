@@ -144,6 +144,8 @@ class WorldStore:
             CREATE TABLE IF NOT EXISTS world_repairs(cycle_id TEXT PRIMARY KEY REFERENCES world_cycles(id),
                 call_id TEXT NOT NULL REFERENCES world_calls(id),stage TEXT NOT NULL,reason TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_hooks(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS world_memories(actor_id TEXT NOT NULL REFERENCES world_actors(id),
+                id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(actor_id,id));
         ''')
         with self.lock, self.db:
             if self.get('version') is None:
@@ -186,6 +188,50 @@ class WorldStore:
     @locked
     def put(self, key, value):
         self.db.execute('INSERT OR REPLACE INTO world_meta VALUES(?,?)', (key, json.dumps(value, ensure_ascii=False)))
+
+    def actor_get(self, actor, key):
+        # Preserve the existing Garik database layout. Other actors never inherit it.
+        return self.get(key if actor == 'garik' else 'actor:' + actor + ':' + key)
+
+    def actor_put(self, actor, key, value):
+        self.put(key if actor == 'garik' else 'actor:' + actor + ':' + key, value)
+
+    @locked
+    def memories(self, actor):
+        return [json.loads(r[0]) for r in self.db.execute(
+            'SELECT value FROM world_memories WHERE actor_id=? ORDER BY rowid', (actor,))]
+
+    @locked
+    def rebase_waiting_cycle(self, cycle_id, actor, previous_revision):
+        """Only channel bookkeeping may rebase an already committed, still-awaited outcome."""
+        cycle = self.cycle(cycle_id)
+        if (cycle['actor_id'] != actor or cycle['status'] != 'ready' or cycle['phase'] != 'experience' or
+                'outcome' not in cycle['value']['results'] or cycle['revision'] != previous_revision):
+            raise WorldConflict('waiting action changed; do not rebase or repeat it')
+        self.db.execute('UPDATE world_cycles SET revision=? WHERE id=?', (self.get('revision'), cycle_id))
+
+    @locked
+    def state_for_cycle(self, cycle, state):
+        """A short comment visit during an action cannot observe its computed future outcome."""
+        suspended = cycle['value'].get('suspended_cycle_id')
+        if not suspended:
+            return state
+        original = self.cycle(suspended)
+        value = original['value']
+        before = value.get('inputs', {}).get('outcome', {}).get('world')
+        if (original['actor_id'] != cycle['actor_id'] or original['status'] != 'ready' or
+                original['phase'] != 'experience' or original['revision'] != state['revision'] or
+                not before or 'outcome' not in value['results'] or
+                type(cycle['value'].get('service_minute')) is not int or
+                not before['minute'] <= cycle['value']['service_minute'] <= state['minute']):
+            raise WorldConflict('comment visit requires an unchanged waiting action')
+        visible = copy.deepcopy(state)
+        visible['minute'] = cycle['value']['service_minute']
+        for key in ('entities', 'threads', 'thread_links', 'hooks'):
+            visible[key] = copy.deepcopy(before[key])
+        visible['history'] = [e for e in state['history'] if e['minute'] <= visible['minute'] and
+                              e['id'] != suspended + '-outcome']
+        return visible
 
     @locked
     def register_actor(self, actor_id, name):
@@ -247,6 +293,8 @@ class WorldStore:
                 history.append({'id': e['id'], 'minute': e['minute'], 'stage': 'impulse', 'text': e['value']['text']})
             elif e['actor_id'] == actor_id and e['stage'] in ('research', 'experience', 'audience'):
                 history.append({'id': e['id'], 'minute': e['minute'], 'stage': e['stage'], 'value': e['value']})
+            elif e['actor_id'] == actor_id and e['stage'] == 'peer':
+                history.append({'id': e['id'], 'minute': e['minute'], 'stage': 'peer', 'value': e['value']})
         state['history'] = history[-16:]
         state['notes'] = [dict(r) for r in self.db.execute(
             'SELECT minute,text FROM world_notes WHERE actor_id=? ORDER BY rowid DESC LIMIT 8', (actor_id,))]
@@ -293,9 +341,12 @@ class WorldStore:
                 entry.update(facts=value['facts'], caveats=value['caveats'])
             elif row['actor_id'] == actor_id and row['stage'] == 'audience':
                 entry['reader_comments' if value.get('simulated') is False else 'simulated_comments'] = value
+            elif row['actor_id'] == actor_id and row['stage'] == 'peer':
+                entry['peer_communication'] = value
             elif row['actor_id'] == actor_id and row['stage'] == 'experience':
                 entry['personal_record'] = value
             elif row['actor_id'] == actor_id and row['stage'] == 'post':
+                if value.get('retracted'):continue
                 entry['public_expression'] = value['text']
             elif row['actor_id'] == actor_id and row['stage'] in ('impulse', 'choice'):
                 entry['text'] = value.get('text', value.get('action', ''))
@@ -305,11 +356,12 @@ class WorldStore:
             if len(state['personal_sources']) == 4:
                 break
         state['basis'] = {actor_id: state.get('basis', {}).get(actor_id, '')}
+        state['memories'] = self.memories(actor_id)
         state['channel_context'] = self.channel_context(actor_id)
-        if self.get('channel_connection'):
-            state['channel_connection'] = self.get('channel_connection')
-        if self.get('channel_start'):
-            state['starting_desire'] = self.get('channel_start')
+        if self.actor_get(actor_id, 'channel_connection'):
+            state['channel_connection'] = self.actor_get(actor_id, 'channel_connection')
+        if self.actor_get(actor_id, 'channel_start'):
+            state['starting_desire'] = self.actor_get(actor_id, 'channel_start')
         if hasattr(self,'social_memory'):
             state.update(self.social_memory.context(actor_id))
         visible_ids = {e['id'] for e in state['entities']}
@@ -324,7 +376,8 @@ class WorldStore:
         recent = [{**dict(r), 'value': json.loads(r['value'])} for r in reversed(self.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND stage IN ('post','audience') ORDER BY rowid DESC LIMIT 12",
             (actor,)).fetchall())]
-        focus=(self.get('channel_attention') or {}).get('focus_ids',[])
+        recent=[e for e in recent if not e['value'].get('retracted')]
+        focus=(self.actor_get(actor, 'channel_attention') or {}).get('focus_ids',[])
         known={e['id'] for e in recent}
         for source in focus:
             row=self.db.execute("SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND id=? AND stage='audience'",(actor,source)).fetchone()
@@ -332,7 +385,7 @@ class WorldStore:
             entry={**dict(row),'value':json.loads(row['value'])}
             for eid in (entry['value']['post_id'],source):
                 extra=self.db.execute("SELECT id,actor_id,stage,minute,value FROM world_events WHERE id=? AND actor_id=?",(eid,actor)).fetchone()
-                if extra and eid not in known:
+                if extra and eid not in known and not json.loads(extra['value']).get('retracted'):
                     recent.append({**dict(extra),'value':json.loads(extra['value'])});known.add(eid)
         return recent
 
@@ -383,7 +436,9 @@ class WorldStore:
         if type(minutes) is not int or not (0 if allow_zero else 1) <= minutes <= 1440:
             raise ValueError('invalid virtual interval')
         with self.lock, self.db:
-            if self.db.execute("SELECT 1 FROM world_cycles WHERE status IN ('ready','running','blocked')").fetchone():
+            pending = (self.db.execute("SELECT 1 FROM world_cycles WHERE status IN ('ready','running') OR (actor_id=? AND status IN ('blocked','waiting','held'))", (actor_id,)).fetchone()
+                       if self.get('shared_host') else self.db.execute("SELECT 1 FROM world_cycles WHERE status IN ('ready','running','blocked')").fetchone())
+            if pending:
                 raise WorldConflict('finish or explicitly abandon the current cycle first')
             if not self.db.execute('SELECT 1 FROM world_actors WHERE id=?', (actor_id,)).fetchone():
                 raise ValueError('unknown actor')
@@ -444,7 +499,8 @@ class WorldStore:
             return brief
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
-                 after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False):
+                 after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False, media_attached=False,
+                 _reviewed_outcome=False):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -452,11 +508,20 @@ class WorldStore:
             if call['status'] == 'completed':
                 return False
             cycle = self.cycle(call['cycle_id'])
-            reviewed = _reviewed_experience or _reviewed_channel
+            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome
             expected_call, expected_cycle = ('failed', 'blocked') if reviewed else ('started', 'running')
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
+            if stage in ('speech','post','impulse','experience') or stage=='share' and cycle['value'].get('direct_channel'):
+                from .role_boundary import check_character_speech
+                expression=value if isinstance(value,str) else value.get('note','') if stage=='experience' else value.get('text','')
+                check_character_speech(expression,self.db.execute('SELECT name FROM world_actors WHERE id=?',(cycle['actor_id'],)).fetchone()[0])
+            if _reviewed_outcome:
+                saved=cycle['value'].get('rejected',{}).get('answer',{})
+                projected={**saved,'entities':[e for e in saved.get('entities',[]) if e['id']!=cycle['actor_id']]}
+                if _reviewed_experience or _reviewed_channel or stage!='outcome' or value!=projected or projected==saved:
+                    raise WorldConflict('review can only omit own protected actor patch from saved outcome')
             if _reviewed_experience and (stage != 'experience' or value != cycle['value'].get('rejected', {}).get('answer')):
                 raise WorldConflict('review can only apply the saved personal note')
             if _reviewed_channel:
@@ -464,8 +529,10 @@ class WorldStore:
                 base={k:saved[k] for k in ('decision','text','source_ids') if k in saved} if isinstance(saved,dict) else None
                 if _reviewed_experience or stage!='share' or not cycle['value'].get('direct_channel') or value!=base:
                     raise WorldConflict('review can only apply the saved direct expression')
-            state = self.state()
+            state = self.state_for_cycle(cycle, self.state())
             brief = cycle['value']['brief']
+            if cycle['value'].get('suspended_cycle_id') and (stage != 'share' or not cycle['value'].get('direct_channel')):
+                raise WorldConflict('a waiting visit can only choose direct channel speech')
             links = []
             if stage in ('world', 'outcome'):
                 from .world_protocol import validate_shape, SCHEMAS
@@ -496,19 +563,19 @@ class WorldStore:
                             "SELECT value FROM world_events WHERE actor_id=? AND stage='audience'", (cycle['actor_id'],))):
                         raise ValueError('reader delivery already recorded; no replay')
                 if stage == 'share':
-                    state['public_evidence_ids'] = self.public_evidence_ids(cycle['actor_id'])
+                    state['public_evidence_ids'] = self.public_evidence_ids(cycle['actor_id'], at_minute=state['minute'])
                     if cycle['value'].get('direct_channel'):
                         state['own_expression_ids'] = [r[0] for r in self.db.execute(
-                            "SELECT id FROM world_events WHERE actor_id=? AND stage IN ('impulse','choice','experience')",(cycle['actor_id'],))]
+                            "SELECT id FROM world_events WHERE actor_id=? AND minute<=? AND stage IN ('impulse','choice','experience')",
+                            (cycle['actor_id'], state['minute']))]
+                        state['own_expression_ids'] += [m['id'] for m in self.memories(cycle['actor_id'])]
                     if value.get('decision') == 'reply':
-                        targets = [e for e in self.channel_context(cycle['actor_id'])
-                                   if e['id'] in value['source_ids'] and e['stage'] == 'audience' and e['value']['comments']]
-                        if len(targets) != 1:
-                            raise ValueError('reply needs one own observed comment batch')
+                        self.reply_target(cycle['actor_id'],value['source_ids'])
                 if stage == 'experience':
                     state['personal_evidence_ids'] = self.personal_evidence_ids(cycle['actor_id'])
                 checked = value
                 direct = stage == 'share' and cycle['value'].get('direct_channel', False)
+                if direct and media_attached:state['channel_media_attached']=True
                 if stage == 'choice' and cycle['value'].get('lossless_intentions'):
                     from .world_intent import adapt
                     checked = {k: v for k, v in value.items() if k not in ('intent_parts', 'recovery')}
@@ -525,7 +592,11 @@ class WorldStore:
                 validate_result('channel' if direct else stage, checked, state, brief)
             event_id = cycle['id'] + '-' + stage
             if stage == 'horizon':
-                for hook in value['hooks']:
+                planned=value
+                if brief.get('lively_world'):
+                    from .world_dynamics import assign_plans
+                    planned=assign_plans(value,brief['plan_directions'])
+                for hook in planned['hooks']:
                     self.db.execute('INSERT INTO world_hooks VALUES(?,?,?)',
                                     (hook['id'], json.dumps({**hook, 'exposed_to': []}, ensure_ascii=False), event_id))
             if stage in ('world', 'outcome'):
@@ -534,13 +605,16 @@ class WorldStore:
                         self.db.execute('INSERT OR REPLACE INTO ' + table + ' VALUES(?,?,?)',
                                         (entry['id'], json.dumps(entry, ensure_ascii=False), event_id))
                 if stage == 'outcome':
-                    self.put('minute', state['minute'] + value['elapsed_minutes'])
+                    if not cycle['value'].get('shared_window'):
+                        self.put('minute', state['minute'] + value['elapsed_minutes'])
                 for link in links:
                     self.db.execute('INSERT INTO world_thread_links VALUES(?,?,?)',
                                     (link['child'], link['parent'], event_id))
                 if stage == 'world' and brief.get('exposure'):
                     hook = copy.deepcopy(brief['exposure'])
                     hook['exposed_to'] = list(dict.fromkeys([*hook['exposed_to'], cycle['actor_id']]))
+                    if brief.get('lively_world'):
+                        hook.update(exposed_minute=state['minute'],thread_ids=[value['thread_id']])
                     self.db.execute('UPDATE world_hooks SET value=? WHERE id=?',
                                     (json.dumps(hook, ensure_ascii=False), hook['id']))
             if stage == 'choice' and value['note'].strip():
@@ -573,7 +647,9 @@ class WorldStore:
             if stage == 'audience':
                 stored = {**value, 'simulated': True}
             self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
-                            (event_id, cycle['id'], cycle['actor_id'], stage, self.get('minute'), json.dumps(stored, ensure_ascii=False)))
+                            (event_id, cycle['id'], cycle['actor_id'], stage,
+                             state['minute'] if cycle['value'].get('suspended_cycle_id') else self.get('minute'),
+                             json.dumps(stored, ensure_ascii=False)))
             cycle['value']['results'][stage] = value
             if stage == 'share' and cycle['value'].get('direct_channel') and value['decision'] != 'keep':
                 # The text itself is the character's choice. No editorial
@@ -581,7 +657,9 @@ class WorldStore:
                 posted = self.channel_message(value['text'], value, cycle['actor_id'])
                 posted['direct'] = True
                 self.db.execute('INSERT INTO world_events VALUES(?,?,?,?,?,?)',
-                                (cycle['id']+'-post', cycle['id'], cycle['actor_id'], 'post', self.get('minute'), json.dumps(posted, ensure_ascii=False)))
+                                (cycle['id']+'-post', cycle['id'], cycle['actor_id'], 'post',
+                                 state['minute'] if cycle['value'].get('suspended_cycle_id') else self.get('minute'),
+                                 json.dumps(posted, ensure_ascii=False)))
                 cycle['value']['results']['post'] = value['text']
             next_phase = {'horizon': 'world', 'world': after_world, 'impulse': 'choice', 'choice': after_choice, 'outcome': after_outcome,
                           'research': 'outcome', 'experience': after_experience,
@@ -594,11 +672,13 @@ class WorldStore:
                 extra_apply(cycle)
             revision = state['revision'] + 1
             self.put('revision', revision)
+            if cycle['value'].get('suspended_cycle_id'):
+                self.rebase_waiting_cycle(cycle['value']['suspended_cycle_id'], cycle['actor_id'], state['revision'])
             self.db.execute('UPDATE world_cycles SET status=?,phase=?,revision=?,value=? WHERE id=?',
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if reviewed:
                 self.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',
-                                (cycle['id'], call_id, stage, 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
+                                (cycle['id'], call_id, stage, 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
             else:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
@@ -608,10 +688,24 @@ class WorldStore:
         posted = {'text': text, 'draft': True, 'surface': 'channel_draft',
                   'autonomous': True, 'source_ids': share['source_ids']}
         if share['decision'] == 'reply':
-            target = next(e for e in self.channel_context(actor)
-                          if e['id'] in share['source_ids'] and e['stage'] == 'audience')
+            target = self.reply_target(actor,share['source_ids'])
             posted.update(surface='comment_reply', reply_to=target['value']['post_id'], audience_id=target['id'])
         return posted
+
+    @locked
+    def reply_target(self, actor, source_ids):
+        """Current addressee is distinct from older comments cited as context."""
+        candidates=[]
+        for source in dict.fromkeys(source_ids):
+            row=self.db.execute("SELECT id,value FROM world_events WHERE id=? AND actor_id=? AND stage='audience'",(source,actor)).fetchone()
+            if row:
+                value=json.loads(row['value'])
+                if value['comments']:candidates.append({'id':row['id'],'value':value})
+        focus=set((self.get('channel_attention') or {}).get('focus_ids',[]))
+        if focus:candidates=[c for c in candidates if c['id'] in focus]
+        if len(candidates)!=1:
+            raise ValueError('reply needs one own current addressee; other citations are context')
+        return candidates[0]
 
     def recover_experience(self, cycle_id, after_experience='done'):
         """Explicit host review of a saved note; no action/model replay or usage rewrite."""
@@ -632,6 +726,27 @@ class WorldStore:
             self.complete(call['id'], rejected['answer'], {}, after_experience=after_experience, _reviewed_experience=True)
             return self.cycle(cycle_id)
 
+    def recover_outcome_without_actor_patch(self, cycle_id, after_outcome='experience'):
+        """Explicit host review only: retain saved observation, omit protected avatar patch.
+
+        All other validation still runs. Never called by the autonomous loop.
+        Failed call, usage and original rejected output remain untouched.
+        """
+        if after_outcome not in ('done','experience','share'):
+            raise ValueError('invalid continuation after reviewed outcome')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if self.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cycle_id,)).fetchone():return cycle
+            rejected=cycle['value'].get('rejected',{})
+            if cycle['phase']!='outcome' or cycle['status']!='blocked' or rejected.get('stage')!='outcome' or rejected.get('error_type')!='ValueError':
+                raise WorldConflict('only a rejected saved outcome can be reviewed')
+            call=self.db.execute("SELECT id FROM world_calls WHERE cycle_id=? AND stage='outcome' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('no failed outcome call to review')
+            original=rejected['answer']
+            projected={**original,'entities':[e for e in original['entities'] if e['id']!=cycle['actor_id']]}
+            self.complete(call['id'],projected,{},after_outcome=after_outcome,_reviewed_outcome=True)
+            return self.cycle(cycle_id)
+
     def recover_channel(self, cycle_id, extension=None):
         """Review exact saved output once, without model/action replay or delivery."""
         with self.lock,self.db:
@@ -650,29 +765,34 @@ class WorldStore:
                 apply=lambda committed:extension.apply('share',original,committed)
             else:
                 answer=original
-            self.complete(call['id'],answer,{},_reviewed_channel=True,extra_apply=apply)
+            self.complete(call['id'],answer,{},_reviewed_channel=True,extra_apply=apply,
+                          media_attached=bool(isinstance(original,dict) and original.get('attachment')))
             return self.cycle(cycle_id)
 
     @locked
     def personal_evidence_ids(self, actor):
-        ids = []
+        ids = [m['id'] for m in self.memories(actor)]
         for row in self.db.execute('SELECT id,actor_id,stage,value FROM world_events'):
             value = json.loads(row['value'])
+            if value.get('retracted'):continue
             if row['stage'] in ('world', 'outcome'):
                 if actor in value.get('visible_to', [row['actor_id']]):
                     ids.append(row['id'])
-            elif row['actor_id'] == actor and row['stage'] in ('choice', 'impulse', 'research', 'audience', 'experience', 'post'):
+            elif row['actor_id'] == actor and row['stage'] in ('choice', 'impulse', 'research', 'audience', 'experience', 'post', 'peer'):
                 ids.append(row['id'])
         return ids
 
     @locked
-    def public_evidence_ids(self, actor):
+    def public_evidence_ids(self, actor, at_minute=None):
         ids = []
-        for row in self.db.execute('SELECT id,actor_id,stage,value FROM world_events'):
+        for row in self.db.execute('SELECT id,actor_id,stage,minute,value FROM world_events'):
+            if at_minute is not None and row['minute'] > at_minute:
+                continue
             value = json.loads(row['value'])
+            if value.get('retracted'):continue
             if row['stage'] in ('world', 'outcome') and actor in value.get('visible_to', [row['actor_id']]):
                 ids.append(row['id'])
-            elif row['actor_id'] == actor and row['stage'] in ('research', 'audience', 'post'):
+            elif row['actor_id'] == actor and row['stage'] in ('research', 'audience', 'post', 'peer'):
                 ids.append(row['id'])
         return ids
 
@@ -702,13 +822,15 @@ class WorldStore:
             self.db.execute("UPDATE world_cycles SET status='ready',phase='speech',revision=?,value=? WHERE id=?",
                             (self.get('revision'), json.dumps(cycle['value'], ensure_ascii=False), cycle_id))
 
-    def fail(self, call_id, usage=None, rejected=None, error_type='Error'):
+    def fail(self, call_id, usage=None, rejected=None, error_type='Error', diagnostics=None):
         with self.lock, self.db:
             row = self.db.execute('SELECT cycle_id FROM world_calls WHERE id=?', (call_id,)).fetchone()
             self.db.execute("UPDATE world_calls SET status='failed',error='stage failed; review required, no automatic retry',usage=? WHERE id=? AND status='started'",
                             (json.dumps(usage or {}), call_id))
             if row:
                 cycle = self.cycle(row[0])
+                cycle['value']['failure'] = {'stage': cycle['phase'], 'error_type': error_type,
+                                            'diagnostics': diagnostics or {}}
                 if rejected is not None:
                     cycle['value']['rejected'] = {'stage': cycle['phase'], 'answer': rejected,
                                                   'error_type': error_type}
@@ -755,6 +877,7 @@ class WorldStore:
                 'SELECT * FROM world_undertakings ORDER BY rowid DESC LIMIT 24')]
             state['concerns'] = [{**json.loads(r['value']), 'actor_id': r['actor_id']} for r in self.db.execute(
                 'SELECT * FROM world_concerns ORDER BY rowid DESC LIMIT 32')]
+            state['memories'] = [{**m, 'actor_id': a['id']} for a in state['actors'] for m in self.memories(a['id'])]
             state['director_signals'] = [s for a in state['actors'] if (s := self.director_signal(a['id']))]
             state['unfinished_attempts'] = [{**attempt, 'actor_id': a['id']}
                                             for a in state['actors']
@@ -766,7 +889,7 @@ class WorldSession:
     """One recorded stage per step; optional personal life, research and drafts."""
     def __init__(self, store, backend, actor_prompts, speech_contract, max_calls=24, autonomous_posts=False, free_intentions=False,
                  personal_life=False, research_enabled=False, research_backend=None, lossless_intentions=False,
-                 simulated_audience=False, active_world=False, direct_channel=False, continuous=False, external_channel=False, cancel=None, channel_extension=None):
+                 simulated_audience=False, active_world=False, direct_channel=False, continuous=False, external_channel=False, cancel=None, channel_extension=None, timeline=None, lively_world=False):
         if not continuous and (type(max_calls) is not int or not 1 <= max_calls <= 200):
             raise ValueError('invalid world laboratory call limit')
         self.store, self.backend = store, backend
@@ -775,6 +898,7 @@ class WorldSession:
         self.external_channel = external_channel
         self.cancel = cancel
         self.channel_extension = channel_extension
+        self.timeline = timeline
         self.autonomous_posts = autonomous_posts
         self.free_intentions = free_intentions
         self.personal_life = personal_life
@@ -783,11 +907,14 @@ class WorldSession:
         self.lossless_intentions = lossless_intentions
         self.simulated_audience = simulated_audience
         self.active_world = active_world
+        self.lively_world = lively_world
         self.direct_channel = direct_channel
         if direct_channel and not autonomous_posts:
             raise ValueError('direct channel requires voluntary channel decisions')
         if active_world and not personal_life:
             raise ValueError('active world requires personal continuity')
+        if lively_world and not active_world:
+            raise ValueError('incident direction requires an active world')
         if simulated_audience and not personal_life:
             raise ValueError('reader simulation requires personal life')
         if lossless_intentions and not (personal_life or free_intentions):
@@ -798,6 +925,10 @@ class WorldSession:
             cycle = self.store.prepare(actor_id, minutes, draw=draw, personal_life=self.personal_life,
                                        lossless_intentions=self.lossless_intentions,allow_zero=self.external_channel)
             cycle['value']['direct_channel'] = self.direct_channel
+            cycle['value']['lively_world'] = self.lively_world
+            if self.lively_world:
+                from .world_dynamics import planning_directions
+                cycle['value']['brief'].update(lively_world=True,plan_directions=planning_directions(self.store.state(),actor_id))
             self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',
                                   (json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if self.active_world:
@@ -822,6 +953,7 @@ class WorldSession:
         call_id, cycle = self.store.claim(cycle_id, self.max_calls)
         answer = None
         social_answer = None
+        usage = None
         active_backend = self.backend
         try:
             actor = cycle['actor_id']
@@ -829,7 +961,7 @@ class WorldSession:
             active_backend = self.research_backend if stage == 'research' else self.backend
             if actor not in self.actor_prompts:
                 raise ValueError('actor has no configured personality')
-            state = self.store.state()
+            state = self.store.state_for_cycle(cycle, self.store.state())
             results = cycle['value']['results']
             personal = cycle['value'].get('personal_life', False)
             if personal != self.personal_life:
@@ -838,6 +970,9 @@ class WorldSession:
             if lossless != self.lossless_intentions:
                 raise WorldConflict('intent transfer mode changed during the episode')
             active = cycle['value'].get('active_world', False)
+            lively = cycle['value'].get('lively_world', False)
+            if lively != self.lively_world:
+                raise WorldConflict('incident direction changed during the episode')
             direct = cycle['value'].get('direct_channel', False)
             if direct != self.direct_channel:
                 raise WorldConflict('channel mode changed during the episode')
@@ -850,6 +985,10 @@ class WorldSession:
                 world = copy.deepcopy(state)
                 world['history'] = [e for e in world['history'] if e['stage'] in ('world', 'outcome')]
                 payload = {'world': world, 'clock': clock}
+                if lively:
+                    from .world_dynamics import HORIZON as INCIDENT_HORIZON
+                    instruction=INCIDENT_HORIZON
+                    payload['plan_directions']=cycle['value']['brief']['plan_directions']
             elif stage == 'audience':
                 if not self.simulated_audience:
                     raise WorldConflict('reader simulation disabled during pending delivery')
@@ -872,6 +1011,11 @@ class WorldSession:
                 action = {k: action[k] for k in ('kind', 'action', 'entity_ids')} if action else None
                 payload = {'world': world, 'director': cycle['value']['brief'],
                            'current_event': results.get('world'), 'chosen_action': action, 'clock': clock}
+                if lively:
+                    from .world_dynamics import WORLD as INCIDENT_WORLD,OUTCOME as INCIDENT_OUTCOME,resident_interests,recent_mechanisms
+                    instruction+='\n'+(INCIDENT_WORLD if stage=='world' else INCIDENT_OUTCOME)
+                    payload['scene_dynamics']={'resident_interests':resident_interests(state,actor),
+                                               'recent_mechanisms':recent_mechanisms(state,actor)}
                 if self.simulated_audience:
                     payload['channel_context'] = self.store.channel_context(actor)
                 if stage == 'world' and personal and state['settings']['director_empathy']:
@@ -923,6 +1067,9 @@ class WorldSession:
                            'moment': results.get('world', {}).get('observation'),
                            'outcome': results.get('outcome', {}).get('observation'),
                            'request': cycle['value'].get('speech_request'), 'clock': clock}
+                if cycle['value'].get('suspended_cycle_id'):
+                    original = self.store.cycle(cycle['value']['suspended_cycle_id'])
+                    payload['ongoing_action'] = original['value']['results']['choice']['action']
                 if stage == 'experience':
                     payload['attempt'] = results['choice']
                 if stage == 'share':
@@ -948,7 +1095,13 @@ class WorldSession:
                     spoken = [json.loads(r[0])['text'] for r in rows
                               if json.loads(r[1]).get('speech_request', {}).get('surface') == surface][:4]
                     payload['recent_spoken'] = list(reversed(spoken))
-            pace=(self.store.get('life_controls') or {}).get('episode_minutes') if self.external_channel else None
+            if cycle['value'].get('suspended_cycle_id'):
+                instruction += '\nТы ненадолго заглянул в Telegram во время начатого дела. ongoing_action — что начал делать, а не готовый результат. Дело продолжается; итог ещё не наступил и тебе неизвестен. По attention.purpose можешь выбрать собственную запись или ответ читателю; можно и промолчать. Нового физического действия здесь нет. Не объявляй начатое дело законченным.'
+            if self.timeline:
+                payload = self.timeline.enrich(stage, payload, cycle)
+                if stage == 'outcome':
+                    instruction += '\n'+self.timeline.outcome_instruction
+            pace=(self.store.actor_get(actor, 'life_controls') or {}).get('episode_minutes') if self.external_channel else None
             if pace and (stage in ('impulse','outcome') or stage=='choice' and 'impulse' not in results):
                 payload['episode_pace']={'target_minutes':pace,'soft_target':True}
                 instruction+='\nepisode_pace — мягкий ориентир размера одного жизненного эпизода, не таймер поста и не ускорение часов. '
@@ -957,6 +1110,12 @@ class WorldSession:
                 else:
                     instruction+='Чаще выбирай посильные законченные попытки примерно такого масштаба. Большая затея может продолжаться несколькими самостоятельными шагами с сохранённым намерением; не теряй её между ними. Долгое занятие тоже допустимо, когда именно его хочется. Не мельчи ради количества и не объявляй читателям служебный лимит.'
             output_role = 'intent' if stage == 'choice' and lossless else 'channel' if stage == 'share' and direct else stage
+            if self.timeline and stage == 'choice':
+                output_role = 'timed_intent' if lossless else 'timed_choice'
+                instruction += '\n'+self.timeline.choice_instruction
+            if stage in ('impulse','choice','experience','share','post','speech'):
+                from .role_boundary import ROLE_RULES
+                instruction+='\n'+ROLE_RULES
             social_role=self.channel_extension is not None and stage in ('share','experience')
             if social_role:
                 from .channel_social import LIVE_INSTRUCTIONS
@@ -968,11 +1127,23 @@ class WorldSession:
                     instruction+='\nintent_updates отмечает судьбу твоих собственных незаконченных намерений из life.own_intentions. Выполнение дела требует подтверждённого outcome; реплика о планах им не является. Можно отказаться от затеи, не подменяя это выполнением.'
                     output_role='live_experience'
                     payload=self.channel_extension.with_source_ids(payload,actor)
+            recall=getattr(self.channel_extension,'recall',None)
+            if recall and stage in ('impulse','experience'):
+                query='\n'.join(str(payload.get(k) or '') for k in ('moment','outcome','attempt'))
+                payload['recalled_memories']=recall.search(actor,query[:3000],at_minute=payload['life']['minute'])
+                payload=self.channel_extension.with_source_ids(payload,actor)
             self.store.save_input(cycle_id, payload)
             answer, usage = active_backend.generate(output_role, instruction, payload, **({'cancel': self.cancel} if self.cancel is not None else {}))
             social_answer=answer if social_role else None
+            timing = None
+            if self.timeline and stage == 'choice':
+                answer, timing = self.timeline.extract(answer, payload, cycle)
             if social_role:
                 answer=self.channel_extension.validate(stage,answer,payload,actor)
+                if stage=='share':
+                    social_answer=self.channel_extension.review_draft(cycle_id,social_answer,active_backend,instruction,payload,actor,
+                        cancel=self.cancel,limit=self.max_calls)
+                    answer=self.channel_extension.validate(stage,social_answer,payload,actor)
             if stage == 'choice' and lossless:
                 from .world_intent import adapt
                 answer = adapt(answer, results['impulse'])
@@ -981,7 +1152,8 @@ class WorldSession:
                     raise ValueError('intent adapter must quote the original attempted action')
             if stage == 'choice' and answer.get('kind') == 'research' and not self.research_enabled:
                 raise ValueError('search is not enabled')
-            end_minute = state['minute'] + answer['elapsed_minutes'] if stage == 'outcome' else state['minute']
+            end_minute = (state['minute'] + answer['elapsed_minutes'] if stage == 'outcome' and
+                          not cycle['value'].get('shared_window') else state['minute'])
             share_stage = 'share' if self.autonomous_posts and self.store.posting_allowed(actor, end_minute) else 'done'
             next_stage = 'experience' if personal else share_stage
             after_world = ('research' if results.get('choice', {}).get('kind') == 'research' else 'outcome') if personal else ('impulse' if self.free_intentions else 'choice')
@@ -990,12 +1162,19 @@ class WorldSession:
             after_choice = 'outcome'
             if stage == 'choice':
                 after_choice = 'world' if personal and not active else 'research' if answer.get('kind') == 'research' else 'outcome'
+            def apply_extensions(committed):
+                if social_role:
+                    self.channel_extension.apply(stage, social_answer, committed)
+                if self.timeline:
+                    self.timeline.apply(stage, timing, committed)
             self.store.complete(call_id, answer, usage, after_outcome=next_stage,
                                 after_world=after_world, after_choice=after_choice, after_experience=share_stage,
                                 after_audience=cycle['value'].get('entry_phase', 'impulse'),
-                                extra_apply=(lambda committed:self.channel_extension.apply(stage,social_answer,committed)) if social_role else None)
+                                extra_apply=apply_extensions if social_role or self.timeline else None,
+                                media_attached=bool(social_role and stage=='share' and social_answer.get('attachment')))
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = social_answer if social_answer is not None else answer if answer is not None else getattr(active_backend, 'last_output', None)
-            self.store.fail(call_id, getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__)
+            self.store.fail(call_id, usage if usage is not None else getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__,
+                            getattr(active_backend, 'last_diagnostics', {}))
             raise

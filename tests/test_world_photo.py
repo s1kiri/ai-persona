@@ -53,6 +53,9 @@ class PhotoTests(unittest.TestCase):
         self.assertFalse(job['generated'])
         self.assertFalse(job['published'])
         self.assertEqual(self.context, before)
+        self.assertIn('several-years-old ordinary smartphone',job['prompt'])
+        self.assertIn('supported by the recorded observation',job['prompt'])
+        self.assertNotIn('keep faces,',job['prompt'])
 
     def test_invented_foreign_or_private_sources_cannot_render(self):
         for field, value in (('subject_ids', ['hidden']), ('source_ids', ['diary']),

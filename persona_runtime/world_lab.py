@@ -14,13 +14,18 @@ import time
 
 from .daemon import same_secret
 from .world import WorldStore, WorldSession, WorldConflict
+from .telegram import TelegramError
+from .local_http import local_request, local_navigation
 
 ASSETS = Path(__file__).parent / 'world_panel'
 
 
 class Laboratory:
-    def __init__(self, store, session=None):
+    def __init__(self, store, session=None, preparer=None):
         self.store, self.session = store, session
+        self.preparer = preparer
+        profile = store.get('host_profile') or {'actor_id': 'garik', 'name': 'Гарик'}
+        self.actor_id, self.actor_name = profile['actor_id'], profile['name']
         self.cookie, self.csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         self.busy = False
         self.failure = None
@@ -32,11 +37,13 @@ class Laboratory:
     def state(self):
         value = self.store.monitor()
         value.update(csrf=self.csrf, model_enabled=self.session is not None,
+                     actor_id=self.actor_id, actor_name=self.actor_name,
                      pid=os.getpid(),
                      busy=self.busy, failure=self.failure or self.store.get('review_notice'),
                      max_calls=self.session.max_calls if self.session else 24,
                      mode='model-review' if self.session else 'preparation',
-                     model=getattr(self.session.backend, 'model', None) if self.session else None)
+                     model=getattr(self.session.backend, 'model', None) if self.session else None,
+                     reasoning_effort=getattr(self.session.backend, 'reasoning_effort', None) if self.session else None)
         value['autonomous_posts'] = bool(self.session and self.session.autonomous_posts)
         value['direct_channel'] = bool(self.session.direct_channel if self.session else
                                        value['cycles'] and value['cycles'][0]['value'].get('direct_channel'))
@@ -49,12 +56,24 @@ class Laboratory:
         value['active_world'] = bool(self.session.active_world if self.session else
                                     value['cycles'] and value['cycles'][0]['value'].get('active_world'))
         value['night'] = self.store.get('night')
-        value['channel_life'] = self.store.get('channel_life')
+        value['channel_life'] = self.store.actor_get(self.actor_id, 'channel_life')
+        value['telegram_url'] = getattr(self, 'telegram_url', None)
+        from .panel_settings import character_settings
+        value['character_settings'] = character_settings(self)
+        if getattr(self, 'life', None):
+            value['live_status'] = {**self.life.get('life_status'),
+                                    'phase': self.life.current_phase,
+                                    'activity': self.life.activity(),
+                                    'can_skip_failed_expression': self.life.failed_expression() is not None}
+            value['failure'] = value['failure'] or value['live_status'].get('error')
         return value
 
     def prepare(self, actor_id, minutes):
-        if self.session and (self.session.personal_life or self.session.lossless_intentions):
-            return self.session.prepare(actor_id, minutes)
+        if self.store.get('host_profile') and actor_id != self.actor_id:
+            raise WorldConflict('this host is bound to a different actor')
+        runner = self.session or self.preparer
+        if runner and (runner.personal_life or runner.lossless_intentions):
+            return runner.prepare(actor_id, minutes)
         return self.store.prepare(actor_id, minutes)
 
     def step(self, cycle_id, phase, revision):
@@ -98,8 +117,7 @@ def handler(lab):
                 pass
 
         def origin_ok(self):
-            host = '127.0.0.1:' + str(self.server.server_port)
-            return self.headers.get('Host') == host and self.headers.get('Origin', 'http://' + host) == 'http://' + host and self.headers.get('Sec-Fetch-Site', 'none') not in ('cross-site', 'same-site')
+            return local_request(self)
 
         def authenticated(self):
             try:
@@ -109,11 +127,13 @@ def handler(lab):
                 return False
 
         def do_GET(self):
-            if not self.origin_ok():
+            if not self.origin_ok() and not local_navigation(self):
                 return self.reply(403, {'error': 'origin rejected'})
             assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                       '/world.css': ('world.css', 'text/css; charset=utf-8'),
                       '/world.js': ('world.js', 'text/javascript; charset=utf-8')}
+            if self.path == '/character-settings.js':
+                return self.reply(200, (ASSETS.parent / 'character_settings.js').read_text(), 'text/javascript; charset=utf-8')
             if self.path in assets:
                 file, mime = assets[self.path]
                 return self.reply(200, (ASSETS / file).read_text(), mime, self.path == '/')
@@ -130,19 +150,33 @@ def handler(lab):
                 if self.headers.get('Content-Type') != 'application/json':
                     raise ValueError('JSON required')
                 size = int(self.headers.get('Content-Length', 0))
-                if not 0 < size <= 16000:
+                if not 0 < size <= (128000 if self.path == '/api/character-profile' else 16000):
                     raise ValueError('invalid request size')
                 value = json.loads(self.rfile.read(size))
                 if not isinstance(value, dict):
                     raise ValueError('object required')
-                if lab.store.get('channel_life') and self.path not in ('/api/settings', '/api/action'):
+                if lab.store.actor_get(lab.actor_id, 'channel_life') and self.path not in ('/api/settings', '/api/action', '/api/character-settings', '/api/character-profile'):
                     raise WorldConflict('live channel owns its cycle; use pause and settings')
                 if self.path == '/api/settings' and set(value) == {'settings', 'revision'}:
                     lab.store.set_settings(value['settings'], value['revision'])
+                elif self.path == '/api/character-settings' and set(value) == {'actor_id', 'controls'}:
+                    if value['actor_id'] != lab.actor_id or not getattr(lab, 'life', None):
+                        raise WorldConflict('this character is not connected to this host')
+                    lab.life.configure(value['controls'])
+                elif self.path == '/api/character-profile' and set(value) == {'actor_id','profile'}:
+                    if value['actor_id'] != lab.actor_id or not getattr(lab,'profile',None) or not getattr(lab,'life',None):
+                        raise WorldConflict('this character has no editable live profile')
+                    from .profile_editor import edit_profile
+                    lab.profile = edit_profile(lab.store,lab.profile,value['profile'],[lab.life.connection],lives=[lab.life])
                 elif self.path == '/api/prepare' and set(value) == {'actor_id', 'minutes'}:
                     lab.prepare(value['actor_id'], value['minutes'])
                 elif self.path == '/api/action' and set(value) == {'paused'}:
-                    lab.store.pause(value['paused'])
+                    if lab.store.actor_get(lab.actor_id, 'channel_life'):
+                        if not getattr(lab, 'life', None) or type(value['paused']) is not bool:
+                            raise WorldConflict('live channel controls are unavailable')
+                        lab.life.action(not value['paused'])
+                    else:
+                        lab.store.pause(value['paused'])
                 elif self.path == '/api/step' and set(value) == {'cycle_id', 'phase', 'revision'}:
                     lab.step(value['cycle_id'], value['phase'], value['revision'])
                 elif self.path == '/api/abandon' and set(value) == {'cycle_id'}:
@@ -157,6 +191,8 @@ def handler(lab):
                 else:
                     return self.reply(404, {'error': 'unknown action'})
                 return self.reply(200, lab.state())
+            except TelegramError as error:
+                return self.reply(409, {'error': str(error)})
             except WorldConflict:
                 return self.reply(409, {'error': 'Состояние изменилось или действие сейчас недоступно. Обнови панель.'})
             except (ValueError, TypeError, KeyError):
@@ -169,7 +205,9 @@ def main(argv=None):
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--port', type=int, default=8766)
     parser.add_argument('--live', action='store_true', help='explicitly enable manual model-review steps')
+    parser.add_argument('--allow-direct', action='store_true', help='allow direct Codex connection when no proxy is configured; never fall back after proxy failure')
     parser.add_argument('--persona', type=Path)
+    parser.add_argument('--profile', type=Path, help='character manifest, including canon, environment and private seed memory')
     parser.add_argument('--speech-contract', type=Path)
     parser.add_argument('--max-calls', type=int, default=24)
     parser.add_argument('--background', action='store_true', help='detach the laboratory from the terminal and wait for readiness')
@@ -182,13 +220,18 @@ def main(argv=None):
     parser.add_argument('--simulated-audience', action='store_true', help='deliver explicitly fictional local reader comments before the next free choice')
     parser.add_argument('--active-world', action='store_true', help='plan resident openings and observe the world before choosing')
     args = parser.parse_args(argv)
+    if args.profile and (args.persona or args.speech_contract):
+        parser.error('--profile cannot be combined with legacy persona/contract overrides')
+    from .character_profile import CharacterProfile
+    from .profile_host import open_world, effective_profile
+    profile = effective_profile(args.data_dir, CharacterProfile.load(args.profile)) if args.profile else None
     if not 0 <= args.port <= 65535 or not 1 <= args.max_calls <= 200:
         parser.error('invalid port or call limit')
     root = Path(__file__).resolve().parent.parent
     destination = args.data_dir.expanduser().resolve()
     if destination == root or (root in destination.parents and not any(p == destination or p in destination.parents for p in (root / '.local', root / '.runtime'))):
         parser.error('repository data must live under .local/ or .runtime/')
-    if args.live and (not args.persona or not args.speech_contract):
+    if args.live and not profile and (not args.persona or not args.speech_contract):
         parser.error('live review requires explicit persona and speech contract files')
     if args.lossless_intentions and not (args.personal_life or args.free_intentions):
         parser.error('lossless transfer requires written intentions')
@@ -203,7 +246,13 @@ def main(argv=None):
         command = [sys.executable, '-m', 'persona_runtime.world_lab', '--data-dir', str(destination),
                    '--port', str(args.port), '--max-calls', str(args.max_calls)]
         if args.live:
-            command += ['--live', '--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
+            command += ['--live']
+            if not profile:
+                command += ['--persona', str(args.persona.resolve()), '--speech-contract', str(args.speech_contract.resolve())]
+        if profile:
+            command += ['--profile', str(args.profile.resolve())]
+        if args.allow_direct:
+            command += ['--allow-direct']
         if args.autonomous_posts:
             command += ['--autonomous-posts']
         if args.direct_channel:
@@ -250,7 +299,7 @@ def main(argv=None):
             process.terminate()
             process.wait(timeout=5)
             raise
-    store = WorldStore(destination)
+    store = open_world(destination, profile)
     backend = None
     research_backend = None
     transport_owner = None
@@ -260,23 +309,34 @@ def main(argv=None):
         if args.live:
             from .proxy import status, SharedTransport
             from .world_backend import WorldBackend
-            if not status()['enabled']:
+            if not status()['enabled'] and not args.allow_direct:
                 raise ValueError('configured proxy required for model review')
-            persona, contract = args.persona.read_text(), args.speech_contract.read_text()
+            persona, contract = ((profile.persona, profile.speech_contract) if profile else
+                                 (args.persona.read_text(), args.speech_contract.read_text()))
             if not persona.strip() or not contract.strip():
                 raise ValueError('empty personality/contract')
             transport_owner = SharedTransport()
-            backend = WorldBackend(destination / 'transport', transport_factory=transport_owner.borrow)
+            model_settings = profile.runtime if profile else {}
+            backend = WorldBackend(destination / 'transport', transport_factory=transport_owner.borrow, **model_settings)
             if args.research:
                 research_backend = WorldBackend(destination / 'research-transport', research_host=True,
-                                                transport_factory=transport_owner.borrow, max_known_tokens=50000)
-            session = WorldSession(store, backend, {'garik': persona}, contract, args.max_calls,
+                                                transport_factory=transport_owner.borrow, max_known_tokens=50000, **model_settings)
+            session = WorldSession(store, backend, {profile.actor_id if profile else 'garik': persona}, contract, args.max_calls,
                                    autonomous_posts=args.autonomous_posts, free_intentions=args.free_intentions,
                                    personal_life=args.personal_life, research_enabled=args.research,
                                    research_backend=research_backend, lossless_intentions=args.lossless_intentions,
                                    simulated_audience=args.simulated_audience, active_world=args.active_world,
                                    direct_channel=args.direct_channel)
-        lab = Laboratory(store, session)
+        preparer = None
+        if profile and session is None:
+            preparer = WorldSession(store, None, {profile.actor_id: profile.persona}, profile.speech_contract,
+                                    args.max_calls, autonomous_posts=args.autonomous_posts,
+                                    free_intentions=args.free_intentions, personal_life=args.personal_life,
+                                    research_enabled=args.research, lossless_intentions=args.lossless_intentions,
+                                    simulated_audience=args.simulated_audience, active_world=args.active_world,
+                                    direct_channel=args.direct_channel)
+        lab = Laboratory(store, session, preparer=preparer)
+        lab.profile = profile
         stopping = threading.Event()
         night_worker = threading.Thread(target=lab.night.loop, args=(stopping,), daemon=True)
         night_worker.start()

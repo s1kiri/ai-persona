@@ -108,11 +108,13 @@ class CodexCancelled(CodexError):
 
 class CodexBackend:
     supports_control = True
-    def __init__(self, binary=None, model=None, timeout=180):
+    def __init__(self, binary=None, model=None, timeout=180, reasoning_effort='medium'):
         bundled = Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')
         self.binary = binary or shutil.which('codex') or (str(bundled) if bundled.is_file() else 'codex')
         self.model, self.timeout = model or 'gpt-6.1-sol', timeout
-        self.reasoning_effort='medium'
+        if reasoning_effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+            raise ValueError('invalid reasoning effort')
+        self.reasoning_effort=reasoning_effort
 
     @contextmanager
     def connection(self):

@@ -13,6 +13,14 @@ function setup(){
  ctx.sample=sample;vm.runInContext('render(sample)',ctx);
  return {ctx,sample,requests,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
 }
+test('Arkady Telegram panel uses own name, memory and world port',()=>{
+ const t=setup();t.run('render({...sample,world_url:"http://127.0.0.1:8866",life:{name:"Аркадий",paused:true,controls:{wake_minutes:15,photos:true},memories:[{text:"<b>origin</b>"}],concerns:[{text:"Продолжить дело.",next_hint:"Проверить запись."}]}})');
+ assert.equal(t.el('character-name').textContent,'Аркадий');
+ assert.match(t.el('intro').textContent,/Аркадий/);
+ assert.equal(t.el('world-link').href,'http://127.0.0.1:8866/#posts');
+ assert.equal(t.el('origin-memory').children[0].textContent,'<b>origin</b>');
+ assert.equal(t.el('origin-section').hidden,false);
+});
 test('token is cleared before sending and is not reinserted after a failed request',async()=>{
  const t=setup();t.el('token').value='synthetic-sensitive-value';
  const promise=t.el('token-form').handlers.submit({preventDefault(){}});
@@ -89,4 +97,30 @@ test('sharing appetite is independent from episode length and never defines a po
  const promise=t.el('life-form').handlers.submit({preventDefault(){}});const body=JSON.parse(t.requests[0].options.body);
  assert.equal(body.sharing_appetite,80);assert.equal(body.episode_minutes,15);assert.equal(body.post_every,undefined);
  t.requests[0].resolve({...t.sample,life:t.ctx.live});await promise;
+});
+test('physical wait explains its deadline and displays action text literally',()=>{
+ const t=setup();t.ctx.live={paused:false,controls:{wake_minutes:5,photos:true},world_calls:41,phase:'living',
+  activity:{action:'Разбирать <b>приёмник</b>.',remaining_minutes:17,until:1792150800}};
+ t.run('render({...sample,life:live})');
+ assert.equal(t.el('life-activity').hidden,false);
+ assert.match(t.el('life-activity').textContent,/<b>приёмник<\/b>/);
+ assert.match(t.el('life-activity').textContent,/17 мин/);
+ t.run('render({...sample,life:{...live,activity:null}})');
+ assert.equal(t.el('life-activity').hidden,true);
+});
+test('empty failed speech requires explicit skip and does not auto-resume or send',async()=>{
+ const t=setup();t.ctx.live={paused:true,error:'Модель не завершила реплику',can_skip_failed_expression:true,
+  controls:{wake_minutes:5,photos:true},world_calls:43};
+ t.run('render({...sample,life:live})');
+ assert.equal(t.el('life-repair').hidden,false);
+ assert.equal(t.el('life-action').disabled,true);
+ const promise=t.el('skip-expression').handlers.click();
+ assert.equal(t.requests[0].path,'/api/life/skip-expression');
+ assert.equal(JSON.parse(t.requests[0].options.body).confirmation,'skip_without_retry');
+ t.requests[0].resolve({...t.sample,life:{...t.ctx.live,error:null,can_skip_failed_expression:false}});
+ await promise;
+ assert.equal(t.requests.length,1);
+ assert.equal(t.el('life-repair').hidden,true);
+ assert.equal(t.el('life-action').disabled,false);
+ assert.match(t.el('life-action').textContent,/Продолжить/);
 });

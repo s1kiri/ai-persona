@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "data_dir": ".local/shared-life",
+  "port": 8886,
+  "actors": [
+    {
+      "profile": "characters/arkady/character.json",
+      "telegram_dir": ".local/shared-telegram-arkady",
+      "setup_port": 8887,
+      "initial_place": "arkady_garage"
+    },
+    {
+      "profile": "characters/garik/character.json",
+      "telegram_dir": ".local/shared-telegram-garik",
+      "setup_port": 8888,
+      "initial_place": "home"
+    }
+  ],
+  "shared_places": ["arkady_garage_yard"]
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "arkady",
+  "name": "Аркадий Кедров",
+  "persona": "persona.md",
+  "speech_contract": "speech-contract.md",
+  "canon": "canon.md",
+  "environment": "environment.json",
+  "memory": "memory.json",
+  "persona_sections": [
+    "life.md",
+    "voice.md",
+    "examples.md"
+  ],
+  "runtime": {
+    "model": "gpt-6-luna",
+    "reasoning_effort": "medium"
+  }
+}

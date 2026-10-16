@@ -25,7 +25,7 @@ def validate_horizon(value, state):
 
 
 def pending_hooks(state, actor, available=False):
-    return [h for h in state.get('hooks', []) if actor in h['actor_ids'] and actor not in h['exposed_to']
+    return [h for h in state.get('hooks', []) if not h.get('superseded') and actor in h['actor_ids'] and actor not in h['exposed_to']
             and h['closes_minute'] >= state['minute']
             and (not available or h['opens_minute'] <= state['minute'])]
 
@@ -39,6 +39,9 @@ def select_hook(state, actor, brief):
     # No knowledge is granted by selection; the world must expose it in a
     # validated observation. Remaining plans wait for a later event slot.
     known = {e['id'] for e in state['entities'] if actor in e['known_to']}
+    if brief.get('lively_world'):
+        from .world_dynamics import selection_rank
+        return min(candidates,key=lambda h:selection_rank(h,state,actor)) if candidates else None
     return min(candidates, key=lambda h: (bool(set(h['anchor_ids']) <= known), h['opens_minute'])) if candidates else None
 
 

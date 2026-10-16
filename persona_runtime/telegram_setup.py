@@ -13,6 +13,7 @@ import threading
 import time
 
 from .daemon import same_secret
+from .local_http import local_request, local_navigation
 from .telegram import TelegramConnection, TelegramError, private_json
 
 ASSETS = Path(__file__).parent / 'telegram_panel'
@@ -21,15 +22,23 @@ TEST_REPLY = 'Комментарий дошёл, ответ прикреплён
 
 
 class Setup:
-    def __init__(self, connection, life=None):
+    def __init__(self, connection, life=None, profile=None):
         self.connection = connection
         self.life = life
+        self.actor_id = life.actor_id if life else profile.actor_id if profile else 'garik'
+        self.name = life.name if life else profile.name if profile else 'Гарик'
+        self.test_post = (TEST_POST if self.actor_id == 'garik' else
+                          'Проверка подключения: ' + self.name + '. Напиши комментарий под этим постом. '
+                          'Это технический тест, не самостоятельный пост персонажа.')
+        self.test_reply = (TEST_REPLY if self.actor_id == 'garik' else
+                           'Комментарий дошёл, ответ прикреплён к нему. Это техническая проверка связи; персонаж пока на паузе.')
         self.cookie, self.csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
 
     def state(self):
-        value = {**self.connection.state(), 'csrf': self.csrf}
+        value = {**self.connection.state(), 'csrf': self.csrf, 'actor_id': self.actor_id, 'actor_name': self.name}
         if self.life:
             value.update(life=self.life.state(), character_enabled=True,
+                         world_url=getattr(self.life.lab, 'world_url', None),
                          autopublish=not self.life.store.get('paused'))
         return value
 
@@ -57,10 +66,7 @@ def handler(setup):
                 pass
 
         def origin_ok(self):
-            origin = 'http://127.0.0.1:' + str(self.server.server_port)
-            return (self.headers.get('Host') == origin[7:] and
-                    self.headers.get('Origin', origin) == origin and
-                    self.headers.get('Sec-Fetch-Site', 'none') not in ('cross-site', 'same-site'))
+            return local_request(self)
 
         def authenticated(self):
             try:
@@ -70,7 +76,7 @@ def handler(setup):
                 return False
 
         def do_GET(self):
-            if not self.origin_ok():
+            if not self.origin_ok() and not local_navigation(self):
                 return self.reply(403, {'error': 'Локальное подключение обязательно.'})
             assets = {'/': ('index.html', 'text/html; charset=utf-8'),
                       '/telegram.js': ('telegram.js', 'text/javascript; charset=utf-8'),
@@ -98,6 +104,8 @@ def handler(setup):
                     setup.life.configure(value)
                 elif self.path == '/api/life/action' and setup.life and set(value) == {'running'}:
                     setup.life.action(value['running'])
+                elif self.path == '/api/life/skip-expression' and setup.life and value == {'confirmation': 'skip_without_retry'}:
+                    setup.life.skip_failed_expression()
                 elif self.path == '/api/life/confirm-absent' and setup.life and set(value) == {'post_id', 'confirmation'} and value['confirmation'] == 'owner_checked_absent':
                     setup.life.confirm_absent(value['post_id'])
                 elif setup.life:
@@ -107,9 +115,9 @@ def handler(setup):
                 elif self.path == '/api/bind' and set(value) == {'channel'}:
                     setup.connection.bind(value['channel'])
                 elif self.path == '/api/test-post' and value == {}:
-                    setup.connection.send('setup-text-v1', TEST_POST)
+                    setup.connection.send('setup-text-v1', setup.test_post)
                 elif self.path == '/api/test-reply' and set(value) == {'comment_id'}:
-                    setup.connection.send('setup-reply-' + str(value['comment_id']), TEST_REPLY, reply_to=value['comment_id'])
+                    setup.connection.send('setup-reply-' + str(value['comment_id']), setup.test_reply, reply_to=value['comment_id'])
                 else:
                     return self.reply(404, {'error': 'Действие не найдено.'})
                 return self.reply(200, setup.state())
@@ -134,8 +142,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--port', type=int, default=8767)
+    parser.add_argument('--profile', type=Path)
     parser.add_argument('--background', action='store_true')
     args = parser.parse_args(argv)
+    from .character_profile import CharacterProfile
+    profile = CharacterProfile.load(args.profile) if args.profile else None
     root = Path(__file__).resolve().parent.parent
     destination = args.data_dir.expanduser().resolve()
     if (destination == root or
@@ -147,7 +158,10 @@ def main(argv=None):
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(destination / 'panel.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, 'a') as log:
-            process = subprocess.Popen([sys.executable, '-m', 'persona_runtime.telegram_setup', '--data-dir', str(destination), '--port', str(args.port)],
+            command = [sys.executable, '-m', 'persona_runtime.telegram_setup', '--data-dir', str(destination), '--port', str(args.port)]
+            if profile:
+                command += ['--profile', str(args.profile.resolve())]
+            process = subprocess.Popen(command,
                                        cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         from urllib.request import ProxyHandler, build_opener
         client = build_opener(ProxyHandler({}))
@@ -174,7 +188,10 @@ def main(argv=None):
     connection = TelegramConnection(destination)
     server = None
     try:
-        server = LocalServer(('127.0.0.1', args.port), handler(Setup(connection)))
+        if profile:
+            from .profile_host import claim_setup
+            claim_setup(connection, profile.actor_id)
+        server = LocalServer(('127.0.0.1', args.port), handler(Setup(connection, profile=profile)))
         private_json(destination / 'panel.json', {'pid': os.getpid(), 'port': server.server_port})
         connection.start()
         def stop(*unused):

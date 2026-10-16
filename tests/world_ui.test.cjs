@@ -13,6 +13,14 @@ function setup(){
  ctx.sample=sample;vm.runInContext('render(sample)',ctx);
  return {ctx,sample,posts,el:id=>document.getElementById(id),run:code=>vm.runInContext(code,ctx)};
 }
+test('Arkady panel shows own memory and prepares the selected actor',()=>{
+ const t=setup();t.ctx.memoryText='<script>private origin</script>';
+ t.run('render({...sample,actor_id:"arkady",actor_name:"Аркадий",memories:[{text:memoryText}]})');
+ assert.equal(t.el('character-name').textContent,'Аркадий');
+ assert.equal(t.el('origin-memory').children[0].children[1].textContent,t.ctx.memoryText);
+ t.el('minutes').value='10';t.el('prepare').handlers.click();
+ assert.equal(JSON.parse(t.posts[0].options.body).actor_id,'arkady');
+});
 test('preparation panel clearly disables model stage and updates slider labels',()=>{
  const t=setup();assert.equal(t.el('step').disabled,true);assert.match(t.el('mode').textContent,/без модели/);
  t.el('surprise').value='15';t.el('surprise').handlers.input();
@@ -87,4 +95,15 @@ test('live Telegram life shows real publication mode and disables manual cycle m
  const t=setup();t.run('render({...sample,model_enabled:true,max_calls:null,channel_life:{enabled:true},paused:false,call_count:230})');
  assert.equal(t.el('call-count').textContent,'230');assert.equal(t.el('prepare').disabled,true);
  assert.equal(t.el('night-start').disabled,true);assert.match(t.el('scope').textContent,/публикации/);
+});
+test('live error cannot be cleared by a fake unpause and links to Telegram review',()=>{
+ const t=setup();t.run('render({...sample,channel_life:{enabled:true},telegram_url:"http://127.0.0.1:8867",failure:"Модель не завершила реплику",live_status:{error:"Model failed",activity:{action:"Пить чай",remaining_minutes:12}}})');
+ assert.equal(t.el('pause').disabled,true);
+ assert.match(t.el('pause').textContent,/разобрать ошибку/);
+ assert.equal(t.el('telegram-panel').href,'http://127.0.0.1:8867');
+ assert.match(t.el('live-detail').textContent,/12 мин/);
+ assert.match(t.el('banner').textContent,/Модель/);
+ t.run('render({...sample,channel_life:{enabled:true},live_status:{error:null},failure:null})');
+ assert.equal(t.el('banner').textContent,'');
+ assert.equal(t.el('pause').disabled,false);
 });

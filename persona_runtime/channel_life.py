@@ -39,6 +39,15 @@ def controls_checked(value):
 
 def fresh_start(store, connection, now=None, environment=(), *, actor_id='garik'):
     """Seed a NEW history only. Never delete or inherit old experimental events."""
+    return _start_channel(store, connection, now, environment, actor_id=actor_id, keep_history=False)
+
+
+def activate_existing_world(store, connection, now=None, *, actor_id='garik'):
+    """Explicit promotion of an idle laboratory; retain its past without publishing drafts."""
+    return _start_channel(store, connection, now, (), actor_id=actor_id, keep_history=True)
+
+
+def _start_channel(store, connection, now, environment, *, actor_id, keep_history):
     now = time.time() if now is None else now
     binding = connection.get('binding')
     if not binding:
@@ -46,9 +55,28 @@ def fresh_start(store, connection, now=None, environment=(), *, actor_id='garik'
     with store.lock, store.db:
         if actor_id not in {a['id'] for a in store.state()['actors']}:
             raise WorldConflict('install the character profile before starting its life')
-        if store.actor_get(actor_id, 'channel_epoch') or store.db.execute('SELECT 1 FROM world_cycles').fetchone():
+        if store.actor_get(actor_id, 'channel_epoch'):
             raise WorldConflict('fresh start requires an unused world; existing history was not reset')
-        minute = datetime.fromtimestamp(now, MOSCOW).hour * 60 + datetime.fromtimestamp(now, MOSCOW).minute
+        if keep_history:
+            if not store.get('paused') or store.db.execute(
+                    "SELECT 1 FROM world_cycles WHERE status IN ('ready','running','blocked')").fetchone():
+                raise WorldConflict('promote only a paused laboratory without pending stages')
+            posts = list(store.db.execute("SELECT id,value FROM world_events WHERE stage='post'"))
+            if any(not json.loads(p['value']).get('draft') or json.loads(p['value']).get('delivery') for p in posts):
+                raise WorldConflict('laboratory promotion cannot reinterpret existing delivery history')
+            store.db.execute('''CREATE TABLE IF NOT EXISTS channel_jobs(post_id TEXT PRIMARY KEY,status TEXT NOT NULL,
+                receipts TEXT NOT NULL,photo TEXT,error TEXT)''')
+            for post in posts:
+                store.db.execute('INSERT INTO channel_jobs VALUES(?,?,?,?,?)',
+                                 (post['id'], 'local_only', '[]', None, 'Laboratory draft retained; never dispatched'))
+            store.actor_put(actor_id, 'channel_activation', {'basis': 'explicit_laboratory_promotion',
+                            'at': now, 'local_only_posts': [p['id'] for p in posts]})
+            minute = store.get('minute')
+            store.put('revision', store.get('revision') + 1)
+        else:
+            if store.db.execute('SELECT 1 FROM world_cycles').fetchone():
+                raise WorldConflict('fresh start requires an unused world; existing history was not reset')
+            minute = datetime.fromtimestamp(now, MOSCOW).hour * 60 + datetime.fromtimestamp(now, MOSCOW).minute
         store.put('minute', minute)
         store.actor_put(actor_id, 'channel_epoch', {'wall': now, 'minute': minute})
         store.actor_put(actor_id, 'channel_start', {'desire': START_DESIRE, 'basis': 'author_requested_starting_desire'})
@@ -64,8 +92,9 @@ def fresh_start(store, connection, now=None, environment=(), *, actor_id='garik'
         store.actor_put(actor_id, 'life_controls', DEFAULT_CONTROLS)
         store.actor_put(actor_id, 'life_status', {'status': 'paused', 'next_wake': now, 'last_cycle': None, 'error': None})
         store.actor_put(actor_id, 'channel_life', {'enabled': True, 'run': store.directory.name})
-        settings = {**store.get('settings'), 'events_per_hour': 1.5, 'surprise': 65,
-                    'quiet': 15, 'max_threads': 5, 'post_cooldown_minutes': 0}
+        settings = ({**store.get('settings'), 'post_cooldown_minutes': 0} if keep_history else
+                    {**store.get('settings'), 'events_per_hour': 1.5, 'surprise': 65,
+                     'quiet': 15, 'max_threads': 5, 'post_cooldown_minutes': 0})
         store.put('settings', settings)
         # Optional author-approved environment definitions, not generated episode states.
         for entity in environment:
@@ -426,7 +455,7 @@ class ChannelLife:
             uncertain=self.store.db.execute("SELECT 1 FROM channel_jobs WHERE status='unknown' UNION ALL SELECT 1 FROM channel_reaction_jobs WHERE status IN ('sending','unknown')").fetchone()
             cycles=[self.store.cycle(r[0]) for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid LIMIT 1")]
             pending=[{**dict(r),'value':json.loads(r['value'])} for r in self.store.db.execute(
-                "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status='sent') ORDER BY rowid LIMIT 1")]
+                "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY rowid LIMIT 1")]
             reactions=[dict(r) for r in self.store.db.execute("SELECT * FROM channel_reaction_jobs WHERE status='pending' ORDER BY rowid LIMIT 1")]
         if uncertain or (cycles and cycles[0]['status']=='blocked'):
             return self.block('Есть незавершённая операция. Автоматического повтора нет.')
@@ -497,7 +526,7 @@ class ChannelLife:
                 cycles = [self.store.cycle(r[0]) for r in self.store.db.execute(
                     "SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid LIMIT 1")]
                 pending = [{**dict(r), 'value': json.loads(r['value'])} for r in self.store.db.execute(
-                    "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status='sent') ORDER BY rowid LIMIT 1")]
+                    "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY rowid LIMIT 1")]
             if uncertain or (cycles and cycles[0]['status'] == 'blocked'):
                 return self.block('Есть незавершённое действие. Автоматический повтор не выполняется.')
             # Wait for the fictional action's actual elapsed time before sharing its outcome.

@@ -339,7 +339,7 @@ class WorldStore:
         recent = [{**dict(r), 'value': json.loads(r['value'])} for r in reversed(self.db.execute(
             "SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND stage IN ('post','audience') ORDER BY rowid DESC LIMIT 12",
             (actor,)).fetchall())]
-        focus=(self.get('channel_attention') or {}).get('focus_ids',[])
+        focus=(self.actor_get(actor, 'channel_attention') or {}).get('focus_ids',[])
         known={e['id'] for e in recent}
         for source in focus:
             row=self.db.execute("SELECT id,actor_id,stage,minute,value FROM world_events WHERE actor_id=? AND id=? AND stage='audience'",(actor,source)).fetchone()

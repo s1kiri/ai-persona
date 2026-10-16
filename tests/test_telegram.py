@@ -302,6 +302,12 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(diagnostic['errno'],60)
         self.assertNotIn(TOKEN,json.dumps(diagnostic))
 
+    def test_api_rejection_retains_only_known_reason_without_raw_description(self):
+        api=BotAPI(TOKEN,Opener({'ok':False,'error_code':400,'description':'Bad Request: message to be replied not found '+TOKEN}))
+        with self.assertRaises(TelegramError) as caught:api.call('sendMessage',{'chat_id':-1,'text':'Synthetic'})
+        self.assertEqual(caught.exception.transport,{'type':'telegram_response','status':400,'reason':'reply_not_found'})
+        self.assertNotIn(TOKEN,json.dumps(api.last_failure));self.assertNotIn(TOKEN,str(caught.exception))
+
 
 if __name__ == '__main__':
     unittest.main()

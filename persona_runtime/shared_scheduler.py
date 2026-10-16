@@ -20,6 +20,8 @@ class SharedChannelLife(ChannelLife):
     def state(self):
         value = super().state()
         value.update(paused=self.store.get('paused') or value['status'] != 'running', shared=True)
+        issue=self.store.db.execute("SELECT id,status,error FROM peer_jobs WHERE sender=? AND status IN ('unknown','sending') ORDER BY rowid DESC LIMIT 1",(self.actor_id,)).fetchone()
+        value['peer_delivery_issue']=dict(issue) if issue else None
         return value
 
     def action(self, running):
@@ -28,8 +30,7 @@ class SharedChannelLife(ChannelLife):
         with self.store.lock, self.store.db:
             status = self.get('life_status')
             if running:
-                unknown = self.store.db.execute("SELECT 1 FROM peer_jobs WHERE sender=? AND status IN ('unknown','sending')", (self.actor_id,)).fetchone()
-                unknown = unknown or self.store.db.execute("SELECT 1 FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? AND j.status IN ('unknown','sending')", (self.actor_id,)).fetchone()
+                unknown = self.store.db.execute("SELECT 1 FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? AND j.status IN ('unknown','sending')", (self.actor_id,)).fetchone()
                 blocked = self.store.db.execute("SELECT 1 FROM world_cycles WHERE actor_id=? AND status IN ('blocked','running')", (self.actor_id,)).fetchone()
                 if unknown or blocked or status['status'] == 'error' or self.connection.poll_blocked:
                     raise TelegramError('Сначала разберите незавершённую операцию этого персонажа.')
@@ -228,10 +229,13 @@ class SharedScheduler:
                 attempts = sum(r['job_id']==row['id'] for r in (self.store.actor_get(sender,'peer_delivery_repairs') or []))
                 key = 'peer:'+row['id']+(':review'+str(attempts) if attempts else '')
                 receipt = self.lives[sender].connection.send_peer_comment(key, value['text'], target, root_receipt['message_id'])
-            except Exception:
+            except Exception as error:
                 with self.store.lock, self.store.db:
                     self.store.db.execute("UPDATE peer_jobs SET status='unknown',error='no confirmed peer comment receipt; no replay' WHERE id=?", (row['id'],))
-                raise
+                    self.store.actor_put(sender,'peer_delivery_failure',{'job_id':row['id'],'at':self.now(),
+                        'type':type(error).__name__,'code':getattr(error,'code',None),
+                        'transport':getattr(self.lives[sender].connection.api,'last_failure',None)})
+                return True  # Freeze this lane, not the character's physical life or own channel.
         with self.store.lock, self.store.db:
             self.store.db.execute('UPDATE peer_jobs SET status=status WHERE id=?', (row['id'],))
             eid = self.store.relay(sender, recipient, kind, value['text'], source_ids=value['source_ids'],
@@ -360,7 +364,7 @@ class SharedScheduler:
                 life.sync_world_profile()
                 if life.connection.poll_blocked:
                     life.block('Приём Telegram этого героя остановлен.'); continue
-                uncertain = self.store.db.execute("SELECT 1 FROM peer_jobs WHERE sender=? AND status IN ('unknown','sending') UNION ALL SELECT 1 FROM world_cycles WHERE actor_id=? AND status='blocked'",(actor,actor)).fetchone()
+                uncertain = self.store.db.execute("SELECT 1 FROM world_cycles WHERE actor_id=? AND status='blocked'",(actor,)).fetchone()
                 uncertain = uncertain or self.store.db.execute("SELECT 1 FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? AND j.status IN ('sending','unknown')",(actor,)).fetchone()
                 if uncertain:
                     life.block('Незавершённая операция этого героя требует проверки; автоматического повтора нет.'); continue
@@ -371,7 +375,8 @@ class SharedScheduler:
                     with self.store.lock,self.store.db:
                         self.store.db.execute("UPDATE world_cycles SET status='ready',revision=? WHERE id=?", (self.store.get('revision'),cid))
                     self._run_cycle(self.store.cycle(cid)); return
-                job = self.store.db.execute("SELECT * FROM peer_jobs WHERE sender=? AND status='pending' ORDER BY rowid LIMIT 1",(actor,)).fetchone()
+                peer_blocked=self.store.db.execute("SELECT 1 FROM peer_jobs WHERE sender=? AND status IN ('unknown','sending')",(actor,)).fetchone()
+                job = None if peer_blocked else self.store.db.execute("SELECT * FROM peer_jobs WHERE sender=? AND status='pending' ORDER BY rowid LIMIT 1",(actor,)).fetchone()
                 if job and self.deliver_peer(job):
                     return
                 pending = self.store.db.execute("SELECT e.* FROM world_events e WHERE e.actor_id=? AND e.stage='post' AND e.id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY e.rowid LIMIT 1",(actor,)).fetchone()
@@ -398,7 +403,7 @@ class SharedScheduler:
                 visit = life.get('channel_visit') or {}
                 if visit.get('away_until',0)<=self.now() and life.focus():
                     life.channel_cycle();return
-                if self.now()>=(life.get('peer_next_check') or 0):
+                if not peer_blocked and self.now()>=(life.get('peer_next_check') or 0):
                     life.lab.busy=True;self.peer_turn(actor);return
                 life.current_phase='living' if waiting else 'waiting'
         except Exception as error:

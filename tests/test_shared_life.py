@@ -182,18 +182,27 @@ class SharedLifeTests(unittest.TestCase):
         life.deliver({**dict(row),'value':json.loads(row['value'])})
         self.assertEqual(self.connections['arkady'].state()['outbox'][0]['status'],'sent')
 
-    def test_unknown_peer_delivery_does_not_stop_other_actor_or_retry(self):
+    def test_unknown_peer_delivery_freezes_only_peer_lane_without_retry(self):
         post=self.root_post('arkady');self.forward('arkady',post);self.scheduler.circulate_posts()
         source=self.store.peer_context('garik')['events'][0]['id']
         self.backends['garik'].answers=[peer_answer(decision='comment',recipient_actor_id='arkady',text='Reply',post_id=post,source_ids=[source])]
         self.scheduler.peer_turn('garik');self.connections['garik'].api.fail_send=True
         self.scheduler.tick()
-        self.assertEqual(self.lives['garik'].get('life_status')['status'],'error')
+        self.assertEqual(self.lives['garik'].get('life_status')['status'],'running')
+        self.assertEqual(self.lives['garik'].state()['peer_delivery_issue']['status'],'unknown')
         self.assertFalse(self.store.get('paused'));self.assertEqual(self.lives['arkady'].get('life_status')['status'],'running')
         before=len(self.connections['garik'].api.calls)
         for _ in range(4):self.scheduler.tick()
         self.assertEqual(before,len(self.connections['garik'].api.calls))
         self.assertEqual(self.store.db.execute('SELECT status FROM peer_jobs').fetchone()[0],'unknown')
+        self.connections['garik'].api.fail_send=False
+        self.root_post('garik','Own channel continues independently')
+        self.lives['garik'].action(False);self.lives['garik'].action(True)
+        calls=len(self.backends['garik'].inputs);self.now+=301
+        for _ in range(4):self.scheduler.tick()
+        self.assertEqual(len(self.backends['garik'].inputs),calls)
+        self.assertEqual(self.lives['garik'].get('life_status')['status'],'running')
+        self.assertEqual(self.store.db.execute("SELECT status FROM peer_jobs WHERE sender='garik'").fetchone()[0],'unknown')
 
     def test_comments_and_queues_are_isolated_even_with_equal_message_numbers(self):
         for actor in self.lives:

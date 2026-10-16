@@ -106,6 +106,8 @@ class SharedRecoveryTests(unittest.TestCase):
         f.scheduler.peer_turn('garik');f.connections['garik'].api.fail_send=True;f.scheduler.tick()
         row=f.store.db.execute('SELECT * FROM peer_jobs').fetchone();self.assertEqual(row['status'],'unknown')
         with self.assertRaises(TelegramError):f.scheduler.confirm_peer_absent('arkady',row['id'])
+        with self.assertRaises(TelegramError):f.scheduler.confirm_peer_absent('garik',row['id'])
+        f.lives['garik'].action(False)
         f.scheduler.confirm_peer_absent('garik',row['id']);self.assertEqual(f.lives['garik'].get('life_status')['status'],'paused')
         f.connections['garik'].api.fail_send=False;f.lives['garik'].action(True);f.scheduler.tick()
         outbox=f.connections['garik'].state()['outbox']

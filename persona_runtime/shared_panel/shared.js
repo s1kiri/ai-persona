@@ -36,6 +36,7 @@ function render(value){
   if(actor.model)line(card,`${actor.model} · reasoning ${actor.reasoning_effort||'по умолчанию'}`,'muted');
   line(card,`Исходных воспоминаний: ${actor.memories}`,'muted');
   if(life?.error)line(card,life.error);
+  if(life?.peer_delivery_issue)line(card,'Комментарий в другом канале ждёт проверки доставки. Своя жизнь и свой канал продолжаются.','muted');
   if(actor.peer_context.ongoing_action)line(card,`Сейчас: ${actor.peer_context.ongoing_action}`);
   if(actor.peer_context.nearby_actor_ids.length)line(card,'Сейчас находятся вместе');
   const link=document.createElement('a');link.href=actor.panel_url;link.textContent=life?'Канал, память и настройки':'Настроить Telegram';card.appendChild(link);

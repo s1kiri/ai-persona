@@ -48,3 +48,8 @@ test('world event rendering uses literal text and offers cancellation only befor
  assert.equal(t.el('world-events').children[1].children.some(c=>c.tag==='button'),false);
  t.el('world-events').children[0].children[2].handlers.click();assert.equal(t.posts[0].path,'/api/world-events/cancel');
 });
+test('uncertain foreign comment shows a lane warning while own life remains running',()=>{
+ const t=setup();t.run('render({...sample,live:true,actors:sample.actors.map(a=>({...a,life:{paused:false,error:null,peer_delivery_issue:{status:"unknown"}}}))})');
+ const card=t.el('actors').children[0];assert.ok(card.children.some(c=>c.textContent.includes('Своя жизнь и свой канал продолжаются')));
+ assert.equal(buttons(card)[0].textContent,'Пауза');
+});

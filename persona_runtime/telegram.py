@@ -139,7 +139,14 @@ class BotAPI:
                     429: 'Telegram просит подождать. Отправка автоматически не повторяется.',
                     400: 'Telegram отклонил запрос. Проверь выбранный канал, обсуждение и права бота.'}
         self.last_failure = {'type': 'telegram_response', 'status': status}
-        raise TelegramError(messages.get(status, 'Telegram вернул ошибку. Запрос автоматически не повторяется.'), status)
+        # Retain a bounded diagnostic enum, never arbitrary Telegram text or a token-bearing URL.
+        description=str(result.get('description','')).casefold() if isinstance(result,dict) else ''
+        reasons={'message to be replied not found':'reply_not_found','message thread not found':'thread_not_found',
+                 'chat not found':'chat_not_found','not enough rights':'insufficient_rights',
+                 'bot is not a member':'not_member','bot was kicked':'bot_kicked','topic_closed':'topic_closed'}
+        for fragment,reason in reasons.items():
+            if fragment in description:self.last_failure['reason']=reason;break
+        raise TelegramError(messages.get(status, 'Telegram вернул ошибку. Запрос автоматически не повторяется.'), status,transport=dict(self.last_failure))
 
 
 def chat_summary(chat):

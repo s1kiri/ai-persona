@@ -179,6 +179,7 @@ class ChannelLife:
                 self.social.recall=ChannelRecall(self.store)
             self.social.renderer_available=renderer is not None
             self.social.references=self.references
+            self.social.photo_subjects=self.photo_subjects
             self.lab.session.channel_extension=self.social
             self.backfill_people()
             self.social.gallery.backfill()
@@ -464,14 +465,21 @@ class ChannelLife:
         if self.renderer is None or post['value'].get('reply_to') and not explicit:return None
         state = self.store.state_for_cycle(cycle, self.store.state())
         context = photo_context(post['actor_id'], state['entities'], state['history'],
-                                cycle['value']['results'].get('experience', {}).get('note', ''), portrait_subjects=self.references)
+                                cycle['value']['results'].get('experience', {}).get('note', ''), portrait_subjects=self.photo_subjects())
+        if attachment and self.store.get('shared_host'):
+            # Selection fixed the capture moment; a peer may have left since then.
+            context=cycle['value'].get('inputs',{}).get('share',{}).get('photo_scene',context)
+        context={**context,'minute':context.get('minute',state['minute'])}
         if not context['sources']:
             return None  # An initial thought has no occurred object scene to photograph.
         context['ready_post'] = post['value']['text']
         directory = self.media_directory / 'photos' / post['id']
         from .world_media import MediaReferenceLibrary
         from .photo_case import AutonomousPhotoCase
-        library = MediaReferenceLibrary(self.media_directory / 'visual-memory')
+        if self.store.get('shared_host'):
+            from .shared_media import SharedPhotoReferences
+            library=SharedPhotoReferences(self.media_directory/'visual-memory',self.store,context['minute'])
+        else:library = MediaReferenceLibrary(self.media_directory / 'visual-memory')
         try:
             factory = self.photo_factory or AutonomousPhotoCase
             case = factory(directory, self.lab.session.backend, self.renderer, self.persona,
@@ -491,6 +499,11 @@ class ChannelLife:
     @property
     def media_directory(self):
         return self.store.directory / 'media' / self.actor_id if self.store.get('shared_host') else self.store.directory
+
+    def photo_subjects(self):
+        if self.store.get('shared_host'):
+            return [self.actor_id,*self.store.nearby(self.actor_id)]
+        return self.references
 
     def deliver(self, post):
         if post['value'].get('retracted'):return

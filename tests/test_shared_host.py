@@ -45,6 +45,14 @@ class SharedConsoleTests(unittest.TestCase):
                     headers={'Content-Type':'application/json','Origin':base,'X-Shared-CSRF':state['csrf']})
                 with self.assertRaises(HTTPError) as error:client.open(request)
                 self.assertEqual(error.exception.code,409)
+                command={'request_id':'synthetic-event','text':'На улице появились продавцы прошлогоднего снега.'}
+                for _ in range(2):
+                    request=Request(base+'/api/world-events',data=json.dumps(command).encode(),method='POST',
+                        headers={'Content-Type':'application/json','Origin':base,'X-Shared-CSRF':state['csrf']})
+                    self.assertTrue(json.load(client.open(request))['ok'])
+                state=json.load(client.open(base+'/api/state'))
+                self.assertEqual(len(state['world_events']),1)
+                self.assertEqual(state['world_events'][0]['status'],'queued')
                 with self.assertRaises(WorldConflict):open_shared_world(load_config(path))
             finally:
                 import os,signal,time

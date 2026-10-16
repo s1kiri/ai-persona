@@ -24,9 +24,13 @@ class SharedWorldStore(WorldStore):
             CREATE TABLE IF NOT EXISTS peer_positions(actor TEXT PRIMARY KEY,place_id TEXT,source_id TEXT);
             CREATE TABLE IF NOT EXISTS peer_jobs(id TEXT PRIMARY KEY,sender TEXT NOT NULL,
                 recipient TEXT NOT NULL,value TEXT NOT NULL,status TEXT NOT NULL,receipt TEXT,error TEXT);
+            CREATE TABLE IF NOT EXISTS world_interventions(id TEXT PRIMARY KEY,text TEXT NOT NULL,
+                status TEXT NOT NULL,cycle_id TEXT,result TEXT,error TEXT,created REAL NOT NULL,minute INTEGER);
         ''')
         with self.db:
             self.db.execute("UPDATE peer_jobs SET status='unknown',error='process stopped before receipt; no replay' WHERE status='sending'")
+            self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id IN (SELECT cycle_id FROM world_interventions WHERE status='started')")
+            self.db.execute("UPDATE world_interventions SET status='failed',error='Запуск прерван; автоматического повтора нет' WHERE status='started'")
 
     def state(self):
         state = super().state()
@@ -142,6 +146,9 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
         self.store = store
 
     def enrich(self, stage, payload, cycle):
+        if stage in ('world','outcome','horizon'):
+            from .world_interventions import facts
+            payload['author_world_facts']=facts(self.store)
         if stage == 'outcome':
             window = cycle['value'].get('shared_window')
             if not window or self.store.get('minute') < window['due_minute']:

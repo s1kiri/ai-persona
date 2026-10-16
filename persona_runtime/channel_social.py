@@ -325,7 +325,11 @@ class SocialMemory:
         state=self.store.state()
         payload['photo_scene']=photo_context(actor,payload['life']['entities'],
             [e for e in state['history'] if e['minute']<=payload['life']['minute']],
-            portrait_subjects=getattr(self,'references',{}))
+            portrait_subjects=self.photo_subjects() if hasattr(self,'photo_subjects') else getattr(self,'references',{}))
+        payload['photo_scene']['minute']=payload['life']['minute']
+        if self.store.get('shared_host'):
+            from .shared_media import enrich_public_photos
+            enrich_public_photos(self.store,actor,payload)
         if attention.get('purpose')=='own_channel':
             roots=[]
             for row in self.store.db.execute("SELECT value FROM world_events WHERE actor_id=? AND stage='post' ORDER BY rowid DESC",(actor,)):

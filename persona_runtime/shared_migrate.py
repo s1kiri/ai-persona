@@ -111,6 +111,25 @@ def copy_media(source,destination,aliases,original_prefixes):
                 db.execute('UPDATE references_by_entity SET image_path=?,subject_ids=? WHERE rowid=?',(image,json.dumps(subjects),row[0]))
 
 
+def copy_gallery(source, destination):
+    if 'gallery_images' not in source['tables']:return
+    assets=destination/'gallery'/'assets'
+    assets.mkdir(parents=True,exist_ok=True,mode=0o700)
+    origin=source['world']/'gallery'/'assets'
+    for row in source['db'].execute('SELECT image_path,sha256 FROM gallery_images'):
+        path=Path(row['image_path'])
+        if path.is_symlink() or not path.resolve(strict=True).is_relative_to(origin.resolve()):
+            raise WorldConflict('gallery asset escapes its source world')
+        raw=path.read_bytes()
+        if len(raw)>10_000_000 or hashlib.sha256(raw).hexdigest()!=row['sha256']:
+            raise WorldConflict('source gallery asset differs from its receipt')
+        target=assets/path.name
+        if target.exists() and target.read_bytes()!=raw:raise WorldConflict('gallery asset name collision')
+        if not target.exists():
+            fd=os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+            with os.fdopen(fd,'wb') as stream:stream.write(raw)
+
+
 def merge_rows(target,source,offset,aliases,prefixes,media):
     skipped={'world_meta','world_actors','world_snapshots','sqlite_sequence'}
     for table in sorted(source['tables']-skipped):
@@ -123,12 +142,14 @@ def merge_rows(target,source,offset,aliases,prefixes,media):
             data={}
             for key,value in dict(record).items():
                 if table=='reader_memory_changes' and key=='id' and isinstance(value,int):continue
-                if key in ('value','sources','usage','receipt','receipts','photo') and isinstance(value,str):
-                    try:value=json.dumps(shift_clock(transform(json.loads(value),aliases,prefixes,media,'sources' if key=='sources' else None),offset),ensure_ascii=False)
+                if key in ('value','sources','subject_ids','source_ids','usage','receipt','receipts','photo') and isinstance(value,str):
+                    try:value=json.dumps(shift_clock(transform(json.loads(value),aliases,prefixes,media,key if key in ('sources','subject_ids','source_ids') else None),offset),ensure_ascii=False)
                     except json.JSONDecodeError:pass
                 elif isinstance(value,str) and (key in ID_FIELDS or key.endswith('_id') or key.endswith('_cycle')):
                     value=aliases.get(value,value)
                 if key=='minute' and type(value) is int:value+=offset
+                if table=='gallery_images' and key=='image_path':
+                    value=str(media.parent.parent/'gallery'/'assets'/Path(value).name)
                 data[key]=value
             names=list(data)
             target.db.execute('INSERT INTO "'+table+'" ('+','.join('"'+n+'"' for n in names)+') VALUES('+','.join('?' for _ in names)+')',tuple(data[n] for n in names))
@@ -214,6 +235,7 @@ def migrate(config, source_worlds, source_telegrams, *, apply=False, adopt_legac
                 revisions=source['meta'].get('profile_revisions') or []
                 target.put('profile_revisions',[*(target.get('profile_revisions') or []),
                     *shift_clock(transform(revisions,aliases,prefixes,final_media),minute-source['meta']['minute'])])
+                copy_gallery(source,stage/'world')
                 copy_media(source['world'],stage/'world'/'media'/actor,aliases,prefixes)
                 library=stage/'world'/'media'/actor/'visual-memory/references.sqlite3'
                 if library.exists():

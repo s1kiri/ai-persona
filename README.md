@@ -28,7 +28,8 @@ AI Persona Lab на основе [agent-workplace](https://github.com/3ndetz/age
 **Общий хост Аркадия и Гарика:** один мир, независимые ожидания, личная
 переписка, встречи и комментарии в каналах друг друга реализованы отдельно.
 [Настройка и перенос обеих историй](docs/shared-life.md) ·
-[Что нужно от Кирилла](docs/shared-life-kirill.md).
+[Что нужно от Кирилла](docs/shared-life-kirill.md) ·
+[Авторские события и общие фотографии](docs/shared-world-events.md).
 Быстрый вход: `./start-shared.command --write-config .local/shared.json`.
 До переноса данных и проверки двух ботов это подготовка, не работающая пара.
 

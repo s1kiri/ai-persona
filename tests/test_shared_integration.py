@@ -1,6 +1,7 @@
 """Regression scenarios for importing real legacy lives and sharing local transport."""
 from contextlib import contextmanager
 import json
+import hashlib
 import sqlite3
 import unittest
 from unittest.mock import patch, Mock
@@ -34,6 +35,26 @@ class MigrationRegressionTests(unittest.TestCase):
                     '--speech-contract',str(ROOT/'characters/garik/speech-contract.md'),'--output',str(output)])
         self.assertEqual(CharacterProfile.load(output/'character.json').memories,())
         self.assertEqual(source.read_bytes(),before)
+
+    def test_gallery_files_and_ownership_survive_without_becoming_public(self):
+        from persona_runtime.channel_media import Gallery
+        from persona_runtime.shared_media import published_photos
+        f=self.f;actor='garik'
+        p=next(i['profile'] for i in f.config['actors'] if i['profile'].actor_id==actor)
+        s=open_world(f.worlds[actor],p)
+        try:
+            path=s.directory/'private-photo.png';path.write_bytes(b'\x89PNG\r\n\x1a\nprivate-shot')
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            image=Gallery(s).register({'image_path':str(path),'sha256':digest,'subject_ids':['home']},actor,'home',['same-world'])
+        finally:s.close()
+        migrate(f.config,f.worlds,f.telegrams,apply=True)
+        s=open_shared_world(f.config);self.addCleanup(s.close)
+        gallery=Gallery(s);item=gallery.get(actor,image,['home'])
+        self.assertTrue(__import__('pathlib').Path(item['image_path']).is_relative_to(s.directory/'gallery/assets'))
+        self.assertEqual(item['sha256'],digest)
+        self.assertEqual(item['source_ids'],['same-world' if f.config['actors'][0]['profile'].actor_id==actor else s.get('shared_imports')[1]['aliases']['same-world']])
+        self.assertFalse(gallery.catalog('arkady',['home']))
+        self.assertEqual(published_photos(s),[])
 
     def test_nested_virtual_deadlines_shift_but_wall_deadlines_and_durations_do_not(self):
         f=self.f

@@ -39,7 +39,7 @@ class AutonomousPhotoCase:
             context = copy.deepcopy(context)
             if self.reference_library:
                 previous = self.reference_library.select(context['actor_id'], [s['id'] for s in context['subjects']])
-                context['previous_photos'] = [{k: e[k] for k in ('subject_ids', 'view', 'visual_notes')} for e in previous]
+                context['previous_photos'] = [{k:e[k] for k in ('subject_ids','view','visual_notes','publisher_actor_id','source') if k in e} for e in previous]
             save_private(self.directory/'scene.json', context)
             self.observer({'phase': 'character_chooses', 'actor_id': context['actor_id']})
             if choice is None:

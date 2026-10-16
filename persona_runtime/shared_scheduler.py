@@ -90,13 +90,33 @@ class SharedScheduler:
         for row in self.store.db.execute("SELECT * FROM world_events WHERE stage='post' AND rowid>? ORDER BY rowid", (self.store.get('shared_public_floor') or 0,)).fetchall():
             post = {**dict(row), 'value': json.loads(row['value'])}
             value = post['value']
-            if value.get('reply_to') or value.get('delivery', {}).get('status') != 'sent':
+            if value.get('retracted') or value.get('delivery', {}).get('status') != 'sent':
+                continue
+            if value.get('reply_to'):
+                self.relay_delivered_reply(post)
                 continue
             for recipient in self.lives:
                 if recipient != row['actor_id']:
                     self.store.relay(row['actor_id'], recipient, 'public_post', value['text'],
                         delivery_id='public:'+row['id']+':'+recipient,
                         details={'post_id': row['id'], 'receipt': value['delivery']})
+
+    def relay_delivered_reply(self, post):
+        """Bot polling does not reliably expose another bot's answer to its addressee."""
+        sender=post['actor_id'];value=post['value']
+        audience=self.store.db.execute("SELECT value FROM world_events WHERE id=? AND actor_id=? AND stage='audience'",
+                                      (value.get('audience_id'),sender)).fetchone()
+        if not audience:return
+        audience=json.loads(audience[0]);tg=audience.get('telegram',{})
+        if audience.get('simulated') is not False:return
+        connection=self.lives[sender].connection
+        with connection.lock:
+            message=connection.db.execute('SELECT user_id FROM messages WHERE chat_id=? AND id=? AND kind=?',
+                                          (tg.get('chat_id'),tg.get('message_id'),'comment')).fetchone()
+        recipient=next((a for a,life in self.lives.items() if a!=sender and message and message[0]==life.connection.get('bot')['id']),None)
+        if not recipient:return
+        self.store.relay(sender,recipient,'comment',value['text'],delivery_id='public-reply:'+post['id']+':'+recipient,
+                         details={'post_id':value['reply_to'],'media_post_id':post['id'],'receipt':value['delivery']})
 
     def peer_turn(self, actor):
         life = self.lives[actor]
@@ -112,6 +132,8 @@ class SharedScheduler:
                        'peer_context': self.store.peer_context(actor),
                        'clock': {'minute': self.store.get('minute')}},actor)
             payload['available_source_ids']=payload.pop('_source_ids')
+            from .shared_media import enrich_public_photos
+            enrich_public_photos(self.store,actor,payload)
             self.store.save_input(cid, payload)
             from .role_boundary import ROLE_RULES
             answer, usage = life.lab.session.backend.generate('peer_choice',
@@ -169,10 +191,13 @@ class SharedScheduler:
             raise ValueError('unexpected invitation reference')
         if decision == 'comment':
             source = next((e for e in peer['events'] if e['id'] in answer['source_ids'] and
-                           e['value']['kind']=='public_post' and e['value'].get('post_id')==answer['post_id'] and
+                           e['value']['kind'] in ('public_post','comment') and e['value'].get('post_id')==answer['post_id'] and
                            e['value']['sender_actor_id']==recipient and not e['value']['outbound']), None)
             if not source:
                 raise ValueError('a comment needs a received, actually delivered post')
+            root=self.store.db.execute("SELECT actor_id,value FROM world_events WHERE id=? AND stage='post'",(answer['post_id'],)).fetchone()
+            if not root or root['actor_id']!=recipient or json.loads(root['value']).get('delivery',{}).get('status')!='sent':
+                raise ValueError('peer comment must target the other actor\'s delivered channel post')
         elif answer['post_id'] is not None:
             raise ValueError('unexpected post target')
 
@@ -309,6 +334,11 @@ class SharedScheduler:
                 with self.store.lock,self.store.db:
                     self.store.db.execute("UPDATE world_cycles SET status='held' WHERE id=? AND status='ready'",(ready[0]['id'],))
             self.advance()
+            intervention=self.store.db.execute("SELECT * FROM world_interventions WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
+            if intervention and any(self.enabled(a) for a in self.lives):
+                from .world_interventions import realize
+                realize(self,intervention)
+                return
             self.circulate_posts()
             self.sync_received_comments()
             ordered = list(self.lives)

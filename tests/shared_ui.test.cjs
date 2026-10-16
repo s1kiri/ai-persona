@@ -36,3 +36,15 @@ test('unknown peer delivery requires an explicit owner absence confirmation',()=
  assert.equal(t.posts.length,1);assert.equal(t.posts[0].path,'/api/peer-confirm-absent');
  assert.deepEqual(JSON.parse(t.posts[0].options.body),{actor_id:'garik',job_id:'peer-id',confirmation:'owner_checked_absent'});
 });
+test('world event submits once with a stable key and text survives polling',()=>{
+ const t=setup();t.el('world-event-text').value='На улице продают прошлогодний снег.';
+ t.run('queueWorldEvent();queueWorldEvent();render(sample)');
+ assert.equal(t.posts.length,1);assert.equal(t.posts[0].path,'/api/world-events');
+ const body=JSON.parse(t.posts[0].options.body);assert.equal(body.text,t.el('world-event-text').value);assert.ok(body.request_id);
+});
+test('world event rendering uses literal text and offers cancellation only before dispatch',()=>{
+ const t=setup();t.run('render({...sample,world_events:[{id:"one",text:"<img src=x>",status:"queued"},{id:"two",text:"started",status:"started"}]})');
+ assert.equal(t.el('world-events').children[0].children[0].textContent,'<img src=x>');
+ assert.equal(t.el('world-events').children[1].children.some(c=>c.tag==='button'),false);
+ t.el('world-events').children[0].children[2].handlers.click();assert.equal(t.posts[0].path,'/api/world-events/cancel');
+});

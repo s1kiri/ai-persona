@@ -17,8 +17,19 @@ class WorldBackend(AppServerBackend):
         self.research_host = research_host
         super().__init__(*args, **kwargs, minimal_tools=True, code_mode_host=research_host)
 
+    @staticmethod
+    def add_published_previews(params, payload, previews):
+        if len(previews)>2:raise ValueError('public photo preview limit exceeded')
+        ids={item['post_id'] for item in payload.get('published_photos',[])}
+        for photo in previews:
+            path=Path(photo['image_path'])
+            if photo['post_id'] not in ids or path.stat().st_size>10_000_000 or hashlib.sha256(path.read_bytes()).hexdigest()!=photo['sha256']:
+                raise ValueError('public photo differs from host receipt')
+            params['input'].extend([{'type':'text','text':'Published photo from another character, post '+photo['post_id']},
+                                    {'type':'localImage','path':str(path)}])
+
     def generate(self, stage, instructions, payload, cancel=None):
-        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review', 'timed_intent', 'timed_choice', 'peer_choice'):
+        if stage not in (*SCHEMAS, 'speech', 'post', 'impulse', 'research', 'intent', 'photo_choice', 'live_channel', 'live_experience', 'social_review', 'timed_intent', 'timed_choice', 'peer_choice','world_intervention'):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
@@ -54,6 +65,9 @@ class WorldBackend(AppServerBackend):
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':
             params['outputSchema'] = INTENT_SCHEMA
+        if stage=='world_intervention':
+            from .world_interventions import GLOBAL_EVENT
+            params['outputSchema']=GLOBAL_EVENT
         if stage in ('timed_intent', 'timed_choice', 'peer_choice'):
             from .shared_protocol import TIMED_INTENT, TIMED_CHOICE, PEER_CHOICE
             params['outputSchema'] = {'timed_intent': TIMED_INTENT, 'timed_choice': TIMED_CHOICE,
@@ -61,7 +75,9 @@ class WorldBackend(AppServerBackend):
         if stage == 'peer_choice':
             from .shared_protocol import peer_io
             params['outputSchema'],model_payload,source_decode=peer_io(payload)
+            published=model_payload.pop('_published_previews',[])
             params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
+            self.add_published_previews(params,model_payload,published)
         if stage == 'photo_choice':
             from .world_photo import PHOTO_SCHEMA
             params['outputSchema'] = PHOTO_SCHEMA
@@ -70,7 +86,10 @@ class WorldBackend(AppServerBackend):
             schema={'live_channel':LIVE_CHANNEL,'live_experience':LIVE_EXPERIENCE,'social_review':SOCIAL_REVIEW}[stage]
             params['outputSchema'],model_payload,source_decode=constrained_io(schema,payload)
             previews=model_payload.pop('_gallery_previews',[])
+            published=model_payload.pop('_published_previews',[])
             params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
+            if published and stage!='live_channel':raise ValueError('public photo previews belong only to speaking roles')
+            self.add_published_previews(params,model_payload,published)
             if previews and stage!='live_channel':raise ValueError('gallery previews belong only to the character speaking role')
             if len(previews)>4:raise ValueError('gallery preview limit exceeded')
             ids={item['id'] for item in model_payload.get('gallery',[])}
@@ -155,7 +174,7 @@ class WorldBackend(AppServerBackend):
                 if value['task_id'] != payload['task_id']:
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
-            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice') else answer), self.last_usage
+            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice','world_intervention') else answer), self.last_usage
         except Exception:
             if turn:
                 try:

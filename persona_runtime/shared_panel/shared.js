@@ -10,6 +10,19 @@ function settingsLabels(){for(const key of settingFields)$(key+'-value').textCon
 function line(parent,text,cls){const p=document.createElement('p');p.textContent=text;if(cls)p.className=cls;parent.appendChild(p);return p;}
 function render(value){
  state=value;
+ $('queue-world-event').disabled=sending;
+ $('world-event-text').disabled=sending;
+ $('world-events').replaceChildren();
+ const eventStatuses={queued:'В очереди',started:'Мир разыгрывает событие',applied:'Произошло',declined:'Не применено',failed:'Сбой · повтор выключен',cancelled:'Отменено'};
+ for(const event of value.world_events||[]){
+  const li=document.createElement('li');line(li,event.text);line(li,eventStatuses[event.status]||event.status,'muted');
+  if(event.result?.summary)line(li,event.result.summary);
+  if(event.result?.reason)line(li,event.result.reason,'muted');
+  for(const observation of event.result?.observations||[]){const name=value.actors.find(a=>a.id===observation.actor_id)?.name||observation.actor_id;line(li,`${name}: ${observation.via==='unaware'?'пока не узнал':observation.via==='news'?'узнал из сообщения':'наблюдает'}${observation.observation?' · '+observation.observation:''}`,'muted');}
+  if(event.error)line(li,event.error);
+  if(event.status==='queued'){const button=document.createElement('button');button.textContent='Отменить';button.disabled=sending;button.addEventListener('click',()=>cancelWorldEvent(event.id));li.appendChild(button);}
+  $('world-events').appendChild(li);
+ }
  if(value.settings&&!settingsDirty){for(const key of settingFields)$(key).value=value.settings[key];settingsRevision=value.settings_revision;settingsLabels();}
  $('save-settings').disabled=sending||!settingsDirty;
  characterSettings?.update(value.actors.map(a=>({...a,editable:true,description:value.live?'Настройки собственного канала и темпа жизни.':'Подготовка отдельного профиля. Рабочая жизнь и её история сюда ещё не перенесены.'})));
@@ -42,5 +55,18 @@ async function saveSettings(path,value){
 for(const key of settingFields)$(key).addEventListener('input',()=>{settingsDirty=true;settingsLabels();$('save-settings').disabled=false;});
 $('settings-form').addEventListener('submit',async e=>{e.preventDefault();if(sending)return;try{await saveSettings('/api/settings',{settings:Object.fromEntries(settingFields.map(k=>[k,Number($(k).value)])),revision:settingsRevision});settingsDirty=false;render(state);}catch(error){$('error').textContent=error.message;}});
 refresh();setInterval(refresh,2000);
+
+let worldEventDraft=null;
+async function queueWorldEvent(){
+ if(sending||!state)return;
+ const text=($('world-event-text').value||'').trim();
+ if(!text){$('world-event-status').textContent='Сначала опиши событие.';return;}
+ if(!worldEventDraft||worldEventDraft.text!==text)worldEventDraft={text,request_id:globalThis.crypto?.randomUUID?.()||'event-'+Date.now()+'-'+Math.random().toString(36).slice(2)};
+ $('world-event-status').textContent='Добавляем в очередь…';
+ try{await saveSettings('/api/world-events',worldEventDraft);$('world-event-text').value='';worldEventDraft=null;$('world-event-status').textContent='Событие в очереди. Реакции и посты герои выбирают сами.';}
+ catch(error){$('world-event-status').textContent=error.message+' Текст сохранён. Повтор с тем же текстом не создаст дубль.';}
+}
+$('world-event-form').addEventListener('submit',e=>{e.preventDefault();queueWorldEvent();});
+async function cancelWorldEvent(id){if(sending||!state)return;try{await saveSettings('/api/world-events/cancel',{id});}catch(error){$('world-event-status').textContent=error.message;}}
 
 async function repair(job){if(sending||!state)return;if(!window.confirm('Проверьте обсуждение получателя. Подтвердить, что этого комментария там нет, и разрешить новую попытку после продолжения автора?'))return;sending=true;render(state);try{const r=await fetch('/api/peer-confirm-absent',{method:'POST',headers:{'Content-Type':'application/json','X-Shared-CSRF':state.csrf},body:JSON.stringify({actor_id:job.sender,job_id:job.id,confirmation:'owner_checked_absent'})});const v=await r.json();if(!r.ok)throw Error(v.error);$('error').textContent='Отсутствие отмечено. Автор остаётся на паузе до вашего продолжения.';}catch(e){$('error').textContent=e.message;}finally{sending=false;await refresh();}}

@@ -96,4 +96,11 @@ def edit_profile(store, previous, value, connections, *, lives=(), scheduler=Non
             session.actor_prompts[updated.actor_id]=updated.persona
             life.persona=updated.persona;life.references=updated.references;life.lab.profile=updated
             if life.social:life.social.references=updated.references
+        if store.get('shared_host'):
+            actor_ids={life.actor_id for life in lives}
+            own={life.actor_id:getattr(getattr(life.lab,'profile',None),'references',life.references) for life in lives}
+            portraits={subject:path for refs in own.values() for subject,path in refs.items() if subject in actor_ids}
+            for life in lives:
+                life.references={**own[life.actor_id],**portraits}
+                if life.social:life.social.references=life.references
         return updated

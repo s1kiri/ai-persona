@@ -176,6 +176,7 @@ class SharedPanel:
 
     def state(self):
         from .profile_editor import editor_state
+        from .world_interventions import catalog
         actors = []
         for item in self.config['actors']:
             p=item['profile'];actor=p.actor_id;life=self.lives.get(actor)
@@ -188,6 +189,7 @@ class SharedPanel:
                 'memories':len(self.store.memories(actor))})
         return {'csrf':self.csrf,'pid':os.getpid(),'live':bool(self.scheduler),'paused':self.store.get('paused'),
                 'error':self.store.get('shared_error'),
+                'world_events':catalog(self.store),
                 'minute':self.store.get('minute'),'revision':self.store.get('revision'),'actors':actors,
                 'settings':self.store.get('settings'), 'settings_revision':self.store.get('settings_revision'),
                 'cycles':[{k:c[k] for k in ('id','actor_id','status','phase','revision')}
@@ -234,6 +236,12 @@ def panel_handler(panel):
                     panel.lives[value['actor_id']].action(value['running'])
                 elif self.path=='/api/settings' and set(value)=={'settings','revision'}:
                     panel.store.set_settings(value['settings'],value['revision'])
+                elif self.path=='/api/world-events' and set(value)=={'request_id','text'}:
+                    from .world_interventions import enqueue
+                    enqueue(panel.store,value['request_id'],value['text'])
+                elif self.path=='/api/world-events/cancel' and set(value)=={'id'}:
+                    from .world_interventions import cancel
+                    cancel(panel.store,value['id'])
                 elif self.path=='/api/character-settings' and set(value)=={'actor_id','controls'} and value['actor_id'] in panel.connections:
                     actor=value['actor_id']
                     if actor in panel.lives:
@@ -318,6 +326,8 @@ def main(argv=None):
             from .proxy import SharedTransport
             from .world_backend import WorldBackend
             from .world_image_backend import CodexImageBackend
+            actor_ids={item['profile'].actor_id for item in config['actors']}
+            portraits={subject:path for item in config['actors'] for subject,path in item['profile'].references.items() if subject in actor_ids}
             for item in config['actors']:
                 p=item['profile'];actor=p.actor_id;connection=connections[actor]
                 attach_channel(store,item,connection,time.time())
@@ -329,7 +339,7 @@ def main(argv=None):
                     direct_channel=True,continuous=True,external_channel=True,timeline=SharedTimeline(store),lively_world=True)
                 lab=Laboratory(store,session);lab.actor_id,lab.actor_name=actor,p.name
                 lab.profile=p
-                lives[actor]=SharedChannelLife(lab,connection,p.persona,renderer,social_enabled=True,actor_id=actor,references=p.references,recall_enabled=True)
+                lives[actor]=SharedChannelLife(lab,connection,p.persona,renderer,social_enabled=True,actor_id=actor,references={**p.references,**portraits},recall_enabled=True)
             scheduler=SharedScheduler(store,lives);resources.callback(scheduler.stopping.set)
             for life in lives.values():life.lab.session.cancel=scheduler.stopping;life.cancel=scheduler.stopping
         panel=SharedPanel(store,config,connections,lives,scheduler)

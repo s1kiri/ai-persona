@@ -522,7 +522,7 @@ class ChannelLife:
         with self.store.lock, self.store.db:
             old = self.store.db.execute('SELECT status FROM channel_jobs WHERE post_id=?', (post['id'],)).fetchone()
             if old:
-                if old[0] == 'sent':
+                if old[0] in ('sent','rejected'):
                     return
                 if old[0] != 'reviewed_absent':
                     raise TelegramError('Неизвестная доставка прошлого запуска. Автоматический повтор заблокирован.')
@@ -538,11 +538,16 @@ class ChannelLife:
             return
         image = image_result['image'] if image_result and image_result['status'] in ('passed','reused') else None
         reply_to = None
+        peer_reply=False
         if post['value'].get('reply_to'):
             audience = next(e for e in self.store.channel_context(self.actor_id) if e['id'] == post['value']['audience_id'])
             if audience['value'].get('simulated') is not False:
                 raise TelegramError('Вымышленный комментарий не может получить настоящий ответ.')
             reply_to = audience['value']['telegram']['message_id']
+            with self.connection.lock:
+                author=self.connection.db.execute('SELECT user_id FROM messages WHERE chat_id=? AND id=?',
+                    (audience['value']['telegram']['chat_id'],reply_to)).fetchone()
+            peer_reply=bool(author and author[0] in getattr(self,'peer_bot_ids',set()))
         self.current_phase = 'delivery'
         text = post['value']['text']
         receipts = []
@@ -550,13 +555,24 @@ class ChannelLife:
         attempts = sum(r['post_id'] == post['id'] for r in (self.get('delivery_repairs') or []))
         if attempts:
             key += ':review' + str(attempts)
-        if image and len(text) <= 1024:
-            receipts.append(self.connection.send(key + ':photo', text, reply_to=reply_to, photo=Path(image['image_path']).read_bytes()))
-        else:
-            for index, part in enumerate(split_text(text)):
-                receipts.append(self.connection.send(key + ':part' + str(index), part, reply_to=reply_to))
-            if image:
-                receipts.append(self.connection.send(key + ':photo', '', reply_to=reply_to, photo=Path(image['image_path']).read_bytes()))
+        options={'_thread_reply':True} if peer_reply else {}
+        try:
+            if image and len(text) <= 1024:
+                receipts.append(self.connection.send(key + ':photo', text, reply_to=reply_to, photo=Path(image['image_path']).read_bytes(),**options))
+            else:
+                for index, part in enumerate(split_text(text)):
+                    receipts.append(self.connection.send(key + ':part' + str(index), part, reply_to=reply_to,**options))
+                if image:
+                    receipts.append(self.connection.send(key + ':photo', '', reply_to=reply_to, photo=Path(image['image_path']).read_bytes(),**options))
+        except TelegramError as error:
+            if peer_reply and not receipts and error.code==400 and (error.transport or {}).get('reason')=='reply_not_found':
+                with self.store.lock,self.store.db:
+                    self.store.db.execute("UPDATE channel_jobs SET status='rejected',error='Telegram reply_not_found; no accepted reply, no replay' WHERE post_id=?",(post['id'],))
+                    self.store.db.execute('UPDATE world_events SET value=? WHERE id=?',
+                        (json.dumps({**post['value'],'delivery':{'status':'rejected','telegram_code':400,'reason':'reply_not_found'}},ensure_ascii=False),post['id']))
+                    self.store.snapshot()
+                return
+            raise
         compact = [{k: r[k] for k in ('chat_id', 'message_id', 'key', 'status')} for r in receipts]
         photo_summary = {'status': image_result['status'], 'choice': image_result['choice']} if image_result else None
         if image_result and image_result.get('gallery_id'):photo_summary['gallery_id']=image_result['gallery_id']
@@ -707,7 +723,7 @@ class ChannelLife:
             uncertain=self.store.db.execute("SELECT 1 FROM channel_jobs WHERE status='unknown' UNION ALL SELECT 1 FROM channel_reaction_jobs WHERE status IN ('sending','unknown')").fetchone()
             cycles=[self.store.cycle(r[0]) for r in self.store.db.execute("SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid")]
             pending=[{**dict(r),'value':json.loads(r['value'])} for r in self.store.db.execute(
-                "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY rowid LIMIT 1")]
+                "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only','rejected')) ORDER BY rowid LIMIT 1")]
             reactions=[dict(r) for r in self.store.db.execute("SELECT * FROM channel_reaction_jobs WHERE status='pending' ORDER BY rowid LIMIT 1")]
         if uncertain or any(c['status']=='blocked' for c in cycles):
             return self.block('Есть незавершённая операция. Автоматического повтора нет.')
@@ -814,7 +830,7 @@ class ChannelLife:
                 cycles = [self.store.cycle(r[0]) for r in self.store.db.execute(
                     "SELECT id FROM world_cycles WHERE status IN ('ready','running','blocked') ORDER BY rowid LIMIT 1")]
                 pending = [{**dict(r), 'value': json.loads(r['value'])} for r in self.store.db.execute(
-                    "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY rowid LIMIT 1")]
+                    "SELECT * FROM world_events WHERE stage='post' AND id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only','rejected')) ORDER BY rowid LIMIT 1")]
             if uncertain or (cycles and cycles[0]['status'] == 'blocked'):
                 return self.block('Есть незавершённое действие. Автоматический повтор не выполняется.')
             # Wait for the fictional action's actual elapsed time before sharing its outcome.

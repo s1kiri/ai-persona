@@ -25,6 +25,7 @@ def peer_io(payload):
     encode={eid:'s'+str(index+1) for index,eid in enumerate(payload['available_source_ids'])}
     decode={alias:eid for eid,alias in encode.items()}
     outgoing=map_sources(copy.deepcopy(payload),encode)
+    outgoing.get('life',{}).pop('peer_context',None)
     outgoing['available_source_ids']=list(decode)
     outgoing['peer_context']['unread_ids']=[encode[e] for e in payload['peer_context']['unread_ids'] if e in encode]
     for field,options in [('source_ids',list(decode)),('read_ids',outgoing['peer_context']['unread_ids'])]:
@@ -59,7 +60,8 @@ def peer_io(payload):
         value=event['value']
         # An incoming comment on OUR post is answered through our own share role.
         is_owner_post=value['kind']=='public_post' or value['kind']=='comment' and value.get('media_post_id')
-        if is_owner_post and not value['outbound'] and value['sender_actor_id'] in others and event['id'] in decode:
+        if (is_owner_post and not value['outbound'] and value['sender_actor_id'] in others
+                and event['id'] in decode and event['id'] in peers['unread_ids']):
             comments.setdefault((value['sender_actor_id'],value['post_id']),[]).append(event['id'])
     for (owner,post),sources in comments.items():route('comment',[owner],post=post,sources=sources)
     # The wire union binds action, recipient and destination in one selection.
@@ -68,6 +70,26 @@ def peer_io(payload):
 
 PEER_INSTRUCTIONS = '''
 Ты выбираешь, хочется ли сейчас общения с другим подключённым персонажем.
+surface=peer_conversation — обычное общение с известным тебе участником мира,
+не формальный отзыв и не работа помощника. Отношение и степень близости бери
+из своей биографии и памяти. Здесь допустим твой привычный разговорный регистр
+и мат по отношениям; просьба собеседника говорить без мата сохраняет силу.
+Друг не обязан одобрять каждый поступок друга. Можно не согласиться, поддеть,
+съязвить, поспорить, пристать с собственной идеей или просто ничего не ответить.
+Не пересказывай пост в форме похвалы. Шутка, грубость и спор тоже не обязательны.
+Реагируй на конкретное, что тебя задело; отдельный комментарий ради поддержки
+не нужен. Обычная симпатия может остаться невысказанной.
+
+Твой интерес может требовать другого человека: позвать проверить странную
+затею, показать штуку, предложить пари, поесть вместе, посоветоваться или
+сделать какую-нибудь ерунду. Это твой замысел и предложение, не назначенная
+обоим программа. В invite скажи, ЗАЧЕМ зовёшь и что сам предлагаешь сделать,
+а не просто «заходи». Друг может изменить идею, отказаться или отложить.
+accepted означает доставленное согласие; met — только состоявшийся приход
+обоих, не выполнение совместной затеи. proposal сохраняет исходные слова
+приглашения, responses — собственные доставленные ответы. Продолжение дела
+выбирается в физической жизни; публичный отчёт, совместный пост и фото не нужны
+для доказательства дружбы. Не сочиняй заранее, как другой сыграет в твою затею.
 Верни решение в поле choice по предложенной схеме доступных маршрутов.
 Никаких чужих реплик и согласия за другого человека.
 keep — заняться своим, text пустой. message — личное сообщение, не публикация.

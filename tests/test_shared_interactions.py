@@ -41,5 +41,34 @@ class SharedCommentExchangeTests(unittest.TestCase):
         self.owner_reply(audience);f.scheduler.circulate_posts()
         self.assertFalse([e for e in f.store.peer_context('garik')['events'] if e['value']['kind']=='comment' and not e['value']['outbound']])
 
+    def test_known_peer_reply_uses_confirmed_discussion_root_without_changing_words(self):
+        f=self.f;root,audience=self.start_exchange();post=self.owner_reply(audience)
+        connection=f.connections['arkady']
+        sent=[p for method,p,_ in connection.api.calls if method=='sendMessage'][-1]
+        forwarded=connection.db.execute('SELECT root_id FROM forwards').fetchone()[0]
+        self.assertEqual(sent['reply_parameters'],{'message_id':forwarded,'allow_sending_without_reply':False})
+        self.assertEqual(sent['text'],'Да, а ты что предлагаешь?')
+        f.scheduler.circulate_posts()
+        replies=[e for e in f.store.peer_context('garik')['events'] if e['value']['kind']=='comment' and not e['value']['outbound']]
+        self.assertEqual(len(replies),1)
+
+    def test_explicit_peer_reply_rejection_is_terminal_and_never_relayed_or_retried(self):
+        from persona_runtime.telegram import TelegramError
+        f=self.f;root,audience=self.start_exchange();connection=f.connections['arkady'];original=connection.api.call
+        attempts=[]
+        def call(method,*args,**kwargs):
+            if method=='sendMessage':
+                attempts.append(method)
+                raise TelegramError('Synthetic API rejection',400,transport={'type':'telegram_response','status':400,'reason':'reply_not_found'})
+            return original(method,*args,**kwargs)
+        connection.api.call=call;post=self.owner_reply(audience)
+        row=f.store.db.execute('SELECT status FROM channel_jobs WHERE post_id=?',(post,)).fetchone()
+        self.assertEqual(row[0],'rejected');self.assertEqual(len(attempts),1)
+        f.scheduler.circulate_posts()
+        self.assertFalse([e for e in f.store.peer_context('garik')['events'] if e['value']['kind']=='comment' and not e['value']['outbound']])
+        value=json.loads(f.store.db.execute('SELECT value FROM world_events WHERE id=?',(post,)).fetchone()[0])
+        f.lives['arkady'].deliver({'id':post,'actor_id':'arkady','value':value})
+        self.assertEqual(len(attempts),1)
+
 
 if __name__=='__main__':unittest.main()

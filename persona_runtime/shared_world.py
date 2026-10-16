@@ -80,9 +80,16 @@ class SharedWorldStore(WorldStore):
                 events.append({**dict(r), 'value': json.loads(r['value'])})
         own = self.db.execute('SELECT place_id FROM peer_positions WHERE actor=?', (actor,)).fetchone()
         waiting = self.db.execute("SELECT value FROM world_cycles WHERE actor_id=? AND status='waiting'", (actor,)).fetchone()
+        invitations=[]
+        for row in self.db.execute("SELECT * FROM peer_invitations WHERE (sender=? OR recipient=?) AND status IN ('pending','accepted','met') ORDER BY rowid DESC LIMIT 8",(actor,actor)):
+            invitation=dict(row)
+            source=self.db.execute('SELECT value FROM world_events WHERE id=?',(row['source_id'],)).fetchone()
+            invitation['proposal']=json.loads(source[0])['text'] if source else ''
+            invitation['responses']=[{'actor_id':r['sender'],'text':json.loads(r['value'])['text']}
+                for r in self.db.execute("SELECT sender,value FROM peer_jobs WHERE status='sent' AND json_extract(value,'$.invitation_id')=? ORDER BY rowid",(row['id'],))]
+            invitations.append(invitation)
         return {'events': list(reversed(events)), 'unread_ids': unread,
-                'invitations': [dict(r) for r in self.db.execute(
-                    "SELECT * FROM peer_invitations WHERE (sender=? OR recipient=?) AND status IN ('pending','accepted')", (actor, actor))],
+                'invitations':list(reversed(invitations)),
                 'place_id': own[0] if own else None, 'nearby_actor_ids': self.nearby(actor),
                 'available_actor_ids': [r[0] for r in self.db.execute('SELECT id FROM world_actors WHERE id!=?', (actor,))],
                 'ongoing_action': json.loads(waiting[0])['results']['choice']['action'] if waiting else None}
@@ -130,6 +137,14 @@ destination_id — известная локация, куда персонаж 
 только успешным outcome. Если остаёшься в известном месте, укажи его ID;
 null означает неподтверждённое местоположение, а не присутствие в прежнем.
 Приглашение/согласие само по себе не дорога.
+life.peer_context.invitations хранит доставленные предложения и ответы.
+Принятая встреча может стать твоим ближайшим делом, когда освободишься:
+дойти, встретиться, затем выбрать собственное участие в предложенной затее.
+proposal — зачем позвали, responses — что каждый действительно ответил.
+met означает только встречу, а не готовый результат общего занятия. Не теряй
+его смысл после прихода. Можно отложить, отказаться или предложить другой ход;
+чужое участие и реплики не назначай. Завершённое дело помнится по outcome,
+оно не становится новым долгом из-за сохранённого старого приглашения.
 Не выбирай движения и ответы за другого управляемого героя.
 '''
     outcome_instruction = '''
@@ -155,6 +170,7 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
                 raise WorldConflict('outcome cannot run before its independent deadline')
             payload['shared_action_window'] = window
             payload['shared_scene'] = {'nearby_actor_ids': self.store.nearby(cycle['actor_id']),
+                'meetings':[i for i in self.store.peer_context(cycle['actor_id'])['invitations'] if i['status'] in ('accepted','met')],
                 'delivered_words': [e for e in self.store.peer_context(cycle['actor_id'])['events']
                                     if e['value']['kind'] in ('say', 'accept', 'decline')]}
         return payload

@@ -444,8 +444,10 @@ class TelegramConnection:
             target = (root[0], root[1])
         return self.send(key, text, _peer_target=target)
 
-    def send(self, key, text, reply_to=None, photo=None, *, _peer_target=None):
+    def send(self, key, text, reply_to=None, photo=None, *, _peer_target=None, _thread_reply=False):
         """Publish once to the verified channel or a known comment in its group."""
+        if type(_thread_reply) is not bool or _thread_reply and (reply_to is None or _peer_target is not None):
+            raise TelegramError('Некорректная ветка ответа.')
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,180}', key):
             raise TelegramError('Некорректный ключ отправки.')
         if not isinstance(text, str) or (photo is None and not text.strip()) or len(text) > (1024 if photo else 4096):
@@ -468,7 +470,7 @@ class TelegramConnection:
                 comment = self.db.execute("SELECT root_id FROM messages WHERE chat_id=? AND id=? AND kind='comment'", (chat_id, reply_to)).fetchone()
                 if not comment or not comment[0]:
                     raise TelegramError('Этот комментарий не привязан к посту выбранного канала.')
-                payload.update(chat_id=chat_id, reply_parameters={'message_id': reply_to, 'allow_sending_without_reply': False})
+                payload.update(chat_id=chat_id, reply_parameters={'message_id': comment[0] if _thread_reply else reply_to, 'allow_sending_without_reply': False})
             payload['caption' if photo else 'text'] = text
             if photo is None:
                 payload['link_preview_options'] = {'is_disabled': True}

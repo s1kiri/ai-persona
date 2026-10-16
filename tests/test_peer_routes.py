@@ -34,6 +34,7 @@ class PeerRouteTests(unittest.TestCase):
     def test_received_foreign_post_binds_comment_owner_post_and_proof(self):
         value=payload();value['peer_context']['events'].append({'id':'foreign-post','value':{
             'kind':'public_post','sender_actor_id':'garik','outbound':False,'post_id':'garik-root'}})
+        value['peer_context']['unread_ids'].append('foreign-post')
         branch=next(b for b in self.branches(value) if b['properties']['decision']['enum']==['comment'])
         p=branch['properties'];self.assertEqual(p['post_id']['enum'],['garik-root'])
         self.assertEqual(p['recipient_actor_id']['enum'],['garik']);self.assertEqual(p['source_ids']['items']['enum'],['s2'])
@@ -45,8 +46,14 @@ class PeerRouteTests(unittest.TestCase):
     def test_owner_reply_proof_can_continue_comment_thread(self):
         value=payload();value['peer_context']['events'].append({'id':'owner-answer','value':{
             'kind':'comment','sender_actor_id':'garik','outbound':False,'post_id':'garik-root','media_post_id':'garik-answer'}})
+        value['peer_context']['unread_ids'].append('owner-answer')
         branch=next(b for b in self.branches(value) if b['properties']['decision']['enum']==['comment'])
         self.assertEqual(branch['properties']['source_ids']['items']['enum'],['s3'])
+
+    def test_previously_read_foreign_post_is_not_a_fresh_comment_route(self):
+        value=payload();value['peer_context']['events'].append({'id':'foreign-post','value':{
+            'kind':'public_post','sender_actor_id':'garik','outbound':False,'post_id':'garik-root'}})
+        self.assertNotIn('comment',{b['properties']['decision']['enum'][0] for b in self.branches(value)})
 
     def test_say_and_invitation_replies_exist_only_for_observed_context(self):
         value=payload();value['peer_context']['nearby_actor_ids']=['garik']

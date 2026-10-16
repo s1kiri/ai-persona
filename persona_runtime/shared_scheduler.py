@@ -1,5 +1,6 @@
 """Serial model calls, independent physical deadlines, actor-owned channels and peer speech."""
 import json
+import hashlib
 import threading
 import time
 import uuid
@@ -71,6 +72,8 @@ class SharedScheduler:
         if len(lives) != 2 or len(set(lives)) != 2:
             raise ValueError('the shared host requires exactly two configured characters')
         self.store, self.lives, self.now = store, dict(lives), now
+        for actor,life in self.lives.items():
+            life.peer_bot_ids={other.connection.get('bot')['id'] for aid,other in self.lives.items() if aid!=actor}
         self.lock = threading.Lock()
         self.stopping = threading.Event()
         self.last_actor = store.get('shared_last_actor')
@@ -126,6 +129,13 @@ class SharedScheduler:
             self.store.relay(sender,recipient,'comment',value['text'],delivery_id='public-reply:'+post['id']+':'+recipient,
                              details={'post_id':value['reply_to'],'media_post_id':post['id'],'receipt':value['delivery']})
 
+    def peer_signal(self,actor):
+        """New received words, own life or meeting state, not a five-minute clock tick."""
+        peer=self.store.peer_context(actor)
+        own=self.store.db.execute("SELECT id FROM world_events WHERE actor_id=? AND stage IN ('world','choice','outcome','experience','post') ORDER BY rowid DESC LIMIT 1",(actor,)).fetchone()
+        return hashlib.sha256(json.dumps({'unread':peer['unread_ids'],'own':own[0] if own else None,
+            'invitations':peer['invitations'],'nearby':peer['nearby_actor_ids']},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
     def peer_turn(self, actor):
         life = self.lives[actor]
         cid = 'peerturn-'+uuid.uuid4().hex
@@ -138,7 +148,7 @@ class SharedScheduler:
         try:
             payload = life.social.with_source_ids({'life': self.store.actor_view(actor),
                        'peer_context': self.store.peer_context(actor),
-                       'clock': {'minute': self.store.get('minute')}},actor)
+                       'clock': {'minute': self.store.get('minute')},'surface':'peer_conversation'},actor)
             payload['available_source_ids']=payload.pop('_source_ids')
             from .shared_media import enrich_public_photos
             enrich_public_photos(self.store,actor,payload)
@@ -159,6 +169,7 @@ class SharedScheduler:
                 for eid in answer['read_ids']:
                     self.store.db.execute('INSERT OR IGNORE INTO peer_reads VALUES(?,?)', (actor, eid))
                 self.store.actor_put(actor, 'peer_next_check', self.now()+300)
+                self.store.actor_put(actor, 'peer_last_signal',self.peer_signal(actor))
                 self.store.put('revision', self.store.get('revision')+1)
                 self.store.db.execute("UPDATE world_cycles SET status='complete',phase='done',revision=?,value=? WHERE id=?",
                     (self.store.get('revision'), json.dumps(current['value'], ensure_ascii=False), cid))
@@ -199,7 +210,7 @@ class SharedScheduler:
             raise ValueError('unexpected invitation reference')
         if decision == 'comment':
             source = next((e for e in peer['events'] if e['id'] in answer['source_ids'] and
-                           e['value']['kind'] in ('public_post','comment') and e['value'].get('post_id')==answer['post_id'] and
+                           e['id'] in peer['unread_ids'] and e['value']['kind'] in ('public_post','comment') and e['value'].get('post_id')==answer['post_id'] and
                            e['value']['sender_actor_id']==recipient and not e['value']['outbound']), None)
             if not source:
                 raise ValueError('a comment needs a received, actually delivered post')
@@ -250,6 +261,10 @@ class SharedScheduler:
             elif kind in ('accept','decline'):
                 self.store.db.execute('UPDATE peer_invitations SET status=? WHERE id=?',
                     ('accepted' if kind=='accept' else 'declined', value['invitation_id']))
+            if kind=='comment' and receipt:
+                for eid in value['source_ids']:
+                    if self.store.db.execute('SELECT 1 FROM peer_deliveries WHERE recipient=? AND in_event=?',(sender,eid)).fetchone():
+                        self.store.db.execute('INSERT OR IGNORE INTO peer_reads VALUES(?,?)',(sender,eid))
             self.store.db.execute("UPDATE peer_jobs SET status='sent',receipt=? WHERE id=?",
                                   (json.dumps(receipt) if receipt else None, row['id']))
             self.store.snapshot()
@@ -379,7 +394,7 @@ class SharedScheduler:
                 job = None if peer_blocked else self.store.db.execute("SELECT * FROM peer_jobs WHERE sender=? AND status='pending' ORDER BY rowid LIMIT 1",(actor,)).fetchone()
                 if job and self.deliver_peer(job):
                     return
-                pending = self.store.db.execute("SELECT e.* FROM world_events e WHERE e.actor_id=? AND e.stage='post' AND e.id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only')) ORDER BY e.rowid LIMIT 1",(actor,)).fetchone()
+                pending = self.store.db.execute("SELECT e.* FROM world_events e WHERE e.actor_id=? AND e.stage='post' AND e.id NOT IN (SELECT post_id FROM channel_jobs WHERE status IN ('sent','local_only','rejected')) ORDER BY e.rowid LIMIT 1",(actor,)).fetchone()
                 if pending:
                     life.lab.busy=True; life.deliver({**dict(pending),'value':json.loads(pending['value'])}); return
                 reaction = self.store.db.execute("SELECT j.* FROM channel_reaction_jobs j JOIN world_events e ON e.id=j.audience_id WHERE e.actor_id=? AND j.status IN ('pending','sending','unknown') ORDER BY j.rowid LIMIT 1",(actor,)).fetchone()
@@ -404,6 +419,9 @@ class SharedScheduler:
                 if visit.get('away_until',0)<=self.now() and life.focus():
                     life.channel_cycle();return
                 if not peer_blocked and self.now()>=(life.get('peer_next_check') or 0):
+                    if self.peer_signal(actor)==life.get('peer_last_signal'):
+                        with self.store.lock,self.store.db:life.put('peer_next_check',self.now()+300)
+                        continue
                     life.lab.busy=True;self.peer_turn(actor);return
                 life.current_phase='living' if waiting else 'waiting'
         except Exception as error:

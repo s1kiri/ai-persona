@@ -151,6 +151,9 @@ class SharedLifeTests(unittest.TestCase):
         self.assertEqual(self.store.nearby('arkady'),[])
         self.now+=3*60;self.finish('garik',g,5)
         self.assertEqual(self.store.nearby('arkady'),['garik'])
+        meeting=self.store.peer_context('garik')['invitations'][0]
+        self.assertEqual(meeting['status'],'met');self.assertEqual(meeting['proposal'],'Заходи в проезд.')
+        self.assertEqual(meeting['responses'],[{'actor_id':'garik','text':'Да, зайду.'}])
         self.job('arkady',peer_answer(decision='say',recipient_actor_id='garik',text='Привет. Рад, что дошёл.'))
         self.assertIn('Рад, что дошёл',json.dumps(self.store.peer_context('garik'),ensure_ascii=False))
 
@@ -161,6 +164,31 @@ class SharedLifeTests(unittest.TestCase):
         payload={'life':self.store.actor_view('arkady'),'peer_context':self.store.peer_context('arkady'),'available_source_ids':[]}
         with self.assertRaises(ValueError):self.scheduler.validate_peer('arkady',peer_answer(decision='say',recipient_actor_id='garik',text='Hello'),payload)
         with self.assertRaises(ValueError):self.scheduler.validate_peer('arkady',peer_answer(decision='accept',recipient_actor_id='garik',text='Yes',invitation_id=job),payload)
+
+    def test_idle_peer_check_needs_new_words_own_life_or_meeting_state(self):
+        actor='garik';life=self.lives[actor]
+        with self.store.lock,self.store.db:life.put('peer_next_check',self.now)
+        self.backends[actor].answers=[peer_answer()];self.scheduler.tick()
+        calls=len(self.backends[actor].inputs)
+        self.now+=301
+        for _ in range(3):self.scheduler.tick()
+        self.assertEqual(len(self.backends[actor].inputs),calls)
+        self.store.relay('arkady',actor,'message','У меня появилась мысль.')
+        self.backends[actor].answers=[peer_answer(read_ids=self.store.peer_context(actor)['unread_ids'])]
+        self.now+=301;self.scheduler.tick()
+        self.assertEqual(len(self.backends[actor].inputs),calls+1)
+        self.assertEqual(self.backends[actor].inputs[-1][2]['surface'],'peer_conversation')
+        self.now+=301
+        for _ in range(3):self.scheduler.tick()
+        self.assertEqual(len(self.backends[actor].inputs),calls+1)
+
+    def test_confirmed_comment_consumes_its_source_even_without_read_ids(self):
+        post=self.root_post('arkady');self.forward('arkady',post);self.scheduler.circulate_posts()
+        source=self.store.peer_context('garik')['unread_ids'][0]
+        self.job('garik',peer_answer(decision='comment',recipient_actor_id='arkady',text='Один ответ.',post_id=post,source_ids=[source]))
+        self.assertNotIn(source,self.store.peer_context('garik')['unread_ids'])
+        payload={'life':self.store.actor_view('garik'),'peer_context':self.store.peer_context('garik'),'available_source_ids':[source]}
+        with self.assertRaises(ValueError):self.scheduler.validate_peer('garik',peer_answer(decision='comment',recipient_actor_id='arkady',text='Опять.',post_id=post,source_ids=[source]),payload)
 
     def test_public_posts_circulate_only_after_receipt_and_only_once(self):
         post=self.root_post('arkady');self.scheduler.circulate_posts();self.scheduler.circulate_posts()

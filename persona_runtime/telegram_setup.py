@@ -106,6 +106,8 @@ def handler(setup):
                     setup.life.configure(value)
                 elif self.path == '/api/life/action' and setup.life and set(value) == {'running'}:
                     setup.life.action(value['running'])
+                elif self.path == '/api/life/skip-expression' and setup.life and value == {'confirmation': 'skip_without_retry'}:
+                    setup.life.skip_failed_expression()
                 elif self.path == '/api/life/confirm-absent' and setup.life and set(value) == {'post_id', 'confirmation'} and value['confirmation'] == 'owner_checked_absent':
                     setup.life.confirm_absent(value['post_id'])
                 elif setup.life:

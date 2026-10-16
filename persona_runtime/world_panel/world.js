@@ -19,7 +19,7 @@ function renderControls(){
  $('prepare').disabled=!!state.channel_life||pending||state.busy||!!current;
  $('step').disabled=!!state.channel_life||pending||!state.model_enabled||state.paused||state.busy||!current||current.status!=='ready'||(state.max_calls!==null&&state.call_count>=state.max_calls);
  $('step').textContent=current?'Вызвать: '+phaseNames[current.phase]:'Следующий этап';
- $('pause').disabled=pending;$('pause').textContent=state.paused?'Снять паузу':'Пауза после этапа';
+ $('pause').disabled=pending||!!state.live_status?.error;$('pause').textContent=state.live_status?.error?'Сначала разобрать ошибку':state.paused?'Продолжить жизнь':'Пауза после этапа';
  $('abandon').disabled=!!state.channel_life||pending||state.busy||!current||current.status==='running';
  $('speech').disabled=!!state.channel_life||pending||state.busy||!!current||!latest||latest.status!=='complete'||!!latest.value.results.speech;
  $('save-settings').disabled=pending||!dirty;$('save-settings').textContent=dirty?'Применить к следующим эпизодам':'Параметры сохранены';
@@ -41,11 +41,17 @@ function render(value){
  $('mode').textContent=value.model_enabled?'Совместный модельный просмотр':'Подготовка · без модели';
  $('scope').textContent=value.model_enabled?'Каждая кнопка «Вызвать» выполняет один модельный этап. Автоматических повторов и публикаций нет.':'Подготовка совместного просмотра. Можно настроить мир и подготовить эпизод; модельные вызовы выключены.';
  if(value.channel_life){$('mode').textContent=value.paused?'Telegram · жизнь на паузе':'Telegram · собственная жизнь';$('scope').textContent=name+' сам живёт и выбирает публикации. Реальные комментарии влияют на дальнейшие решения. Пауза останавливает следующие вызовы и доставки; настройки применяются к следующим эпизодам.';}
+ $('telegram-panel').hidden=!value.telegram_url;
+ if(value.telegram_url)$('telegram-panel').href=value.telegram_url;
+ const activity=value.live_status?.activity;
+ $('live-detail').hidden=!activity;
+ $('live-detail').textContent=activity?`Начатое дело: ${activity.action} До окончания около ${activity.remaining_minutes} мин. Во время ожидания может заглянуть в Telegram.`:'';
  $('clock').textContent=clock(value.minute);
  const open=value.threads.filter(t=>t.status!=='closed');$('thread-count').textContent=open.length;
  $('thread-cap').textContent=`Предел новых историй: ${value.settings.max_threads}`;
  const current=active(),latest=value.cycles[0];$('phase').textContent=current?phaseNames[current.phase]:(latest?'Завершён':'Пока тишина');
  $('phase-detail').textContent=current?.status==='blocked'?'Остановлен, нужен просмотр':value.busy?'Модель отвечает':current?'Готов к отдельному просмотру':'Можно подготовить новый эпизод';
+ if(value.channel_life&&!value.busy&&!value.live_status?.error){$('phase-detail').textContent=value.paused?'Продолжить можно кнопкой ниже':activity?'Идёт выбранное дело; постоянные вызовы модели не нужны':'Жизнь продолжается автоматически';}
  $('call-count').textContent=value.model_enabled&&value.max_calls!==null?`${value.call_count} / ${value.max_calls}`:String(value.call_count);
  const known=value.calls.filter(c=>Number.isInteger(c.usage.input_tokens)&&Number.isInteger(c.usage.output_tokens));
  $('usage').textContent=known.length?`${known.length<value.call_count?'≥ ':''}${known.reduce((n,c)=>n+c.usage.input_tokens+c.usage.output_tokens,0).toLocaleString('ru-RU')} токенов по полученному usage`:(value.call_count?'Usage пока неизвестен':'Открытие панели ничего не расходует');
@@ -91,7 +97,7 @@ function render(value){
  const notes=$('notes');notes.replaceChildren();if(!value.notes.length)notes.append(el('p','Пока без заметок.','empty'));
  for(const n of value.notes){const card=el('article',undefined,'saved-note');card.append(el('small',`${clock(n.minute)} · ${value.actors.find(a=>a.id===n.actor_id)?.name||n.actor_id}`),el('p',n.text));notes.append(card);}
  const entities=$('entities');entities.replaceChildren();for(const e of value.entities){const card=el('article',undefined,'entity');card.append(el('strong',e.name),el('p',e.condition));entities.append(card);}
- if(value.failure){$('banner').textContent=value.failure;$('banner').classList.remove('hidden');}
+ $('banner').textContent=value.failure||'';$('banner').classList.toggle('hidden',!value.failure);
  renderControls();
 }
 async function refresh(){try{const response=await fetch('/api/state');if(!response.ok)throw Error();render(await response.json());}catch{ $('banner').textContent='Панель не получила состояние. Действия не повторяются автоматически.';$('banner').classList.remove('hidden');}}

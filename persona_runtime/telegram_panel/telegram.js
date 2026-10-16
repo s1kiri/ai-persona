@@ -26,6 +26,8 @@ function render(value){
   $('wake-value').textContent=$('wake').value+' мин';$('episode-minutes-value').textContent=$('episode-minutes').value+' мин';$('sharing-appetite-value').textContent=$('sharing-appetite').value+' / 100';
   $('life-save').disabled=busy||!lifeDirty;
   $('life-action').disabled=busy||!!life.error;$('life-action').textContent=life.paused?'Продолжить жизнь':'Пауза после текущего этапа';
+  $('life-repair').hidden=!life.can_skip_failed_expression;
+  $('skip-expression').disabled=busy||!life.can_skip_failed_expression;
   $('awake-status').textContent=life.awake?.active?(life.awake.until===null?'Mac защищён от сна, пока работает процесс персонажа. Блокировка экрана допустима.':`Mac защищён от сна до ${new Date(life.awake.until*1000).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'})} МСК. Блокировка экрана допустима.`):'Защита от сна сейчас не действует.';
   $('messages-title').textContent='Реальные комментарии';$('messages-intro').textContent='Комментарии под новыми постами попадают в память вместе с исходной записью. Отвечать на каждый не обязательно.';
   $('test-post').hidden=true;$('delivery-status').hidden=true;$('footer').textContent='Пульс мира показывает мысли, поступки, истории и дословные публикации. Ошибки и неизвестные доставки останавливаются без автоматического повтора.';
@@ -89,4 +91,5 @@ $('photos').addEventListener('change',()=>{lifeDirty=true;$('life-save').disable
 for(const id of ['visit-turns','away-minutes','episode-minutes','sharing-appetite'])$(id).addEventListener('input',()=>{lifeDirty=true;$(id+'-value').textContent=$(id).value+(id==='sharing-appetite'?' / 100':id!=='visit-turns'?' мин':'');$('life-save').disabled=false;});
 $('life-form').addEventListener('submit',async event=>{event.preventDefault();const options={wake_minutes:Number($('wake').value),photos:$('photos').checked};if(state.life.controls.sharing_appetite!==undefined)options.sharing_appetite=Number($('sharing-appetite').value);if(state.life.controls.episode_minutes!==undefined)options.episode_minutes=Number($('episode-minutes').value);if(state.life.reader_memory)Object.assign(options,{visit_turns:Number($('visit-turns').value),away_minutes:Number($('away-minutes').value)});if(await post('/api/life/settings',options)){lifeDirty=false;render(state);}});
 $('life-action').addEventListener('click',()=>post('/api/life/action',{running:state.life.paused}));
+$('skip-expression').addEventListener('click',()=>post('/api/life/skip-expression',{confirmation:'skip_without_retry'}));
 refresh();setInterval(()=>{if(!document.hidden)refresh();},2000);

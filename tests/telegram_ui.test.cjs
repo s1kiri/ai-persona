@@ -108,3 +108,19 @@ test('physical wait explains its deadline and displays action text literally',()
  t.run('render({...sample,life:{...live,activity:null}})');
  assert.equal(t.el('life-activity').hidden,true);
 });
+test('empty failed speech requires explicit skip and does not auto-resume or send',async()=>{
+ const t=setup();t.ctx.live={paused:true,error:'Модель не завершила реплику',can_skip_failed_expression:true,
+  controls:{wake_minutes:5,photos:true},world_calls:43};
+ t.run('render({...sample,life:live})');
+ assert.equal(t.el('life-repair').hidden,false);
+ assert.equal(t.el('life-action').disabled,true);
+ const promise=t.el('skip-expression').handlers.click();
+ assert.equal(t.requests[0].path,'/api/life/skip-expression');
+ assert.equal(JSON.parse(t.requests[0].options.body).confirmation,'skip_without_retry');
+ t.requests[0].resolve({...t.sample,life:{...t.ctx.live,error:null,can_skip_failed_expression:false}});
+ await promise;
+ assert.equal(t.requests.length,1);
+ assert.equal(t.el('life-repair').hidden,true);
+ assert.equal(t.el('life-action').disabled,false);
+ assert.match(t.el('life-action').textContent,/Продолжить/);
+});

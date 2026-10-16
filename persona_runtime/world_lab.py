@@ -14,6 +14,7 @@ import time
 
 from .daemon import same_secret
 from .world import WorldStore, WorldSession, WorldConflict
+from .telegram import TelegramError
 
 ASSETS = Path(__file__).parent / 'world_panel'
 
@@ -56,6 +57,11 @@ class Laboratory:
         value['night'] = self.store.get('night')
         value['channel_life'] = self.store.actor_get(self.actor_id, 'channel_life')
         value['telegram_url'] = getattr(self, 'telegram_url', None)
+        if getattr(self, 'life', None):
+            value['live_status'] = {**self.life.get('life_status'),
+                                    'phase': self.life.current_phase,
+                                    'activity': self.life.activity(),
+                                    'can_skip_failed_expression': self.life.failed_expression() is not None}
         return value
 
     def prepare(self, actor_id, minutes):
@@ -151,7 +157,12 @@ def handler(lab):
                 elif self.path == '/api/prepare' and set(value) == {'actor_id', 'minutes'}:
                     lab.prepare(value['actor_id'], value['minutes'])
                 elif self.path == '/api/action' and set(value) == {'paused'}:
-                    lab.store.pause(value['paused'])
+                    if lab.store.actor_get(lab.actor_id, 'channel_life'):
+                        if not getattr(lab, 'life', None) or type(value['paused']) is not bool:
+                            raise WorldConflict('live channel controls are unavailable')
+                        lab.life.action(not value['paused'])
+                    else:
+                        lab.store.pause(value['paused'])
                 elif self.path == '/api/step' and set(value) == {'cycle_id', 'phase', 'revision'}:
                     lab.step(value['cycle_id'], value['phase'], value['revision'])
                 elif self.path == '/api/abandon' and set(value) == {'cycle_id'}:
@@ -166,6 +177,8 @@ def handler(lab):
                 else:
                     return self.reply(404, {'error': 'unknown action'})
                 return self.reply(200, lab.state())
+            except TelegramError as error:
+                return self.reply(409, {'error': str(error)})
             except WorldConflict:
                 return self.reply(409, {'error': 'Состояние изменилось или действие сейчас недоступно. Обнови панель.'})
             except (ValueError, TypeError, KeyError):

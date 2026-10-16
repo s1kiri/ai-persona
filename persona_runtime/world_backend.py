@@ -3,7 +3,7 @@ import json
 import time
 
 from .app_server import AppServerBackend, cumulative_delta
-from .codex import CodexError, CodexCancelled
+from .codex import CodexError, CodexCancelled, safe_cli_error
 from .world_protocol import SCHEMAS
 from . import research
 from .world_intent import INTENT_SCHEMA
@@ -19,6 +19,7 @@ class WorldBackend(AppServerBackend):
             raise ValueError('unknown world role')
         self.last_usage = {}
         self.last_output = None
+        self.last_diagnostics = {'events': [], 'turn_completed': False, 'turn_failed': False}
         web = stage == 'research'
         if web != self.research_host:
             raise ValueError('native research requires its separate web-enabled process')
@@ -105,8 +106,17 @@ class WorldBackend(AppServerBackend):
                     if item.get('type') == 'agentMessage' and method == 'item/completed' and item.get('phase') != 'commentary':
                         answers[item['id']] = item.get('text', '')
                 elif method == 'error':
+                    diagnostic = safe_cli_error('error', data.get('error', {}).get('message', ''))
+                    diagnostic['will_retry'] = data.get('willRetry') is True
+                    self.last_diagnostics['events'].append(diagnostic)
+                    # The server is still executing this SAME turn. Do not start
+                    # another request or discard its valid eventual result.
+                    if diagnostic['will_retry'] and data.get('turnId') == turn and len(self.last_diagnostics['events']) <= 8:
+                        continue
                     raise CodexError('world stream error; no automatic retry')
                 elif method == 'turn/completed':
+                    self.last_diagnostics['turn_completed'] = data['turn']['status'] == 'completed'
+                    self.last_diagnostics['turn_failed'] = data['turn']['status'] != 'completed'
                     if data['turn']['status'] != 'completed':
                         raise CodexError('world call did not complete')
                     break

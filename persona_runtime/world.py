@@ -768,13 +768,15 @@ class WorldStore:
             self.db.execute("UPDATE world_cycles SET status='ready',phase='speech',revision=?,value=? WHERE id=?",
                             (self.get('revision'), json.dumps(cycle['value'], ensure_ascii=False), cycle_id))
 
-    def fail(self, call_id, usage=None, rejected=None, error_type='Error'):
+    def fail(self, call_id, usage=None, rejected=None, error_type='Error', diagnostics=None):
         with self.lock, self.db:
             row = self.db.execute('SELECT cycle_id FROM world_calls WHERE id=?', (call_id,)).fetchone()
             self.db.execute("UPDATE world_calls SET status='failed',error='stage failed; review required, no automatic retry',usage=? WHERE id=? AND status='started'",
                             (json.dumps(usage or {}), call_id))
             if row:
                 cycle = self.cycle(row[0])
+                cycle['value']['failure'] = {'stage': cycle['phase'], 'error_type': error_type,
+                                            'diagnostics': diagnostics or {}}
                 if rejected is not None:
                     cycle['value']['rejected'] = {'stage': cycle['phase'], 'answer': rejected,
                                                   'error_type': error_type}
@@ -1086,5 +1088,6 @@ class WorldSession:
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = social_answer if social_answer is not None else answer if answer is not None else getattr(active_backend, 'last_output', None)
-            self.store.fail(call_id, getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__)
+            self.store.fail(call_id, getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__,
+                            getattr(active_backend, 'last_diagnostics', {}))
             raise

@@ -50,6 +50,23 @@ class ProfileHostTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             social.sources(['arkady_memory_body'], social.evidence('arkady'), outcome=True)
 
+    def test_background_start_accepts_slow_telegram_verification_before_readiness(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        directory = MANIFEST.parents[2] / '.local'
+        directory.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=directory) as temporary:
+            root = Path(temporary)
+            life = root / 'life'; life.mkdir()
+            (life / 'live.json').write_text(json.dumps({'pid': 123456, 'model_enabled': True}))
+            child = SimpleNamespace(pid=123456, poll=lambda: None, terminate=Mock(), wait=Mock())
+            with patch('persona_runtime.channel_life.subprocess.Popen', return_value=child), \
+                 patch('persona_runtime.channel_life.time.monotonic', side_effect=[0, 13]), \
+                 patch('builtins.print'):
+                live_main(['--profile', str(MANIFEST), '--data-dir', str(life),
+                           '--telegram-dir', str(root/'telegram'), '--background'])
+            child.terminate.assert_not_called()
+
     def test_restart_keeps_mutated_memory_and_pending_cycle_without_reimport(self):
         directory = self.root / 'world'
         store = open_world(directory, self.profile)

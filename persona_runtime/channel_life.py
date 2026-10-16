@@ -136,6 +136,7 @@ class ChannelLife:
         self.worker = None
         self.active_lock = threading.Lock()
         self.current_phase = None
+        self.lab.life = self
         self.social = None
         with self.store.lock, self.store.db:
             self.store.db.executescript('''
@@ -176,6 +177,7 @@ class ChannelLife:
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
                     'awake': self.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
             value['activity'] = self.activity()
+            value['can_skip_failed_expression'] = self.failed_expression() is not None
             view = self.store.actor_view(self.actor_id)
             value.update(memories=view['memories'], concerns=view['concerns'], undertakings=view['undertakings'])
             if self.social:
@@ -200,6 +202,48 @@ class ChannelLife:
                 return {'cycle_id': row['id'], 'action': cycle['results']['choice']['action'],
                         'until': until, 'remaining_minutes': max(0, math.ceil((until-self.now())/60))}
             return None
+
+    def failed_expression(self):
+        """Only a failed, empty speech service can be discarded without replay."""
+        with self.store.lock:
+            if self.store.get('shared_host') or not self.store.get('paused') or self.lab.busy or self.get('life_status')['status'] != 'error':
+                return None
+            blocked = self.store.db.execute(
+                "SELECT id FROM world_cycles WHERE actor_id=? AND status IN ('blocked','running')", (self.actor_id,)).fetchall()
+            if len(blocked) != 1:
+                return None
+            cycle = self.store.cycle(blocked[0]['id'])
+            if (cycle['status'] != 'blocked' or cycle['phase'] != 'share' or
+                    not cycle['value'].get('direct_channel') or cycle['value'].get('results') or
+                    cycle['value'].get('rejected') is not None or cycle['revision'] != self.store.get('revision')):
+                return None
+            call = self.store.db.execute("SELECT * FROM world_calls WHERE cycle_id=? ORDER BY rowid DESC LIMIT 1", (cycle['id'],)).fetchone()
+            if not call or call['status'] != 'failed' or call['stage'] != 'share':
+                return None
+            if (self.store.db.execute('SELECT 1 FROM world_events WHERE cycle_id=?', (cycle['id'],)).fetchone() or
+                    self.store.db.execute("SELECT 1 FROM world_calls WHERE status='started'").fetchone()):
+                return None
+            # Unknown external operations require their own receipt review.
+            if (self.store.db.execute("SELECT 1 FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? AND j.status IN ('sending','unknown')", (self.actor_id,)).fetchone() or
+                    self.store.db.execute("SELECT 1 FROM channel_reaction_jobs WHERE status IN ('sending','unknown')").fetchone()):
+                return None
+            return {'cycle_id': cycle['id'], 'call_id': call['id']}
+
+    def skip_failed_expression(self):
+        """Explicit owner review: retain failure, never manufacture or retry speech."""
+        with self.active_lock, self.store.lock, self.store.db:
+            review = self.failed_expression()
+            if review is None:
+                raise TelegramError('Пропуск недоступен: есть результат, действие или доставка, требующие отдельной проверки.')
+            self.store.abandon(review['cycle_id'])
+            self.put('stage_reviews', [*(self.get('stage_reviews') or []),
+                {**review, 'at': self.now(), 'decision': 'skip_empty_failed_expression',
+                 'basis': 'owner_explicit_review', 'external_events': 0, 'model_replay': False}])
+            status = self.get('life_status')
+            self.put('life_status', {**status, 'status': 'paused', 'error': None})
+            self.put('waiting_channel_next_check', self.now()+self.get('life_controls')['wake_minutes']*60)
+            self.lab.failure = None
+            self.current_phase = None
 
     def configure(self, value):
         checked = controls_checked({**self.get('life_controls'),**value})
@@ -640,8 +684,12 @@ class ChannelLife:
             with self.store.lock, self.store.db:
                 self.put('life_error_detail', {'type': type(error).__name__, 'phase': self.current_phase,
                                                     'telegram_code': error.code if isinstance(error, TelegramError) else None})
-            self.block(str(error) if isinstance(error, TelegramError) else
+            from .codex import CodexError
+            message = ('Модель не завершила реплику. На этом этапе отправки в Telegram не было. '
+                       'Несостоявшуюся реплику можно пропустить после проверки; автоматического повтора нет.'
+                       if isinstance(error, CodexError) and self.current_phase == 'share' else
                        'Жизнь остановлена после ошибки. Память и результат сохранены; автоматического повтора нет.')
+            self.block(str(error) if isinstance(error, TelegramError) else message)
         finally:
             self.lab.busy = False
             self.active_lock.release()
@@ -729,7 +777,10 @@ def main(argv=None):
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen([sys.executable, '-m', 'persona_runtime.channel_life', *arguments],
                                        cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        deadline = time.monotonic()+12
+        # Startup verifies four Telegram reads (each bounded at 30 seconds).
+        # A 12-second parent timeout killed healthy children before they could
+        # serve either panel on a slow connection.
+        deadline = time.monotonic()+150
         while time.monotonic()<deadline:
             if process.poll() is not None:
                 raise RuntimeError('life process stopped before readiness')

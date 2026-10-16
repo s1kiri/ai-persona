@@ -108,6 +108,47 @@ class BackendTests(unittest.TestCase):
             self.backend.generate('world', 'Synthetic role', {})
         self.assertEqual(sum(m == 'turn/start' for m, _ in self.backend.client.calls), 1)
 
+    def reconnecting(self, errors, status='completed'):
+        class Reconnecting(Client):
+            def rpc(client, method, params, timeout=30):
+                value = super().rpc(method, params, timeout)
+                if method == 'turn/start':
+                    client.events[-1]['params']['turn']['status'] = status
+                    for retry in reversed(errors):
+                        client.events.appendleft({'method': 'error', 'params': {
+                            'threadId': params['threadId'], 'turnId': 'synthetic-turn',
+                            'willRetry': retry, 'error': {'message': 'stream disconnected; SECRET-URL-AND-TOKEN'}}})
+                return value
+        self.backend.client = Reconnecting(event())
+
+    def test_server_reconnect_keeps_same_turn_and_accepts_only_completed_result(self):
+        self.reconnecting([True, True])
+        answer, _ = self.backend.generate('world', 'Synthetic', {})
+        self.assertEqual(answer, event())
+        calls = self.backend.client.calls
+        self.assertEqual(sum(m == 'turn/start' for m, _ in calls), 1)
+        self.assertFalse(any(m == 'turn/interrupt' for m, _ in calls))
+        diagnostic = self.backend.last_diagnostics
+        self.assertTrue(diagnostic['turn_completed'])
+        self.assertEqual(len(diagnostic['events']), 2)
+        self.assertNotIn('SECRET-', json.dumps(diagnostic))
+
+    def test_fatal_error_and_non_boolean_retry_flag_do_not_accept_later_answer(self):
+        for retry in (False, None, 'true'):
+            self.reconnecting([retry])
+            with self.assertRaises(CodexError):
+                self.backend.generate('world', 'Synthetic', {})
+            self.assertEqual(sum(m == 'turn/start' for m, _ in self.backend.client.calls), 1)
+            self.assertIsNone(self.backend.last_output)
+
+    def test_failed_completion_or_excess_reconnections_never_commits_answer(self):
+        for retries, status in (([True], 'failed'), ([True], 'interrupted'), ([True]*9, 'completed')):
+            self.reconnecting(retries, status)
+            with self.assertRaises(CodexError):
+                self.backend.generate('world', 'Synthetic', {})
+            self.assertEqual(sum(m == 'turn/start' for m, _ in self.backend.client.calls), 1)
+            self.assertIsNone(self.backend.last_output)
+
     def test_minimal_startup_flags_are_opt_in_without_changing_production_default(self):
         from persona_runtime.app_server import AppServerBackend
         commands = []

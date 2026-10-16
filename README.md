@@ -54,7 +54,7 @@ python tools/check_publication.py
 перед модельным запуском. [Формат пакета](characters/README.md).
 
 **Аркадий Кедров:** собственные характер, жизнь, речь и память —
-[пакет](characters/arkady/README.md). Модель `gpt-6-luna`, reasoning `low`.
+[пакет](characters/arkady/README.md). Модель `gpt-6-luna`, reasoning `medium`.
 `./start-arkady.command lab` открывает его лабораторию без модели;
 отдельный Telegram-хост также поддерживает `--profile`.
 [Настройка, запуск и восстановление Аркадия](docs/arkady-character.md).

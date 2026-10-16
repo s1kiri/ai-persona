@@ -1,5 +1,8 @@
 """Bounded world-lab calls; only the research role can use native web."""
 import json
+import hashlib
+import copy
+from pathlib import Path
 import time
 
 from .app_server import AppServerBackend, cumulative_delta
@@ -41,6 +44,12 @@ class WorldBackend(AppServerBackend):
                   'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False}}
         if stage in SCHEMAS:
             params['outputSchema'] = SCHEMAS[stage]
+        if stage=='horizon':
+            params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
+            props=params['outputSchema']['properties']['hooks']['items']['properties']
+            for field,table in (('actor_ids','actors'),('anchor_ids','entities')):
+                choices=[item['id'] for item in payload.get('world',{}).get(table,[])]
+                if choices:props[field]['items']['enum']=choices
         if web:
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':
@@ -60,7 +69,17 @@ class WorldBackend(AppServerBackend):
             from .channel_social import LIVE_CHANNEL,LIVE_EXPERIENCE,SOCIAL_REVIEW,constrained_io
             schema={'live_channel':LIVE_CHANNEL,'live_experience':LIVE_EXPERIENCE,'social_review':SOCIAL_REVIEW}[stage]
             params['outputSchema'],model_payload,source_decode=constrained_io(schema,payload)
+            previews=model_payload.pop('_gallery_previews',[])
             params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
+            if previews and stage!='live_channel':raise ValueError('gallery previews belong only to the character speaking role')
+            if len(previews)>4:raise ValueError('gallery preview limit exceeded')
+            ids={item['id'] for item in model_payload.get('gallery',[])}
+            for photo in previews:
+                path=Path(photo['image_path'])
+                if photo['id'] not in ids or path.stat().st_size>10_000_000 or hashlib.sha256(path.read_bytes()).hexdigest()!=photo['sha256']:
+                    raise ValueError('gallery preview differs from host receipt')
+                params['input'].extend([{'type':'text','text':'Gallery photo '+photo['id']},
+                                        {'type':'localImage','path':str(path)}])
         turn = None
         try:
             if cancel and cancel.is_set():

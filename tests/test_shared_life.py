@@ -215,7 +215,7 @@ class SharedLifeTests(unittest.TestCase):
     def test_common_physical_result_is_visible_without_the_other_actors_diary(self):
         with self.store.lock,self.store.db:
             self.store.db.execute('UPDATE peer_positions SET place_id=?',('arkady_garage_yard',))
-        cid=self.plan('arkady',2);self.now+=120
+        cid=self.plan('arkady',2,'arkady_garage_yard');self.now+=120
         self.finish('arkady',cid,2,observation='SHARED-PHYSICAL-RESULT')
         view=json.dumps(self.store.actor_view('garik'),ensure_ascii=False)
         self.assertIn('SHARED-PHYSICAL-RESULT',view)

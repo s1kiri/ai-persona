@@ -68,7 +68,7 @@ class SharedRecoveryTests(unittest.TestCase):
         f.scheduler.store=f.store
         for life in f.lives.values():
             life.store=f.store;life.lab.store=f.store;life.lab.session.store=f.store
-            life.lab.session.timeline.store=f.store;life.social.store=f.store
+            life.lab.session.timeline.store=f.store;life.social.store=f.store;life.social.gallery.store=f.store
         with f.store.lock,f.store.db:
             row=f.store.db.execute("SELECT value FROM world_entities WHERE id='arkady_workbench'").fetchone()
             entity=json.loads(row[0]);entity['condition']='CURRENT-AFTER-OTHER-ACTOR'

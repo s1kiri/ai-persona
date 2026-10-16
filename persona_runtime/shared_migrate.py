@@ -16,7 +16,7 @@ from .shared_world import SharedWorldStore
 from .world import WorldConflict
 
 GLOBAL_META={'version','revision','minute','settings','settings_revision','paused','basis',
-             'host_profile','character_packages','night','review_notice','profile_revisions'}
+             'host_profile','character_packages','night','review_notice','profile_revisions','profile_overrides','awake_status'}
 SOURCE_TABLES={'world_cycles':'id','world_events':'id','world_calls':'id','world_entities':'id',
                'world_threads':'id','world_hooks':'id','world_notes':'id','world_memories':'id',
                'channel_reaction_jobs':'id','channel_jobs':'post_id','channel_read_batches':'id'}
@@ -75,6 +75,14 @@ def backup(db,path):
     os.chmod(path,0o600)
 
 
+VIRTUAL_CLOCK_FIELDS={'minute','due_minute','opens_minute','closes_minute','exposed_minute','started_minute','service_minute','at_minute'}
+
+def shift_clock(value, offset, field=None):
+    if isinstance(value,dict):return {k:shift_clock(v,offset,k) for k,v in value.items()}
+    if isinstance(value,list):return [shift_clock(v,offset,field) for v in value]
+    if field in VIRTUAL_CLOCK_FIELDS and type(value) is int:return value+offset
+    return value
+
 def transform(value, aliases, prefixes=(), media=None, field=None):
     if isinstance(value,dict):return {k:transform(v,aliases,prefixes,media,k) for k,v in value.items()}
     if isinstance(value,list):return [transform(v,aliases,prefixes,media,field) for v in value]
@@ -116,7 +124,7 @@ def merge_rows(target,source,offset,aliases,prefixes,media):
             for key,value in dict(record).items():
                 if table=='reader_memory_changes' and key=='id' and isinstance(value,int):continue
                 if key in ('value','sources','usage','receipt','receipts','photo') and isinstance(value,str):
-                    try:value=json.dumps(transform(json.loads(value),aliases,prefixes,media,'sources' if key=='sources' else None),ensure_ascii=False)
+                    try:value=json.dumps(shift_clock(transform(json.loads(value),aliases,prefixes,media,'sources' if key=='sources' else None),offset),ensure_ascii=False)
                     except json.JSONDecodeError:pass
                 elif isinstance(value,str) and (key in ID_FIELDS or key.endswith('_id') or key.endswith('_cycle')):
                     value=aliases.get(value,value)
@@ -182,11 +190,30 @@ def migrate(config, source_worlds, source_telegrams, *, apply=False, adopt_legac
                 for key,value in source['meta'].items():
                     if key in GLOBAL_META or key.startswith('shared_'):continue
                     if key.startswith('actor:') and not key.startswith('actor:'+actor+':'):continue
-                    target.put(key,transform(value,aliases,prefixes,final_media))
+                    target.put(key,shift_clock(transform(value,aliases,prefixes,final_media),minute-source['meta']['minute']))
                 target.actor_put(actor,'life_status',{**(target.actor_get(actor,'life_status') or {}),'status':'paused'})
                 target.actor_put(actor,'channel_epoch',{'wall':common_time,'minute':minute})
                 if source==sources[0]:
                     target.put('settings',source['meta']['settings']);target.put('settings_revision',source['meta']['settings_revision'])
+                override=(source['meta'].get('profile_overrides') or {}).get(actor)
+                if override:
+                    from .character_profile import CharacterProfile
+                    manifest=(source['world']/override['manifest']).resolve()
+                    if (not manifest.is_relative_to(source['world']/'profiles'/actor) or
+                            override['digest']!=item['profile'].digest):
+                        raise WorldConflict('private profile override does not match imported actor')
+                    origin=manifest.parent
+                    if any(p.is_symlink() for p in origin.rglob('*')):
+                        raise WorldConflict('resolve profile symlinks before migration')
+                    folder=stage/'world'/Path(override['manifest']).parent
+                    shutil.copytree(origin,folder,ignore=shutil.ignore_patterns('backup'))
+                    if CharacterProfile.load(folder/manifest.name).digest!=override['digest']:
+                        raise WorldConflict('copied private profile digest differs')
+                    for path in [folder,*folder.rglob('*')]:os.chmod(path,0o700 if path.is_dir() else 0o600)
+                    target.put('profile_overrides',{**(target.get('profile_overrides') or {}),actor:override})
+                revisions=source['meta'].get('profile_revisions') or []
+                target.put('profile_revisions',[*(target.get('profile_revisions') or []),
+                    *shift_clock(transform(revisions,aliases,prefixes,final_media),minute-source['meta']['minute'])])
                 copy_media(source['world'],stage/'world'/'media'/actor,aliases,prefixes)
                 library=stage/'world'/'media'/actor/'visual-memory/references.sqlite3'
                 if library.exists():

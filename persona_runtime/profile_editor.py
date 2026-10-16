@@ -95,4 +95,5 @@ def edit_profile(store, previous, value, connections, *, lives=(), scheduler=Non
                 backend.close();backend.model=value['model'];backend.reasoning_effort=value['reasoning_effort']
             session.actor_prompts[updated.actor_id]=updated.persona
             life.persona=updated.persona;life.references=updated.references;life.lab.profile=updated
+            if life.social:life.social.references=updated.references
         return updated

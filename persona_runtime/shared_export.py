@@ -41,7 +41,8 @@ def main(argv=None):
             raise WorldConflict('this world already has a profile; copy its EXACT existing package instead')
         canon=meta['basis'][actor]
         environment=[json.loads(r[0]) for r in db.execute('SELECT value FROM world_entities WHERE id!=?',(actor,))]
-        memories=[json.loads(r[0]) for r in db.execute('SELECT value FROM world_memories WHERE actor_id=?',(actor,))]
+        has_memories=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='world_memories'").fetchone()
+        memories=[json.loads(r[0]) for r in db.execute('SELECT value FROM world_memories WHERE actor_id=?',(actor,))] if has_memories else []
     output.mkdir(parents=True,mode=0o700)
     for source,target in [(args.persona,'persona.md'),(args.speech_contract,'speech-contract.md')]:
         shutil.copyfile(source,output/target);os.chmod(output/target,0o600)

@@ -24,6 +24,20 @@ START_DESIRE = 'Хочу завести свой Telegram-канал и дели
 DEFAULT_CONTROLS = {'wake_minutes': 15, 'photos': True, 'visit_turns': 3, 'away_minutes': 5, 'episode_minutes': 15, 'sharing_appetite': 50}
 
 
+def live_interpreter(root, executable, platform):
+    """Avoid the Apple CLT Python/SQLite runtime observed spinning in cache purge.
+
+    Keep the configured venv path (not its resolved base binary) so its packages
+    are available. Other hosts and already configured interpreters are unchanged.
+    """
+    if platform=='darwin' and executable.startswith('/Library/Developer/CommandLineTools/'):
+        candidate=Path(root)/'.venv/bin/python'
+        if not candidate.is_file():
+            raise ValueError('Configure .venv and start channel_life with .venv/bin/python')
+        return str(candidate)
+    return None
+
+
 def controls_checked(value):
     if not isinstance(value,dict) or set(value) not in (set(DEFAULT_CONTROLS),set(DEFAULT_CONTROLS)-{'sharing_appetite'},set(DEFAULT_CONTROLS)-{'sharing_appetite','episode_minutes'},{'wake_minutes','photos'}):
         raise ValueError('invalid live life controls')
@@ -123,7 +137,7 @@ def split_text(text, limit=3500):
 
 class ChannelLife:
     def __init__(self, lab, connection, persona, renderer=None, *, now=time.time, photo_factory=None, social_enabled=False,
-                 actor_id=None, references=None):
+                 actor_id=None, references=None, lively_world=None, recall_enabled=False):
         self.lab, self.store, self.connection = lab, lab.store, connection
         self.actor_id = actor_id or lab.actor_id
         if self.actor_id not in lab.session.actor_prompts:
@@ -151,11 +165,57 @@ class ChannelLife:
             if 'deferred_until' not in columns:
                 self.store.db.execute('ALTER TABLE channel_read_batches ADD COLUMN deferred_until REAL')
             self.put('life_controls',{**DEFAULT_CONTROLS,**(self.get('life_controls') or {})})
+            if self.get('world_profile') is None:
+                self.put('world_profile', {'active': lab.session.lively_world, 'requested': lab.session.lively_world})
+            lab.session.lively_world = self.get('world_profile')['active']
+        if lively_world is not None:
+            self.request_world_profile(lively_world)
+        self.sync_world_profile()
         if social_enabled:
             from .channel_social import SocialMemory
             self.social=SocialMemory(self.store,now=self.now)
+            if recall_enabled:
+                from .channel_recall import ChannelRecall
+                self.social.recall=ChannelRecall(self.store)
+            self.social.renderer_available=renderer is not None
+            self.social.references=self.references
             self.lab.session.channel_extension=self.social
             self.backfill_people()
+            self.social.gallery.backfill()
+
+    def request_world_profile(self, lively):
+        if type(lively) is not bool:
+            raise ValueError('invalid world profile')
+        with self.store.lock, self.store.db:
+            self.put('world_profile', {**self.get('world_profile'), 'requested': lively})
+
+    def sync_world_profile(self):
+        """Finish committed episodes in their original mode, then switch once.
+
+        Unseen possibilities are superseded, not deleted or made into events.
+        Already exposed hooks and all actual stories retain their continuity.
+        """
+        with self.store.lock, self.store.db:
+            profile = self.get('world_profile')
+            row = self.store.db.execute("SELECT value FROM world_cycles WHERE actor_id=? AND status IN ('ready','running','blocked','waiting') ORDER BY rowid LIMIT 1",(self.actor_id,)).fetchone()
+            if row:
+                self.lab.session.lively_world = json.loads(row[0]).get('lively_world', False)
+                return
+            if profile['active'] != profile['requested']:
+                superseded = []
+                for row in self.store.db.execute('SELECT id,value FROM world_hooks').fetchall():
+                    hook = json.loads(row['value'])
+                    if self.actor_id not in hook['actor_ids'] or hook.get('superseded') or hook.get('exposed_to') or hook['closes_minute'] < self.store.get('minute'):
+                        continue
+                    hook['superseded'] = {'reason': 'world_profile_changed', 'at': self.now()}
+                    self.store.db.execute('UPDATE world_hooks SET value=? WHERE id=?', (json.dumps(hook, ensure_ascii=False), row['id']))
+                    superseded.append(row['id'])
+                history = self.get('world_profile_history') or []
+                history.append({'at': self.now(), 'from': profile['active'], 'to': profile['requested'], 'superseded_hook_ids': superseded})
+                self.put('world_profile_history', history)
+                profile = {**profile, 'active': profile['requested']}
+                self.put('world_profile', profile)
+            self.lab.session.lively_world = profile['active']
 
     def get(self, key):
         return self.store.actor_get(self.actor_id, key)
@@ -175,7 +235,10 @@ class ChannelLife:
                     'paused': self.store.get('paused'), 'busy': self.lab.busy,
                     'phase': self.current_phase, 'controls': self.get('life_controls'),
                     'world_calls': self.store.monitor()['call_count'], 'jobs': jobs,
-                    'awake': self.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
+                    'persona_sha256': hashlib.sha256(self.persona.encode()).hexdigest(),
+                    'role_boundary': {'active': True, 'on_violation': 'pause_before_delivery'},
+                    'world_profile': {**self.get('world_profile'), 'active': self.lab.session.lively_world},
+                    'awake': self.store.get('awake_status') if self.store.get('shared_host') else self.get('awake_status'), 'cadence': 'Свободно: графика и обязательных постов нет.'}
             value['activity'] = self.activity()
             value['can_skip_failed_expression'] = self.failed_expression() is not None
             view = self.store.actor_view(self.actor_id)
@@ -183,6 +246,7 @@ class ChannelLife:
             if self.social:
                 value.update(self.social.context(self.actor_id))
                 value['attention']=self.get('channel_visit')
+                value['recall']=self.social.recall.report if self.social.recall else {'mode':'disabled'}
             return value
 
     def activity(self):
@@ -314,6 +378,7 @@ class ChannelLife:
                 value={'brief':director(self.store.state(),self.actor_id,1,1),'inputs':{},'results':{},
                        'personal_life':self.lab.session.personal_life,'lossless_intentions':self.lab.session.lossless_intentions,
                        'direct_channel':True,'active_world':self.lab.session.active_world,'entry_phase':'share',
+                       'lively_world':self.lab.session.lively_world,
                        'bootstrap':bootstrap,'channel_visit':True,
                        'channel_purpose':(self.get('channel_attention') or {}).get('purpose','comments')}
                 if suspended_cycle_id:
@@ -382,14 +447,24 @@ class ChannelLife:
             return count
 
     def photo(self, post):
-        if not self.get('life_controls')['photos'] or self.renderer is None or post['value'].get('reply_to'):
+        if not self.get('life_controls')['photos']:
             return None
         from .world_photo import photo_context
         cycle = self.store.cycle(post['cycle_id'])
+        output=cycle['value'].get('social_output',{})
+        explicit='attachment' in output
+        attachment=output.get('attachment')
+        if explicit and attachment is None:return None
+        if attachment and attachment['mode']=='existing':
+            known=[e['id'] for e in self.store.actor_view(post['actor_id'])['entities']]
+            item=self.social.gallery.get(post['actor_id'],attachment['gallery_id'],known)
+            return {'status':'reused','gallery_id':item['id'],
+                    'choice':{'decision':'show','framing':item['view'],'source_ids':item['source_ids']},
+                    'image':{k:item[k] for k in ('image_path','sha256','subject_ids')},'image_calls':0}
+        if self.renderer is None or post['value'].get('reply_to') and not explicit:return None
         state = self.store.state_for_cycle(cycle, self.store.state())
-        context = photo_context(self.actor_id, state['entities'], state['history'],
-                                cycle['value']['results'].get('experience', {}).get('note', ''),
-                                portrait_subjects=self.references)
+        context = photo_context(post['actor_id'], state['entities'], state['history'],
+                                cycle['value']['results'].get('experience', {}).get('note', ''), portrait_subjects=self.references)
         if not context['sources']:
             return None  # An initial thought has no occurred object scene to photograph.
         context['ready_post'] = post['value']['text']
@@ -401,7 +476,15 @@ class ChannelLife:
             factory = self.photo_factory or AutonomousPhotoCase
             case = factory(directory, self.lab.session.backend, self.renderer, self.persona,
                            reference_library=library, cancel=self.cancel, references=self.references)
-            return case.run(context)
+            if attachment:
+                choice={'decision':'show','reason':'Selected by the character with this message',
+                        **{k:attachment[k] for k in ('subject_ids','source_ids','framing')},'caption':post['value']['text'][:2000]}
+                result=case.run(context,choice=choice)
+            else:result=case.run(context)
+            if self.social and result['status']=='passed':
+                result['gallery_id']=self.social.gallery.register(result['image'],post['actor_id'],result['choice']['framing'],
+                    result['choice']['source_ids'],post['value']['text'],new_job=post['id'])
+            return result
         finally:
             library.close()
 
@@ -410,6 +493,9 @@ class ChannelLife:
         return self.store.directory / 'media' / self.actor_id if self.store.get('shared_host') else self.store.directory
 
     def deliver(self, post):
+        if post['value'].get('retracted'):return
+        from .role_boundary import check_character_speech
+        check_character_speech(post['value']['text'],self.store.db.execute('SELECT name FROM world_actors WHERE id=?',(post['actor_id'],)).fetchone()[0])
         with self.store.lock, self.store.db:
             old = self.store.db.execute('SELECT status FROM channel_jobs WHERE post_id=?', (post['id'],)).fetchone()
             if old:
@@ -427,7 +513,7 @@ class ChannelLife:
             with self.store.lock, self.store.db:
                 self.store.db.execute('DELETE FROM channel_jobs WHERE post_id=?', (post['id'],))
             return
-        image = image_result['image'] if image_result and image_result['status'] == 'passed' else None
+        image = image_result['image'] if image_result and image_result['status'] in ('passed','reused') else None
         reply_to = None
         if post['value'].get('reply_to'):
             audience = next(e for e in self.store.channel_context(self.actor_id) if e['id'] == post['value']['audience_id'])
@@ -442,20 +528,22 @@ class ChannelLife:
         if attempts:
             key += ':review' + str(attempts)
         if image and len(text) <= 1024:
-            receipts.append(self.connection.send(key + ':photo', text, photo=Path(image['image_path']).read_bytes()))
+            receipts.append(self.connection.send(key + ':photo', text, reply_to=reply_to, photo=Path(image['image_path']).read_bytes()))
         else:
             for index, part in enumerate(split_text(text)):
                 receipts.append(self.connection.send(key + ':part' + str(index), part, reply_to=reply_to))
             if image:
-                receipts.append(self.connection.send(key + ':photo', '', photo=Path(image['image_path']).read_bytes()))
+                receipts.append(self.connection.send(key + ':photo', '', reply_to=reply_to, photo=Path(image['image_path']).read_bytes()))
         compact = [{k: r[k] for k in ('chat_id', 'message_id', 'key', 'status')} for r in receipts]
         photo_summary = {'status': image_result['status'], 'choice': image_result['choice']} if image_result else None
+        if image_result and image_result.get('gallery_id'):photo_summary['gallery_id']=image_result['gallery_id']
         if image:
             from .world_media import MediaReferenceLibrary
             library = MediaReferenceLibrary(self.media_directory / 'visual-memory')
             try:
-                library.register(image, self.actor_id, image_result['choice']['framing'], source='channel',
-                                 channel_post_id=str(receipts[-1]['message_id']))
+                if image_result['status']!='reused':
+                    library.register(image, post['actor_id'], image_result['choice']['framing'], source='channel',
+                                     channel_post_id=str(receipts[-1]['chat_id'])+':'+str(receipts[-1]['message_id']))
             finally:
                 library.close()
         with self.store.lock, self.store.db:
@@ -467,6 +555,7 @@ class ChannelLife:
             self.store.db.execute('UPDATE world_events SET value=? WHERE id=?', (json.dumps(value, ensure_ascii=False), post['id']))
             if self.social:
                 self.social.delivered(post)
+                if image:self.social.gallery.delivered(post['actor_id'],image_result['gallery_id'],post['id'],receipts[-1])
             start = self.get('channel_start')
             if start and not start.get('fulfilled') and not post['value'].get('reply_to'):
                 self.put('channel_start', {**start, 'fulfilled': True,
@@ -502,7 +591,19 @@ class ChannelLife:
                     self.put('channel_attention',{'focus_ids':[],'fulfill_intent':None,'allowed_reactions':[]})
             return []
         if not cache or self.now()-cache['checked']>300:
-            cache={'checked':self.now(),'emojis':self.connection.reaction_options()}
+            self.current_phase='reaction_capabilities'
+            try:
+                cache={'checked':self.now(),'emojis':self.connection.reaction_options()}
+            except TelegramError as error:
+                # Optional read-only discovery must not stop life on a network outage.
+                # Authentication/rights/API errors and actual reaction sends still block.
+                transport=getattr(error,'transport',None)
+                with self.store.lock,self.store.db:
+                    self.put('last_focus_failure',{'at':self.now(),'type':type(error).__name__,
+                        'telegram_code':error.code,'method':'getChat','transport':transport})
+                if error.code is not None or not transport or transport.get('method')!='getChat':
+                    raise
+                cache={'checked':self.now(),'emojis':[],'degraded':True}
         with self.store.lock,self.store.db:
             self.put('reaction_capabilities',cache)
             self.put('channel_attention',{'purpose':'comments','focus_ids':ids,'fulfill_intent':fulfill,'allowed_reactions':cache['emojis']})
@@ -525,7 +626,21 @@ class ChannelLife:
         with self.store.lock,self.store.db:
             self.store.db.execute("UPDATE channel_reaction_jobs SET status='sending' WHERE id=?",(row['id'],))
         self.current_phase='reaction'
-        receipt=self.connection.react('reaction:'+self.store.directory.name+':'+row['id'],event['value']['telegram']['message_id'],row['emoji'])
+        key='reaction:'+self.store.directory.name+':'+row['id']
+        try:
+            receipt=self.connection.react(key,event['value']['telegram']['message_id'],row['emoji'])
+        except Exception:
+            with self.connection.lock:
+                dispatch=self.connection.db.execute('SELECT status FROM reactions WHERE key=?',(key,)).fetchone()
+                transport=getattr(self.connection.api,'last_failure',None)
+            with self.store.lock,self.store.db:
+                if dispatch is None:
+                    # react claims its Telegram journal before setMessageReaction.
+                    # A failed getChat preflight is not an uncertain mutation.
+                    self.store.db.execute("UPDATE channel_reaction_jobs SET status='pending' WHERE id=?",(row['id'],))
+                self.store.put('last_reaction_failure',{'job_id':row['id'],'key':key,
+                    'dispatch_recorded':dispatch is not None,'transport':transport})
+            raise
         with self.store.lock,self.store.db:
             self.store.db.execute("UPDATE channel_reaction_jobs SET status='sent',receipt=? WHERE id=?",(json.dumps(receipt),row['id']))
 
@@ -636,6 +751,7 @@ class ChannelLife:
                 return
             if self.connection.poll_blocked:
                 return self.block('Приём Telegram остановлен. Следующие публикации и вызовы на паузе.')
+            self.sync_world_profile()
             if self.social:
                 return self.tick_social(status)
             with self.store.lock:
@@ -684,8 +800,10 @@ class ChannelLife:
             with self.store.lock, self.store.db:
                 self.put('life_error_detail', {'type': type(error).__name__, 'phase': self.current_phase,
                                                     'telegram_code': error.code if isinstance(error, TelegramError) else None})
+            from .role_boundary import RoleBoundaryError
             from .codex import CodexError
-            message = ('Модель не завершила реплику. На этом этапе отправки в Telegram не было. '
+            message = ('Реплика вышла из роли. Отправка заблокирована; текст сохранён для разбора.'
+                       if isinstance(error, RoleBoundaryError) else 'Модель не завершила реплику. На этом этапе отправки в Telegram не было. '
                        'Несостоявшуюся реплику можно пропустить после проверки; автоматического повтора нет.'
                        if isinstance(error, CodexError) and self.current_phase == 'share' else
                        'Жизнь остановлена после ошибки. Память и результат сохранены; автоматического повтора нет.')
@@ -738,6 +856,8 @@ def main(argv=None):
     parser.add_argument('--environment', type=Path)
     parser.add_argument('--world-port', type=int)
     parser.add_argument('--telegram-port', type=int)
+    parser.add_argument('--lively-world', action='store_true', default=None,
+                        help='enable incident dynamics after the current episode; persisted across restarts')
     parser.add_argument('--fresh', action='store_true')
     parser.add_argument('--start', action='store_true')
     parser.add_argument('--no-photos', action='store_true')
@@ -757,6 +877,9 @@ def main(argv=None):
     if not persona.strip() or not contract.strip():
         parser.error('empty persona or speech contract')
     root = Path(__file__).resolve().parent.parent
+    interpreter=live_interpreter(root,sys.executable,sys.platform)
+    if interpreter:
+        os.execv(interpreter,[interpreter,'-m','persona_runtime.channel_life',*(argv if argv is not None else sys.argv[1:])])
     directory = args.data_dir.expanduser().resolve()
     telegram_directory = args.telegram_dir.expanduser().resolve()
     if root / '.local' not in directory.parents or not 0 <= args.awake_hours <= 12:
@@ -777,10 +900,9 @@ def main(argv=None):
         with os.fdopen(fd, 'a') as log:
             process = subprocess.Popen([sys.executable, '-m', 'persona_runtime.channel_life', *arguments],
                                        cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        # Startup verifies four Telegram reads (each bounded at 30 seconds).
-        # A 12-second parent timeout killed healthy children before they could
-        # serve either panel on a slow connection.
-        deadline = time.monotonic()+150
+        # Initial binding performs several bounded read-only Telegram calls.
+        # A short local readiness timer must not kill a healthy slow binding.
+        deadline = time.monotonic()+180
         while time.monotonic()<deadline:
             if process.poll() is not None:
                 raise RuntimeError('life process stopped before readiness')
@@ -803,7 +925,10 @@ def main(argv=None):
     with ExitStack() as resources:
         store = open_world(directory, profile)
         resources.callback(store.close)
-        connection = TelegramConnection(telegram_directory)
+        owner = SharedTransport()
+        resources.callback(owner.close)
+        from .telegram import BotAPI
+        connection = TelegramConnection(telegram_directory,api_factory=lambda token:BotAPI(token,transport_factory=owner.borrow))
         resources.callback(connection.close)
         bind_connection(connection, actor, directory)
         if connection.get('binding') is None:
@@ -817,8 +942,6 @@ def main(argv=None):
         if args.no_photos:
             with store.lock, store.db:
                 store.actor_put(actor, 'life_controls', {**store.actor_get(actor, 'life_controls'), 'photos': False})
-        owner = SharedTransport()
-        resources.callback(owner.close)
         model_settings = profile.runtime if profile else {}
         backend = WorldBackend(directory/'transport', transport_factory=owner.borrow, **model_settings)
         resources.callback(backend.close)
@@ -833,7 +956,7 @@ def main(argv=None):
         lab = Laboratory(store, session)
         lab.profile = profile
         life = ChannelLife(lab, connection, persona, renderer, social_enabled=True,
-                           references=profile.references if profile else None)
+                           references=profile.references if profile else None, lively_world=args.lively_world, recall_enabled=True)
         setup = Setup(connection, life=life)
         servers, threads, serving, awake = [], [], [], AwakeGuard(life, args.awake_hours)
         try:
@@ -857,7 +980,7 @@ def main(argv=None):
             descriptor = {'pid': os.getpid(), 'actor_id': actor, 'name': lab.actor_name,
                           'world_url': 'http://127.0.0.1:'+str(world_port),
                           'telegram_url': 'http://127.0.0.1:'+str(telegram_port),
-                          'data': str(directory), 'model_enabled': True}
+                          'data': str(directory), 'model_enabled': True, 'python':sys.executable, 'sqlite_version':sqlite3.sqlite_version}
             private_json(directory/'live.json', descriptor)
             private_json(directory/'lab.json', {'pid': os.getpid(), 'port': world_port, 'model_enabled': True})
             private_json(connection.directory/'panel.json', {'pid': os.getpid(), 'port': telegram_port})

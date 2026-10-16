@@ -201,7 +201,7 @@ class ProfileHostTests(unittest.TestCase):
         project = MANIFEST.parents[2]
         with tempfile.TemporaryDirectory(dir=project / '.local', prefix='profile-cli-') as directory:
             directory = Path(directory)
-            def connection_factory(path):
+            def connection_factory(path, **kwargs):
                 connection = Connection(path, API)
                 connection.configure(TOKEN)
                 connection.bind(CHANNEL['id'])
@@ -220,7 +220,7 @@ class ProfileHostTests(unittest.TestCase):
                 image.return_value.render.assert_not_called()
                 for call in [*model.call_args_list, *image.call_args_list]:
                     self.assertEqual(call.kwargs['model'], 'gpt-6-luna')
-                    self.assertEqual(call.kwargs['reasoning_effort'], 'low')
+                    self.assertEqual(call.kwargs['reasoning_effort'], 'medium')
                 transport.return_value.close.assert_called_once()
             descriptor = json.loads((directory / 'life/live.json').read_text())
             self.assertEqual(descriptor['actor_id'], 'arkady')
@@ -357,6 +357,10 @@ class ArkadyLifeTests(unittest.TestCase):
         self.life.renderer = object()
         self.life.photo_factory = Photo
         self.life.references = {'arkady_transmitter': '/synthetic-reference.png'}
+        # Exercise the pre-gallery fallback, whose stored output had no attachment field.
+        with self.store.lock,self.store.db:
+            row=self.store.cycle(cycle['id']);row['value']['social_output'].pop('attachment',None)
+            self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(row['value']),cycle['id']))
         self.life.photo(self.store.monitor()['posts'][0])
         context = captured['context']
         self.assertEqual(context['actor_id'], 'arkady')

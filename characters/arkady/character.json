@@ -14,6 +14,6 @@
   ],
   "runtime": {
     "model": "gpt-6-luna",
-    "reasoning_effort": "low"
+    "reasoning_effort": "medium"
   }
 }

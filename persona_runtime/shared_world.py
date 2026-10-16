@@ -123,7 +123,9 @@ duration_minutes — реалистичный план времени дорог
 занятия, от 1 до 1440 минут; это не результат и не квота публикаций.
 destination_id — известная локация, куда персонаж явно решил добраться
 или где явно решил провести выбранное занятие, иначе null. Она подтверждается
-только успешным outcome. Приглашение/согласие само по себе не дорога.
+только успешным outcome. Если остаёшься в известном месте, укажи его ID;
+null означает неподтверждённое местоположение, а не присутствие в прежнем.
+Приглашение/согласие само по себе не дорога.
 Не выбирай движения и ответы за другого управляемого героя.
 '''
     outcome_instruction = '''
@@ -168,7 +170,7 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
             cycle['value']['shared_window'] = {**timing, 'started_minute': start,
                 'due_minute': start + timing['duration_minutes'], 'origin_id': location[0] if location else None,
                 'present_actor_ids': self.store.nearby(actor)}
-            if timing['destination_id'] and (not location or timing['destination_id'] != location[0]):
+            if not location or timing['destination_id'] != location[0]:
                 self.store.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?', (cycle['id']+'-choice', actor))
         elif stage == 'outcome':
             window = cycle['value']['shared_window']

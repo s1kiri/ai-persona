@@ -15,13 +15,15 @@ import tempfile
 import threading
 import time
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 class TelegramError(RuntimeError):
-    def __init__(self, message, code=None):
+    def __init__(self, message, code=None, *, transport=None):
         super().__init__(message)
         self.code = code
+        self.transport = transport
 
 
 def checked_token(value):
@@ -55,14 +57,33 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-class BotAPI:
-    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto', 'setMessageReaction'}
+class LoopbackProxyHandler(ProxyHandler):
+    """Explicit CONNECT route, unaffected by OS/environment proxy bypass lists."""
+    def proxy_open(self, request, proxy, kind):
+        address=urlsplit(proxy)
+        if (kind!='https' or address.scheme!='http' or address.hostname!='127.0.0.1'
+                or not address.port or address.username or address.password or address.path or address.query or address.fragment):
+            raise ValueError('invalid local proxy bridge')
+        request.set_proxy(address.netloc,'http')
 
-    def __init__(self, token, opener=None):
+
+class BotAPI:
+    METHODS = {'getMe', 'getWebhookInfo', 'getUpdates', 'getChat', 'getChatMember', 'sendMessage', 'sendPhoto', 'setMessageReaction', 'deleteMessage'}
+
+    def __init__(self, token, opener=None, *, transport_factory=None):
         self._token = checked_token(token)
+        self.transport_factory = transport_factory
         self.last_failure = None
         # Explicit transport: do not inherit unrelated proxy environment variables.
         self.opener = opener or build_opener(ProxyHandler({}), NoRedirect())
+
+    def open(self, request):
+        if self.transport_factory is None:
+            return self.opener.open(request, timeout=30)
+        # Borrow the same bridge as model calls; no direct retry on proxy failure.
+        with self.transport_factory({}, timeout=30) as (environment, bridge):
+            proxies={'https':environment['HTTPS_PROXY']} if bridge is not None else {}
+            return build_opener(LoopbackProxyHandler(proxies),NoRedirect()).open(request,timeout=30)
 
     def call(self, method, payload=None, photo=None):
         if method not in self.METHODS:
@@ -88,7 +109,7 @@ class BotAPI:
         result = None
         try:
             try:
-                response = self.opener.open(request, timeout=30)
+                response = self.open(request)
             except HTTPError as error:
                 status = error.code
                 response = error
@@ -103,8 +124,15 @@ class BotAPI:
                 status = result['error_code']
         except Exception as error:
             # urllib exception strings contain the URL and therefore the token.
-            self.last_failure = {'type': type(error).__name__, 'status': status}
-            raise TelegramError('Не удалось связаться с Telegram. Проверь интернет; токен скрыт.') from None
+            failure = {'type': type(error).__name__, 'status': status,
+                       'method': method, 'at': time.time()}
+            reason=getattr(error,'reason',None)
+            if reason is not None:
+                failure['reason_type']=type(reason).__name__
+                if type(getattr(reason,'errno',None)) is int:failure['errno']=reason.errno
+            self.last_failure = failure
+            raise TelegramError('Не удалось связаться с Telegram. Проверь интернет; токен скрыт.',
+                                transport=dict(failure)) from None
         messages = {401: 'Telegram не принял токен. Проверь его в BotFather.',
                     403: 'Telegram отказал в доступе. Проверь, что бот добавлен и получил права.',
                     409: 'Бот уже получает сообщения в другом процессе или через webhook. Второе подключение остановлено.',
@@ -157,6 +185,9 @@ class TelegramConnection:
                 fingerprint TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS reactions(key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,emoji TEXT NOT NULL,status TEXT NOT NULL,error TEXT);
+            CREATE TABLE IF NOT EXISTS deletions(chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+                status TEXT NOT NULL,created REAL NOT NULL,error TEXT,
+                PRIMARY KEY(chat_id,message_id));
         ''')
         with self.db:
             self.db.execute("UPDATE outbox SET status='unknown',error=? WHERE status='sending'",
@@ -417,6 +448,27 @@ class TelegramConnection:
                                 (chat_id, receipt['message_id'], comment[0], text,
                                  (self.get('host_profile') or {}).get('actor_id', 'Гарик'), 'own', self.get('bot')['id'], time.time()))
             return dict(self.db.execute('SELECT * FROM outbox WHERE key=?', (key,)).fetchone())
+
+    def delete_own(self, chat_id, message_id):
+        """Explicit operator action only; receipt must belong to our sent outbox."""
+        with self.operation,self.lock,self.db:
+            sent=self.db.execute("SELECT 1 FROM outbox WHERE chat_id=? AND message_id=? AND status='sent'",(chat_id,message_id)).fetchone()
+            if not sent or not self.api:raise TelegramError('Удалять можно только своё подтверждённое сообщение.')
+            prior=self.db.execute('SELECT status FROM deletions WHERE chat_id=? AND message_id=?',(chat_id,message_id)).fetchone()
+            if prior:
+                if prior[0]=='deleted':return {'chat_id':chat_id,'message_id':message_id,'status':'deleted'}
+                raise TelegramError('Предыдущее удаление не подтверждено; автоматического повтора нет.')
+            self.db.execute('INSERT INTO deletions VALUES(?,?,?,?,?)',(chat_id,message_id,'started',time.time(),None))
+        try:
+            result=self.api.call('deleteMessage',{'chat_id':chat_id,'message_id':message_id})
+            if result is not True:raise TelegramError('Telegram не подтвердил удаление.')
+        except Exception:
+            with self.lock,self.db:
+                self.db.execute("UPDATE deletions SET status='unknown',error='receipt missing; no automatic retry' WHERE chat_id=? AND message_id=?",(chat_id,message_id))
+            raise TelegramError('Удаление не подтверждено; повтор заблокирован.') from None
+        with self.lock,self.db:
+            self.db.execute("UPDATE deletions SET status='deleted' WHERE chat_id=? AND message_id=?",(chat_id,message_id))
+        return {'chat_id':chat_id,'message_id':message_id,'status':'deleted'}
 
     def state(self):
         with self.lock:

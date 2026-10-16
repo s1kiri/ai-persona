@@ -7,13 +7,15 @@
 
 1. Дождаться завершённого эпизода, поставить Гарика на паузу, проверить idle
    и отсутствие неразобранных вызовов/доставок, штатно завершить процесс.
-2. Приватно перенести на общий компьютер всю папку мира `world.sqlite3`
+2. Общий запуск будет на MacBook Кирилла: его папки уже здесь; при переносе
+   Аркадия нужны его данные с другого компьютера. Сохранить всю папку мира `world.sqlite3`
    вместе с `photos/` и `visual-memory/`; всю папку подключения с
    `telegram.sqlite3` и `bot-token.json`; точный пакет CharacterProfile,
    включая все части промпта и референсы. Не присылать токен в общий чат
    и не добавлять эти данные в Git. Удобное назначение — `.local/incoming/`.
 3. Если запуск был старым CLI с `--persona` и `--speech-contract`, создать
-   приватный пакет из ТЕХ ЖЕ файлов, сохранив текущую модель и reasoning:
+   приватный пакет из ТЕХ ЖЕ файлов. По решению Кирилла общий запуск
+   использует Luna/medium; это явная смена модели, а не изменение голоса:
 
 ```sh
 .venv/bin/python -m persona_runtime.shared_export \
@@ -21,11 +23,10 @@
   --persona /path/to/actual-persona.md \
   --speech-contract /path/to/actual-speech-contract.md \
   --output .local/garik-private \
-  --model gpt-6.1-sol --reasoning-effort medium
+  --model gpt-6-luna --reasoning-effort medium
 ```
 
-Модель/уровень в примере заменить на фактически использованные. Утверждённый
-портрет можно добавить `--portrait /path/to/approved.png`. Если CharacterProfile
+Утверждённый портрет можно добавить `--portrait /path/to/approved.png`. Если CharacterProfile
 уже существует, копировать именно его; повторный экспорт не нужен. Публичный
 `characters/garik/` не заменяет приватный рабочий вариант.
 

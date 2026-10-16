@@ -12,16 +12,17 @@ import signal
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 import time
 
 from .character_profile import CharacterProfile
-from .channel_life import DEFAULT_CONTROLS, MOSCOW, START_DESIRE, controls_checked
+from .channel_life import DEFAULT_CONTROLS, MOSCOW, START_DESIRE, controls_checked, AwakeGuard, live_interpreter
 from .daemon import same_secret
 from .local_http import local_request, local_navigation
 from .profile_host import bind_connection
 from .shared_world import SharedWorldStore, SharedTimeline
 from .shared_scheduler import SharedScheduler, SharedChannelLife
-from .telegram import TelegramConnection, TelegramError, private_json
+from .telegram import BotAPI, TelegramConnection, TelegramError, private_json
 from .telegram_setup import Setup, LocalServer, handler as setup_handler
 from .world import WorldConflict, WorldSession
 from .world_lab import Laboratory
@@ -255,6 +256,10 @@ def panel_handler(panel):
     return Handler
 
 
+def shared_awake_guard(store,hours):
+    return AwakeGuard(SimpleNamespace(store=store,get=store.get,put=store.put),hours)
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',type=Path,default=ROOT/'shared-life.example.json')
@@ -262,8 +267,13 @@ def main(argv=None):
     parser.add_argument('--live',action='store_true',help='enable model and Telegram life after configuration')
     parser.add_argument('--start',action='store_true')
     parser.add_argument('--background',action='store_true')
+    parser.add_argument('--awake-hours',type=int,default=0,help='0 holds sleep prevention while live host runs; otherwise 1–12 hours')
     parser.add_argument('--write-config',type=Path,help='write a NEW private config with absolute paths, without starting a host')
-    args=parser.parse_args(argv);config=load_config(args.config)
+    args=parser.parse_args(argv)
+    interpreter=live_interpreter(ROOT,sys.executable,sys.platform)
+    if interpreter:os.execv(interpreter,[interpreter,'-m','persona_runtime.shared_host',*(sys.argv[1:] if argv is None else argv)])
+    if not 0<=args.awake_hours<=12:parser.error('awake duration must be 0–12 hours')
+    config=load_config(args.config)
     if args.write_config:
         output=args.write_config.expanduser().resolve()
         output.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -280,7 +290,8 @@ def main(argv=None):
         fd=os.open(directory/'shared.log',os.O_CREAT|os.O_APPEND|os.O_WRONLY,0o600)
         with os.fdopen(fd,'a') as log:
             child=subprocess.Popen([sys.executable,'-m','persona_runtime.shared_host',*arguments],cwd=ROOT,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
-        for _ in range(300):
+        deadline=time.monotonic()+300
+        while time.monotonic()<deadline:
             if child.poll() is not None:raise RuntimeError('shared host stopped; see private shared.log')
             try:
                 info=json.loads((directory/'shared.json').read_text())
@@ -291,9 +302,11 @@ def main(argv=None):
     with ExitStack() as resources:
         store=open_shared_world(config,args.init);resources.callback(store.close)
         store.pause(True)
-        connections={};lives={};owner=None;scheduler=None
+        from .proxy import SharedTransport
+        owner=SharedTransport();resources.callback(owner.close)
+        connections={};lives={};scheduler=None
         for item in config['actors']:
-            p=item['profile'];connection=TelegramConnection(item['telegram_dir']);resources.callback(connection.close)
+            p=item['profile'];connection=TelegramConnection(item['telegram_dir'],api_factory=lambda token:BotAPI(token,transport_factory=owner.borrow));resources.callback(connection.close)
             if connection.get('host_profile') and connection.get('host_profile')!={'actor_id':p.actor_id,'world':str(store.directory)}:
                 raise WorldConflict('Telegram connection requires explicit shared migration')
             from .profile_host import claim_setup
@@ -305,7 +318,6 @@ def main(argv=None):
             from .proxy import SharedTransport
             from .world_backend import WorldBackend
             from .world_image_backend import CodexImageBackend
-            owner=SharedTransport();resources.callback(owner.close)
             for item in config['actors']:
                 p=item['profile'];actor=p.actor_id;connection=connections[actor]
                 attach_channel(store,item,connection,time.time())
@@ -314,10 +326,10 @@ def main(argv=None):
                 renderer=CodexImageBackend(store.directory/actor/'image-transport',transport_factory=owner.borrow,**p.runtime);resources.callback(renderer.close)
                 session=WorldSession(store,backend,{actor:p.persona},p.speech_contract,autonomous_posts=True,personal_life=True,
                     free_intentions=True,research_enabled=True,research_backend=research,lossless_intentions=True,active_world=True,
-                    direct_channel=True,continuous=True,external_channel=True,timeline=SharedTimeline(store))
+                    direct_channel=True,continuous=True,external_channel=True,timeline=SharedTimeline(store),lively_world=True)
                 lab=Laboratory(store,session);lab.actor_id,lab.actor_name=actor,p.name
                 lab.profile=p
-                lives[actor]=SharedChannelLife(lab,connection,p.persona,renderer,social_enabled=True,actor_id=actor,references=p.references)
+                lives[actor]=SharedChannelLife(lab,connection,p.persona,renderer,social_enabled=True,actor_id=actor,references=p.references,recall_enabled=True)
             scheduler=SharedScheduler(store,lives);resources.callback(scheduler.stopping.set)
             for life in lives.values():life.lab.session.cancel=scheduler.stopping;life.cancel=scheduler.stopping
         panel=SharedPanel(store,config,connections,lives,scheduler)
@@ -328,6 +340,8 @@ def main(argv=None):
             panel.urls[p.actor_id]='http://127.0.0.1:'+str(server.server_port)
         central=LocalServer(('127.0.0.1',config['port']),panel_handler(panel));servers.append(central)
         stopping=threading.Event()
+        awake=shared_awake_guard(store,args.awake_hours) if args.live else None
+        if awake:resources.callback(awake.close)
         def stop(*unused):
             stopping.set();store.pause(True)
             if scheduler:scheduler.stopping.set()
@@ -343,7 +357,9 @@ def main(argv=None):
                 worker=threading.Thread(target=scheduler.loop,daemon=True,name='shared-life');worker.start();threads.append(worker)
             info={'pid':os.getpid(),'url':'http://127.0.0.1:'+str(central.server_port),'panels':panel.urls,'live':args.live,'data':str(store.directory)}
             private_json(store.directory/'shared.json',info);print(json.dumps(info,ensure_ascii=False),flush=True)
-            while not stopping.wait(1):pass
+            if awake:awake.tick()
+            while not stopping.wait(1):
+                if awake:awake.tick()
         finally:
             stop()
             for server in servers:server.shutdown();server.server_close()

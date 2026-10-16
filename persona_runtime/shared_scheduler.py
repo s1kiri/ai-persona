@@ -113,8 +113,9 @@ class SharedScheduler:
                        'clock': {'minute': self.store.get('minute')}},actor)
             payload['available_source_ids']=payload.pop('_source_ids')
             self.store.save_input(cid, payload)
+            from .role_boundary import ROLE_RULES
             answer, usage = life.lab.session.backend.generate('peer_choice',
-                life.persona+'\n'+life.lab.session.speech_contract+'\n'+PEER_INSTRUCTIONS, payload,
+                life.persona+'\n'+life.lab.session.speech_contract+'\n'+PEER_INSTRUCTIONS+'\n'+ROLE_RULES, payload,
                 **({'cancel': life.cancel} if life.cancel is not None else {}))
             self.validate_peer(actor, answer, payload)
             with self.store.lock, self.store.db:
@@ -139,6 +140,8 @@ class SharedScheduler:
 
     def validate_peer(self, actor, answer, payload):
         validate_shape(answer, PEER_CHOICE)
+        from .role_boundary import check_character_speech
+        check_character_speech(answer['text'],self.lives[actor].name)
         peer = payload['peer_context']; decision = answer['decision']; recipient = answer['recipient_actor_id']
         if not set(answer['source_ids']) <= set(payload['available_source_ids']) or not set(answer['read_ids']) <= set(peer['unread_ids']):
             raise ValueError('peer decision uses private or unavailable evidence')
@@ -317,6 +320,7 @@ class SharedScheduler:
                     continue
                 self.last_actor = actor
                 with self.store.lock,self.store.db:self.store.put('shared_last_actor',actor)
+                life.sync_world_profile()
                 if life.connection.poll_blocked:
                     life.block('Приём Telegram этого героя остановлен.'); continue
                 uncertain = self.store.db.execute("SELECT 1 FROM peer_jobs WHERE sender=? AND status IN ('unknown','sending') UNION ALL SELECT 1 FROM world_cycles WHERE actor_id=? AND status='blocked'",(actor,actor)).fetchone()

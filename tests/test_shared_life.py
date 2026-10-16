@@ -203,6 +203,15 @@ class SharedLifeTests(unittest.TestCase):
             self.lives[actor].import_comments();self.lives[actor].focus()
         a=self.lives['arkady'].get('channel_attention')['focus_ids'];g=self.lives['garik'].get('channel_attention')['focus_ids']
         self.assertEqual(len(a),1);self.assertEqual(len(g),1);self.assertFalse(set(a)&set(g))
+        # Both have nonempty focus: Arkady's addressee must not be filtered by Garik's visit.
+        for actor,source in [('arkady',a[0]),('garik',g[0])]:
+            life=self.lives[actor]
+            self.backends[actor].answers=[rich(decision='reply',text='Own reply '+actor,source_ids=[source],read_ids=[source])]
+            cycle=life.channel_cycle();life.lab.session.step(cycle['id'])
+            row=self.store.db.execute("SELECT * FROM world_events WHERE cycle_id=? AND stage='post'",(cycle['id'],)).fetchone()
+            self.assertEqual(json.loads(row['value'])['audience_id'],source)
+            life.deliver({**dict(row),'value':json.loads(row['value'])})
+            self.assertEqual(life.connection.state()['outbox'][0]['chat_id'],life.connection.api.group['id'])
 
     def test_waiting_plan_survives_restart_and_resolution_uses_current_world(self):
         cid=self.plan('arkady',10);original=copy.deepcopy(self.store.cycle(cid)['value']);path=self.store.directory

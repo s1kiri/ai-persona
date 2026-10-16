@@ -701,7 +701,7 @@ class WorldStore:
             if row:
                 value=json.loads(row['value'])
                 if value['comments']:candidates.append({'id':row['id'],'value':value})
-        focus=set((self.get('channel_attention') or {}).get('focus_ids',[]))
+        focus=set((self.actor_get(actor, 'channel_attention') or {}).get('focus_ids',[]))
         if focus:candidates=[c for c in candidates if c['id'] in focus]
         if len(candidates)!=1:
             raise ValueError('reply needs one own current addressee; other citations are context')

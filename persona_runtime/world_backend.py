@@ -99,12 +99,22 @@ class WorldBackend(AppServerBackend):
             from .shared_protocol import TIMED_INTENT, TIMED_CHOICE, PEER_CHOICE
             params['outputSchema'] = {'timed_intent': TIMED_INTENT, 'timed_choice': TIMED_CHOICE,
                                       'peer_choice': PEER_CHOICE}[stage]
+        if stage in ('timed_intent','timed_choice'):
+            params['outputSchema']=copy.deepcopy(params['outputSchema'])
+            promises=[p['id'] for p in payload.get('peer_context',{}).get('own_commitments',[])]
+            ids=params['outputSchema']['properties']['commitment_ids']
+            if promises:ids['items']['enum']=promises
+            else:ids['maxItems']=0
         if stage == 'peer_choice':
             from .shared_protocol import peer_io
             params['outputSchema'],model_payload,source_decode=peer_io(payload)
             published=model_payload.pop('_published_previews',[])
             params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
             self.add_published_previews(params,model_payload,published)
+        if stage in ('intent','timed_intent'):
+            from .world_intent import unit_io
+            params['outputSchema'],model_payload,intent_units=unit_io(params['outputSchema'],payload)
+            params['input']=[{'type':'text','text':json.dumps(model_payload,ensure_ascii=False)}]
         if stage == 'photo_choice':
             from .world_photo import PHOTO_SCHEMA
             params['outputSchema'] = PHOTO_SCHEMA
@@ -219,6 +229,9 @@ class WorldBackend(AppServerBackend):
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
             value=json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice','world_intervention') else answer
+            if stage in ('intent','timed_intent'):
+                from .world_intent import decode_units
+                value=decode_units(value,intent_units)
             if stage=='horizon':
                 from .world_hooks import assigned_hooks
                 value=assigned_hooks(value,thread)

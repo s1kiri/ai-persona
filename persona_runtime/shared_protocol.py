@@ -5,18 +5,30 @@ from .world_protocol import CHOICE_SCHEMA, array, enum, string
 from .world_intent import INTENT_SCHEMA
 
 TIMING = {'duration_minutes': {'type': 'integer', 'minimum': 1, 'maximum': 1440},
-          'destination_id': {'type': ['string', 'null'], 'maxLength': 80}}
+          'destination_id': {'type': ['string', 'null'], 'maxLength': 80},
+          'commitment_ids': array(string(80), 6)}
 TIMED_INTENT = obj({**INTENT_SCHEMA['properties'], **TIMING})
 TIMED_CHOICE = obj({**CHOICE_SCHEMA['properties'], **TIMING})
 PEER_CHOICE = obj({
-    'decision': enum(('keep', 'message', 'say', 'invite', 'accept', 'decline', 'comment')),
+    'decision': enum(('keep', 'message', 'say', 'invite', 'accept', 'decline', 'cancel', 'finish', 'comment')),
     'recipient_actor_id': {'type': ['string', 'null'], 'maxLength': 80},
     'text': string(3500), 'source_ids': array(string(80), 6),
     'read_ids': array(string(80), 8),
     'invitation_id': {'type': ['string', 'null'], 'maxLength': 80},
     'place_id': {'type': ['string', 'null'], 'maxLength': 80},
     'post_id': {'type': ['string', 'null'], 'maxLength': 80},
+    'activity': enum(('keep', 'reconsider')),
+    'commitment': {**obj({'action': string(600),
+        'destination_id': {'type': ['string','null'], 'maxLength':80}}), 'type':['object','null']},
+    'commitment_updates': array(obj({'id':string(80),
+        'status':enum(('cancelled','fulfilled')),
+        'source_id':{'type':['string','null'],'maxLength':80}}), 6),
 })
+
+
+def normalized_peer(answer):
+    # Saved v1 answers and synthetic backends remain readable; native v2 is closed.
+    return {'activity':'keep','commitment':None,'commitment_updates':[],**answer}
 
 
 def peer_io(payload):
@@ -32,6 +44,15 @@ def peer_io(payload):
         if options:schema['properties'][field]['items']['enum']=options
         else:schema['properties'][field]['maxItems']=0
     peers=outgoing['peer_context'];others=peers['available_actor_ids'];branches=[]
+    updates=schema['properties']['commitment_updates']
+    own=[p['id'] for p in peers.get('own_commitments',[])]
+    if own:updates['items']['properties']['id']['enum']=own
+    else:updates['maxItems']=0
+    updates['items']['properties']['source_id']['enum']=[None,*decode]
+    places=[e['id'] for e in outgoing['life']['entities'] if e['kind']=='place']
+    schema['properties']['commitment']['properties']['destination_id']['enum']=[None,*places]
+    if not peers.get('reconsider_action'):
+        schema['properties']['activity']['enum']=['keep']
     def route(decision, recipients=(), *, place_ids=(None,), invitation=None, post=None, sources=None):
         branch=copy.deepcopy(schema);props=branch['properties']
         def select(field,values):
@@ -42,6 +63,7 @@ def peer_io(payload):
         select('place_id',list(place_ids));select('invitation_id',[invitation]);select('post_id',[post])
         if decision=='keep':props['text']['maxLength']=0
         else:props['text']['minLength']=1
+        if decision=='keep':props['commitment']={'type':'null'}
         if sources is not None:
             props['source_ids']['items']['enum']=sources;props['source_ids']['minItems']=1
         branches.append(branch)
@@ -49,12 +71,16 @@ def peer_io(payload):
     if others:route('message',others)
     nearby=[a for a in peers['nearby_actor_ids'] if a in others]
     if nearby:route('say',nearby)
-    places=[e['id'] for e in outgoing['life']['entities'] if e['kind']=='place']
     if others and places:route('invite',others,place_ids=places)
     for invite in peers['invitations']:
         if invite['status']=='pending' and invite['sender'] in others:
             for decision in ('accept','decline'):
                 route(decision,[invite['sender']],place_ids=[None,invite['place_id']],invitation=invite['id'])
+        other=invite['recipient'] if invite['sender'] not in others else invite['sender']
+        if invite['status'] in ('pending','accepted','met') and other in others:
+            route('cancel',[other],invitation=invite['id'])
+            if invite['status']=='met':route('finish',[other],invitation=invite['id'])
+            if places:route('invite',[other],place_ids=places,invitation=invite['id'])
     comments={}
     for event in peers['events']:
         value=event['value']
@@ -115,7 +141,23 @@ published_photos и приложенные изображения — реаль
 source_ids — только переданные тебе свидетельства. read_ids — полученные
 реплики, которые ты рассмотрел. Не повторяй исходящий текст, не пиши ради
 галочки и не заводи бесконечную переписку. keep всегда допустим.
-Разговор не отменяет собственное дело и не передвигает его срок. Во время
-занятия его будущий результат ещё неизвестен. Не используй это общение,
-чтобы немедленно совершить другое физическое действие.
+Активные invitations — ещё действующие договорённости; meeting_history —
+закрытые, отменённые или заменённые встречи. Старое согласие из памяти не
+возрождает закрытую встречу. cancel отменяет встречу; finish завершает уже
+состоявшуюся. Чтобы сменить место/замысел, invite с invitation_id прежней
+встречи заменяет её НОВЫМ предложением; нужно новое согласие другого.
+commitment — твой конкретный обещанный следующий поступок из ЭТОЙ реплики,
+не пожелание другу. Запиши action и destination_id, если обещаешь добраться;
+иначе null. Оно сохранится после доставки. accept сам сохраняет намерение
+добраться на принятую встречу. Слова не являются прибытием или выполнением.
+own_commitments доступны только тебе. commitment_updates позволяет отказаться
+от своего обещания или отметить выполненным по source_id собственного
+связанного outcome. Не называй выполнением чужие слова или собственный план.
+При reconsider_action можно выбрать activity=reconsider: сообщение меняет
+ближайшие планы, и ты решаешь остановить текущее дело. В source_ids включи
+повод — полученное сообщение после начала этого дела. Хост сначала разрешит
+ТОЛЬКО прошедшую часть попытки, затем ты выберешь новый поступок. Это ещё не
+выход из дома и не приход к другу. activity=keep оставляет дело до прежнего
+срока. Не обещай немедленный выход, когда сам выбираешь продолжать читать час.
+Будущий результат текущего занятия ещё неизвестен.
 '''

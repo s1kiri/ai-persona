@@ -27,6 +27,8 @@ class SharedWorldStore(WorldStore):
             CREATE TABLE IF NOT EXISTS world_interventions(id TEXT PRIMARY KEY,text TEXT NOT NULL,
                 status TEXT NOT NULL,cycle_id TEXT,result TEXT,error TEXT,created REAL NOT NULL,minute INTEGER);
         ''')
+        from .shared_agency import setup
+        setup(self)
         with self.db:
             self.db.execute("UPDATE peer_jobs SET status='unknown',error='process stopped before receipt; no replay' WHERE status='sending'")
             self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id IN (SELECT cycle_id FROM world_interventions WHERE status='started')")
@@ -189,6 +191,26 @@ class SharedWorldStore(WorldStore):
             self.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?',(cycle_id+'-unresolved',cycle['actor_id']))
             self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
 
+    def release_rejected_choice(self,cycle_id,reason):
+        """Quarantine a rejected adapter answer; do not execute or retry its prose."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if any(r['cycle_id']==cycle_id for r in self.get('rejected_choice_reviews') or []):return cycle
+            self._require_paused_review();value=cycle['value'];rejected=value.get('rejected',{})
+            if (cycle['status']!='blocked' or cycle['phase']!='choice' or rejected.get('stage')!='choice'
+                    or rejected.get('error_type')!='ValueError' or 'choice' in value.get('results',{})
+                    or value.get('shared_window')):
+                raise WorldConflict('uncommitted rejected choice required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='choice' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            self.put('rejected_choice_reviews',[*(self.get('rejected_choice_reviews') or []),
+                {'cycle_id':cycle_id,'at':time.time(),'reason':reason,'original_cycle':cycle,'original_call':dict(call),
+                 'model_replayed':False,'action_applied':False}])
+            self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id=?",(cycle_id,))
+            # A failed adapter never began a physical attempt. Keep last receipt.
+            self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
+
     def release_rejected_place_event(self,cycle_id,reason):
         """Explicitly quarantine an entire rejected world event, without rewriting its prose."""
         if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
@@ -316,13 +338,16 @@ class SharedWorldStore(WorldStore):
         own = self.db.execute('SELECT place_id,source_id FROM peer_positions WHERE actor=?', (actor,)).fetchone()
         waiting = self.db.execute("SELECT value FROM world_cycles WHERE actor_id=? AND status='waiting'", (actor,)).fetchone()
         invitations=[]
-        for row in self.db.execute("SELECT * FROM peer_invitations WHERE (sender=? OR recipient=?) AND status IN ('pending','accepted','met') ORDER BY rowid DESC LIMIT 8",(actor,actor)):
+        from .shared_agency import view, reconsiderable, ACTIVE_MEETINGS, ACTIVE_PROMISES
+        meetings,commitments=view(self,actor,at_minute)
+        history=[]
+        for row in meetings:
             invitation=dict(row)
             source=self.db.execute('SELECT value FROM world_events WHERE id=?',(row['source_id'],)).fetchone()
             invitation['proposal']=json.loads(source[0])['text'] if source else ''
             invitation['responses']=[{'actor_id':r['sender'],'text':json.loads(r['value'])['text']}
-                for r in self.db.execute("SELECT sender,value FROM peer_jobs WHERE status='sent' AND json_extract(value,'$.invitation_id')=? ORDER BY rowid",(row['id'],))]
-            invitations.append(invitation)
+                for r in self.db.execute("SELECT j.sender,j.value FROM peer_jobs j JOIN peer_deliveries d ON d.id=j.id JOIN world_events e ON e.id=d.in_event WHERE j.status='sent' AND json_extract(j.value,'$.invitation_id')=? AND e.minute<=? ORDER BY j.rowid",(row['id'],at_minute))]
+            (invitations if row['status'] in ACTIVE_MEETINGS else history).append(invitation)
         nearby=self.nearby(actor)
         place=self.db.execute('SELECT value FROM world_entities WHERE id=?',(own[0],)).fetchone() if own and own[0] else None
         place_name=json.loads(place[0])['name'] if place else None
@@ -331,7 +356,10 @@ class SharedWorldStore(WorldStore):
                'nearby':[{'actor_id':a,'name':names[a]} for a in nearby],
                'meaning':'Последняя подтверждённая позиция. Перечисленные рядом герои имеют квитанцию того же места; чужой план их не перемещает.'}
         return {'events': list(reversed(events)), 'unread_ids': unread,'current_scene':scene,
-                'invitations':list(reversed(invitations)),
+                'invitations':invitations, 'meeting_history':history[-8:],
+                'own_commitments':[p for p in commitments if p['status'] in ACTIVE_PROMISES],
+                'commitment_history':[p for p in commitments if p['status'] not in ACTIVE_PROMISES][-8:],
+                'reconsider_action':reconsiderable(self,actor,at_minute) if at_minute==self.get('minute') else None,
                 'place_id': own[0] if own else None, 'nearby_actor_ids': nearby,
                 'available_actor_ids': [r[0] for r in self.db.execute('SELECT id FROM world_actors WHERE id!=?', (actor,))],
                 'ongoing_action': json.loads(waiting[0])['results']['choice']['action'] if waiting else None}
@@ -404,12 +432,26 @@ met означает только встречу, а не готовый рез�
 чужое участие и реплики не назначай. Завершённое дело помнится по outcome,
 оно не становится новым долгом из-за сохранённого старого приглашения.
 Не выбирай движения и ответы за другого управляемого героя.
+commitment_ids — ID собственных обещаний из peer_context.own_commitments,
+которые ЭТА попытка действительно начинает выполнять. Не связывай чтение
+дома с обещанием прийти в гараж. После outcome будет квитанция попытки,
+а не автоматическое выполнение любого обещания. Закрытые встречи из
+meeting_history не являются новым долгом, даже если остались в старой памяти.
 '''
     outcome_instruction = '''
 shared_action_window — уже прошедший промежуток общего мира. Ты впервые
 разрешаешь попытку сейчас, по актуальному состоянию вещей. Будущий итог
 заранее не рассчитывался. elapsed_minutes и сумма time_costs должны равняться
 duration_minutes этого окна: эти минуты УЖЕ прошли, clock показывает конец.
+Если есть interrupted_action, прежний длинный план ОСТАНОВЛЕН по собственному
+решению героя после сообщения. Разреши только прошедший отрезок окна,
+не оставшиеся минуты исходного плана и не следующее новое дело. Не считай
+всю начатую работу завершённой из-за того, что разрешается её короткая часть.
+Сообщение, вызвавшее остановку, рассмотрено НА ГРАНИЦЕ КОНЦА этого отрезка:
+на дорогу или иное действие в ответ на него внутри отрезка времени НЕТ.
+Не разыгрывай условный будущий выход «когда напишет — пойду» задним числом.
+shared_scene.delivered_words показывает только слова ДО этой границы;
+новое предложение и ответ на него относятся к следующей собственной попытке.
 Не назначай второму управляемому герою реплики, согласие, чувства или новое
 действие. Учитывай только его уже совершённое и доставленные слова.
 Не меняй entities для actor_id из world.actors; положение учитывает хост.
@@ -442,6 +484,11 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
         self.store = store
 
     def enrich(self, stage, payload, cycle):
+        if stage=='choice':payload['peer_context']=self.store.peer_context(cycle['actor_id'])
+        if stage in ('experience','share') and cycle['value'].get('interruption'):
+            payload['action_timing']={'elapsed_prefix':cycle['value']['shared_window'],
+                'interruption':cycle['value']['interruption'],
+                'meaning':'Дело шло ДО решения остановиться и ответа другу. Новая реплика не означает, что эти минуты прошли уже после обещания прийти.'}
         if stage in ('world','outcome','horizon'):
             from .world_interventions import facts
             payload['author_world_facts']=facts(self.store)
@@ -458,21 +505,40 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
             if not window or self.store.get('minute') < window['due_minute']:
                 raise WorldConflict('outcome cannot run before its independent deadline')
             payload['shared_action_window'] = window
+            interruption=cycle['value'].get('interruption')
+            if interruption:
+                payload['interrupted_action']={'original_window':cycle['value']['original_shared_window'],
+                                               **interruption}
+            # Physical state is fresh. Social decisions at the stopping boundary
+            # cannot retroactively give this elapsed prefix a different activity.
+            peers=self.store.peer_context(cycle['actor_id'],
+                at_minute=interruption['at_minute']-1 if interruption else None)
             payload['shared_scene'] = {'nearby_actor_ids': self.store.nearby(cycle['actor_id']),
-                'meetings':[i for i in self.store.peer_context(cycle['actor_id'])['invitations'] if i['status'] in ('accepted','met')],
-                'delivered_words': [e for e in self.store.peer_context(cycle['actor_id'])['events']
-                                    if e['value']['kind'] in ('say','message','invite','accept','decline','comment')]}
+                'meetings':[i for i in peers['invitations'] if i['status'] in ('accepted','met')],
+                'delivered_words': [e for e in peers['events']
+                                    if e['value']['kind'] in ('say','message','invite','accept','decline','comment')
+                                    and (not interruption or e['id'] not in interruption['message_source_ids'])]}
         return payload
 
     def extract(self, answer, payload, cycle):
+        answer={'commitment_ids':[],**answer}
         schema = TIMED_INTENT if cycle['value'].get('lossless_intentions') else TIMED_CHOICE
         validate_shape(answer, schema)
         destination = answer['destination_id']
         known = {e['id'] for e in payload.get('known_entities', payload.get('life', {}).get('entities', [])) if e['kind'] == 'place'}
         if destination is not None and destination not in known:
             raise ValueError('a destination must be an observed place')
-        return ({k: v for k, v in answer.items() if k not in ('duration_minutes', 'destination_id')},
-                {k: answer[k] for k in ('duration_minutes', 'destination_id')})
+        ids=answer['commitment_ids']
+        if len(ids)!=len(set(ids)):raise ValueError('duplicate commitment binding')
+        from .shared_agency import promises, ACTIVE_PROMISES
+        own={p['id'] for p in promises(self.store) if p['actor']==cycle['actor_id'] and p['status'] in ACTIVE_PROMISES}
+        if set(ids)-own:raise ValueError('unknown or closed own commitment')
+        ids=list(dict.fromkeys([*ids,*[p['id'] for p in promises(self.store)
+            if p['actor']==cycle['actor_id'] and p['status'] in ACTIVE_PROMISES and
+            p.get('goal_kind')=='arrival' and p['destination_id']==destination and destination is not None]]))
+        answer['commitment_ids']=ids
+        return ({k: v for k, v in answer.items() if k not in ('duration_minutes', 'destination_id','commitment_ids')},
+                {k: answer[k] for k in ('duration_minutes', 'destination_id','commitment_ids')})
 
     def extract_outcome(self,answer,payload,cycle):
         # Old recorded results without a location receipt never imply arrival.
@@ -496,6 +562,8 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
             cycle['value']['shared_window'] = {**timing, 'started_minute': start,
                 'due_minute': start + timing['duration_minutes'], 'origin_id': location[0] if location else None,
                 'present_actor_ids': self.store.nearby(actor)}
+            from .shared_agency import bind
+            bind(self.store,cycle,timing.get('commitment_ids',[]))
             if not location or timing['destination_id'] != location[0]:
                 self.store.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?', (cycle['id']+'-choice', actor))
         elif stage == 'outcome':
@@ -513,3 +581,5 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
             value = json.loads(row[0]); value['visible_to'] = [actor, *sorted(observers)]
             self.store.db.execute('UPDATE world_events SET value=? WHERE id=?',
                                  (json.dumps(value, ensure_ascii=False), cycle['id']+'-outcome'))
+            from .shared_agency import outcome as agency_outcome
+            agency_outcome(self.store,cycle)

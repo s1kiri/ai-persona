@@ -89,11 +89,12 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(start['outputSchema']['properties']['status']['enum'],['failed'])
         self.assertIn('succeeded',SCHEMAS['outcome']['properties']['status']['enum'])
 
-    def test_lossless_metadata_has_partition_schema_instead_of_an_action_summary(self):
-        self.backend.client = Client({'parts': []})
-        self.backend.generate('intent', 'Technical routing', {})
+    def test_lossless_metadata_labels_host_units_instead_of_retyping_the_text(self):
+        self.backend.client = Client({'unit_roles': {'u001':'attempt','u002':'attempt'}})
+        result,_=self.backend.generate('intent', 'Technical routing', {'written_intent':'Пойду  домой.'})
         start = next(p for m, p in self.backend.client.calls if m == 'turn/start')
-        self.assertIn('parts', start['outputSchema']['properties'])
+        self.assertIn('unit_roles', start['outputSchema']['properties'])
+        self.assertEqual(result['parts'],[{'role':'attempt','text':'Пойду  домой.'}])
         self.assertNotIn('action', start['outputSchema']['properties'])
 
     def test_resident_plans_cannot_select_empty_or_invented_participants(self):

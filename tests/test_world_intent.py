@@ -18,6 +18,20 @@ def routed(parts, **changes):
 
 
 class IntentTests(unittest.TestCase):
+    def test_native_units_preserve_every_character_without_retyping(self):
+        from persona_runtime.world_intent import unit_io, decode_units, INTENT_SCHEMA
+        original='  Хочу\nчай.  Пойду к другу — если\tпозовёт.\n'
+        schema,payload,units=unit_io(INTENT_SCHEMA,{'written_intent':original})
+        self.assertEqual(''.join(units.values()),original)
+        roles={key:'attempt' for key in reversed(units)}
+        metadata={k:v for k,v in routed([]).items() if k!='parts'}
+        decoded=decode_units({**metadata,'unit_roles':roles},units)
+        self.assertEqual(''.join(p['text'] for p in adapt(decoded,original)['intent_parts']),original)
+        self.assertNotIn('parts',schema['properties'])
+        self.assertEqual(payload['written_intent'],original)
+        roles.pop(next(iter(roles)))
+        with self.assertRaises(ValueError):decode_units({**metadata,'unit_roles':roles},units)
+
     def test_full_conditional_tail_reaches_outcome_but_private_feeling_does_not(self):
         with tempfile.TemporaryDirectory() as directory:
             store = WorldStore(directory); store.pause(False)

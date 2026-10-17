@@ -6,7 +6,35 @@ PART = obj({'text': string(900), 'role': enum(('attempt', 'private', 'later'))})
 RECOVERY = obj({'cycle_id': string(80), 'decision': enum(('resume', 'defer', 'drop')),
                 'note': string(300)})
 INTENT_SCHEMA = obj({**{k: v for k, v in CHOICE_SCHEMA['properties'].items() if k != 'action'},
-                     'parts': array(PART, 12), 'recovery': array(RECOVERY, 3)})
+                     'parts': array(PART, 900), 'recovery': array(RECOVERY, 3)})
+
+
+def unit_io(schema, payload):
+    """The host owns every character; the model only labels immutable units."""
+    import copy
+    import re
+    original=payload['written_intent']
+    units={f'u{n+1:03}':text for n,text in enumerate(re.findall(r'\s+|\S+\s*',original))}
+    if not units or ''.join(units.values())!=original:raise ValueError('empty or invalid written intent')
+    result=copy.deepcopy(schema)
+    del result['properties']['parts']
+    result['properties']['unit_roles']=obj({key:enum(('attempt','private','later')) for key in units})
+    result['required']=[k for k in result['required'] if k!='parts']+['unit_roles']
+    outgoing={**copy.deepcopy(payload),'intent_units':units,
+        'intent_wire':'Assign one role per immutable intent_units key. Do not copy text; host reconstructs parts. Conditional steps and their conditions remain attempt together.'}
+    return result,outgoing,units
+
+
+def decode_units(value, units):
+    roles=value.get('unit_roles')
+    if not isinstance(roles,dict) or set(roles)!=set(units):raise ValueError('intent unit coverage differs')
+    parts=[]
+    for key,text in units.items():
+        role=roles[key]
+        if role not in ('attempt','private','later'):raise ValueError('invalid intent unit role')
+        if parts and parts[-1]['role']==role:parts[-1]['text']+=text
+        else:parts.append({'role':role,'text':text})
+    return {**{k:v for k,v in value.items() if k!='unit_roles'},'parts':parts}
 
 
 def adapt(value, original):

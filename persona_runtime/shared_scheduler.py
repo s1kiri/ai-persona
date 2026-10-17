@@ -6,7 +6,7 @@ import time
 import uuid
 
 from .channel_life import ChannelLife
-from .shared_protocol import PEER_CHOICE, PEER_INSTRUCTIONS
+from .shared_protocol import PEER_CHOICE, PEER_INSTRUCTIONS, normalized_peer
 from .telegram import TelegramError
 from .world import WorldConflict, director
 from .world_protocol import validate_shape
@@ -138,7 +138,9 @@ class SharedScheduler:
         peer=self.store.peer_context(actor)
         own=self.store.db.execute("SELECT id FROM world_events WHERE actor_id=? AND stage IN ('world','choice','outcome','experience','post') ORDER BY rowid DESC LIMIT 1",(actor,)).fetchone()
         return hashlib.sha256(json.dumps({'unread':peer['unread_ids'],'own':own[0] if own else None,
-            'invitations':peer['invitations'],'nearby':peer['nearby_actor_ids']},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+            'invitations':peer['invitations'],'nearby':peer['nearby_actor_ids'],
+            'commitments':peer.get('own_commitments',[]),
+            'reconsiderable':bool(peer.get('reconsider_action'))},sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
     def peer_turn(self, actor):
         life = self.lives[actor]
@@ -161,12 +163,15 @@ class SharedScheduler:
             answer, usage = life.lab.session.backend.generate('peer_choice',
                 life.persona+'\n'+life.lab.session.speech_contract+'\n'+PEER_INSTRUCTIONS+'\n'+ROLE_RULES, payload,
                 **({'cancel': life.cancel} if life.cancel is not None else {}))
+            answer=normalized_peer(answer)
             self.validate_peer(actor, answer, payload)
             with self.store.lock, self.store.db:
                 current = self.store.cycle(cid)
                 if current['status'] != 'running' or current['revision'] != self.store.get('revision') or self.store.get('paused'):
                     raise WorldConflict('peer decision was interrupted or became stale')
                 current['value']['results']['peer_choice'] = answer
+                from .shared_agency import apply_local
+                apply_local(self.store,actor,answer,cid)
                 if answer['decision'] != 'keep':
                     self.store.db.execute('INSERT INTO peer_jobs VALUES(?,?,?,?,?,?,?)',
                         (cid, actor, answer['recipient_actor_id'], json.dumps(answer, ensure_ascii=False), 'pending', None, None))
@@ -184,12 +189,15 @@ class SharedScheduler:
             raise
 
     def validate_peer(self, actor, answer, payload):
+        answer=normalized_peer(answer)
         validate_shape(answer, PEER_CHOICE)
         from .role_boundary import check_character_speech
         check_character_speech(answer['text'],self.lives[actor].name)
         peer = payload['peer_context']; decision = answer['decision']; recipient = answer['recipient_actor_id']
         if not set(answer['source_ids']) <= set(payload['available_source_ids']) or not set(answer['read_ids']) <= set(peer['unread_ids']):
             raise ValueError('peer decision uses private or unavailable evidence')
+        from .shared_agency import validate_peer
+        validate_peer(self.store,actor,answer,payload)
         if decision == 'keep':
             if answer['text'] or any(answer[k] is not None for k in ('recipient_actor_id','invitation_id','place_id','post_id')):
                 raise ValueError('keep cannot send words or select a target')
@@ -204,11 +212,14 @@ class SharedScheduler:
                 raise ValueError('invitation needs a known place')
         elif decision not in ('accept','decline') and answer['place_id'] is not None:
             raise ValueError('only an invitation chooses a place')
-        if decision in ('accept','decline'):
+        if decision in ('accept','decline','cancel','finish') or decision=='invite' and answer['invitation_id'] is not None:
             invite = next((r for r in peer['invitations'] if r['id']==answer['invitation_id']), None)
-            if not invite or invite['recipient'] != actor or invite['sender'] != recipient or invite['status'] != 'pending':
+            if not invite or {invite['recipient'],invite['sender']}!={actor,recipient}:
+                raise ValueError('meeting must belong to these participants')
+            if decision in ('accept','decline') and (invite['recipient']!=actor or invite['status']!='pending'):
                 raise ValueError('only the actual recipient can answer an open invitation')
-            if answer['place_id'] is not None and answer['place_id']!=invite['place_id']:
+            if decision=='finish' and invite['status']!='met':raise ValueError('only a met meeting can finish')
+            if decision in ('accept','decline') and answer['place_id'] is not None and answer['place_id']!=invite['place_id']:
                 raise ValueError('a reply cannot change the invited place')
         elif answer['invitation_id'] is not None:
             raise ValueError('unexpected invitation reference')
@@ -225,7 +236,15 @@ class SharedScheduler:
             raise ValueError('unexpected post target')
 
     def deliver_peer(self, row):
-        value = json.loads(row['value']); sender, recipient = row['sender'], row['recipient']
+        if row['status']!='pending':return False
+        value = normalized_peer(json.loads(row['value'])); sender, recipient = row['sender'], row['recipient']
+        if value['invitation_id']:
+            current=self.store.db.execute('SELECT status FROM peer_invitations WHERE id=?',(value['invitation_id'],)).fetchone()
+            allowed=('pending',) if value['decision'] in ('accept','decline') else ('met',) if value['decision']=='finish' else ('pending','accepted','met')
+            if not current or current[0] not in allowed:
+                with self.store.lock,self.store.db:
+                    self.store.db.execute("UPDATE peer_jobs SET status='obsolete',error='meeting changed before delivery; words not sent' WHERE id=?",(row['id'],))
+                return True
         kind = value['decision']; receipt = None
         if kind == 'comment':
             target = self.lives[recipient].connection
@@ -256,15 +275,26 @@ class SharedScheduler:
             eid = self.store.relay(sender, recipient, kind, value['text'], source_ids=value['source_ids'],
                                    delivery_id=row['id'], details={'post_id': value['post_id']} if kind=='comment' else None)
             if kind == 'invite':
+                from .shared_agency import meeting
+                if value['invitation_id']:meeting(self.store,value['invitation_id'],'superseded',eid)
                 self.store.db.execute('INSERT INTO peer_invitations VALUES(?,?,?,?,?,?)',
                     (row['id'], sender, recipient, value['place_id'], 'pending', eid))
+                meeting(self.store,row['id'],'pending',eid)
                 # An address deliberately shared by the inviter is now known, not every private place.
                 place = self.store.db.execute('SELECT value FROM world_entities WHERE id=?', (value['place_id'],)).fetchone()
                 entity = json.loads(place[0]); entity['known_to'] = list(dict.fromkeys([*entity['known_to'], recipient]))
                 self.store.db.execute('UPDATE world_entities SET value=? WHERE id=?', (json.dumps(entity,ensure_ascii=False), value['place_id']))
-            elif kind in ('accept','decline'):
-                self.store.db.execute('UPDATE peer_invitations SET status=? WHERE id=?',
-                    ('accepted' if kind=='accept' else 'declined', value['invitation_id']))
+            elif kind in ('accept','decline','cancel','finish'):
+                from .shared_agency import meeting
+                meeting(self.store,value['invitation_id'],
+                    {'accept':'accepted','decline':'declined','cancel':'cancelled','finish':'completed'}[kind],eid)
+            from .shared_agency import delivered
+            out=self.store.db.execute('SELECT out_event FROM peer_deliveries WHERE id=?',(row['id'],)).fetchone()[0]
+            delivered(self.store,sender,value,out,row['id'])
+            if value['commitment'] or kind=='accept':
+                status=self.lives[sender].get('life_status')
+                status['next_wake']=min(status['next_wake'],self.now())
+                self.lives[sender].put('life_status',status)
             if kind=='comment' and receipt:
                 for eid in value['source_ids']:
                     if self.store.db.execute('SELECT 1 FROM peer_deliveries WHERE recipient=? AND in_event=?',(sender,eid)).fetchone():
@@ -346,11 +376,10 @@ class SharedScheduler:
                         source_ids=[cycle['id']+'-outcome'],delivery_id='arrival:'+cycle['id']+':'+peer,details={'place_id':place})
                 if self.store.get('revision')!=previous_revision:
                     self.store.rebase_waiting_cycle(cycle['id'],actor,previous_revision)
-                self.store.db.execute("UPDATE peer_invitations SET status='met' WHERE place_id=? AND status='accepted' AND sender IN (SELECT actor FROM peer_positions WHERE place_id=?) AND recipient IN (SELECT actor FROM peer_positions WHERE place_id=?)",(place,place,place))
                 self.store.snapshot()
         if updated['status']=='complete' and not cycle['value'].get('channel_visit'):
             with self.store.lock, self.store.db:
-                status = life.get('life_status'); status.update(last_cycle=cycle['id'],next_wake=self.now()+life.get('life_controls')['wake_minutes']*60)
+                status = life.get('life_status'); status.update(last_cycle=cycle['id'],next_wake=self.now()+(0 if updated['value'].get('interruption') else life.get('life_controls')['wake_minutes']*60))
                 life.put('life_status',status)
         elif updated['status']=='complete':
             life.finish_visit_turn()

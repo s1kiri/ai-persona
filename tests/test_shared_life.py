@@ -41,7 +41,8 @@ class PairAPI(API):
 
 def peer_answer(**changes):
     answer={'decision':'keep','recipient_actor_id':None,'text':'','source_ids':[],'read_ids':[],
-            'invitation_id':None,'place_id':None,'post_id':None}
+            'invitation_id':None,'place_id':None,'post_id':None,
+            'activity':'keep','commitment':None,'commitment_updates':[]}
     answer.update(changes);return answer
 
 
@@ -71,10 +72,10 @@ class SharedLifeTests(unittest.TestCase):
             life.action(True)
         self.scheduler=SharedScheduler(self.store,self.lives,now=lambda:self.now)
 
-    def plan(self,actor,minutes=30,destination=None,intent='Заняться своим делом.'):
+    def plan(self,actor,minutes=30,destination=None,intent='Заняться своим делом.',commitment_ids=None):
         life=self.lives[actor];b=self.backends[actor]
         observed=quiet();observed.update(entity_ids=['arkady_garage'] if actor=='arkady' else ['home'],visible_to=[actor])
-        b.answers += [observed,intent,{**choice(action=intent,entity_ids=[]), 'duration_minutes':minutes,'destination_id':destination}]
+        b.answers += [observed,intent,{**choice(action=intent,entity_ids=[]), 'duration_minutes':minutes,'destination_id':destination,'commitment_ids':commitment_ids or []}]
         cycle=life.lab.session.prepare(actor,minutes=0,draw=1)
         for _ in range(3):life.lab.session.step(cycle['id'])
         self.scheduler._run_cycle(self.store.cycle(cycle['id']))
@@ -307,6 +308,190 @@ class SharedLifeTests(unittest.TestCase):
         self.backends['arkady'].answers=[observed]
         with self.assertRaises(ValueError):life.lab.session.step(cycle['id'])
         self.assertEqual(self.store.cycle(cycle['id'])['status'],'blocked')
+
+
+    def test_meeting_can_be_replaced_and_needs_fresh_consent(self):
+        first=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Встретимся во дворе.',place_id='arkady_garage_yard'))
+        self.job('garik',peer_answer(decision='accept',recipient_actor_id='arkady',text='Приду.',invitation_id=first))
+        old_promise=self.store.peer_context('garik')['own_commitments'][0]
+        second=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Передумал: заходи в гараж.',place_id='arkady_garage',invitation_id=first))
+        context=self.store.peer_context('garik')
+        self.assertEqual([(i['id'],i['status']) for i in context['invitations']],[(second,'pending')])
+        self.assertEqual(context['meeting_history'][-1]['status'],'superseded')
+        self.assertFalse(context['own_commitments'])
+        self.assertEqual(context['commitment_history'][0]['id'],old_promise['id'])
+        with self.assertRaises(ValueError):
+            self.job('garik',peer_answer(decision='accept',recipient_actor_id='arkady',text='Иду на старую.',invitation_id=first))
+
+    def test_arrival_promise_is_linked_to_attempt_not_to_words_and_meeting_closes_on_departure(self):
+        invite=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Заходи.',place_id='arkady_garage'))
+        self.job('garik',peer_answer(decision='accept',recipient_actor_id='arkady',text='Иду.',invitation_id=invite))
+        promise=self.store.peer_context('garik')['own_commitments'][0]
+        self.assertEqual(promise['status'],'pending')
+        cid=self.plan('garik',5,'arkady_garage','Дойду до гаража.')
+        context=self.store.peer_context('garik')
+        self.assertEqual(context['own_commitments'][0]['attempt_ids'],[cid])
+        self.assertEqual(context['invitations'][0]['status'],'accepted')
+        self.assertNotEqual(self.store.nearby('garik'),['arkady'])
+        self.now+=300;self.finish('garik',cid,5)
+        self.assertEqual(self.store.peer_context('garik')['invitations'][0]['status'],'met')
+        self.assertEqual(self.store.peer_context('garik')['commitment_history'][0]['status'],'fulfilled')
+        leave=self.plan('garik',2,'home','Вернусь домой.');self.now+=120;self.finish('garik',leave,2)
+        self.assertEqual(self.store.peer_context('arkady')['invitations'],[])
+        self.assertEqual(self.store.peer_context('arkady')['meeting_history'][0]['status'],'completed')
+
+    def test_delivery_creates_private_promise_and_only_linked_outcome_can_fulfill_it(self):
+        answer=peer_answer(decision='message',recipient_actor_id='garik',text='Проверю крепление.',
+            commitment={'action':'Проверить крепление.','destination_id':None})
+        self.backends['arkady'].answers.append(answer);self.scheduler.peer_turn('arkady')
+        self.assertFalse(self.store.peer_context('arkady')['own_commitments'])
+        job=self.store.db.execute("SELECT * FROM peer_jobs WHERE sender='arkady'").fetchone()
+        self.scheduler.deliver_peer(job)
+        promise=self.store.peer_context('arkady')['own_commitments'][0]
+        self.assertFalse(self.store.peer_context('garik')['own_commitments'])
+        self.assertNotIn(promise['id'],json.dumps(self.store.actor_view('garik')))
+        cid=self.plan('arkady',2,'arkady_garage','Проверю крепление.',[promise['id']])
+        self.assertEqual(self.store.peer_context('arkady')['own_commitments'][0]['status'],'in_progress')
+        self.now+=120;self.finish('arkady',cid,2)
+        self.assertEqual(self.store.peer_context('arkady')['own_commitments'][0]['status'],'needs_review')
+        self.backends['arkady'].answers.append(peer_answer(commitment_updates=[{'id':promise['id'],'status':'fulfilled','source_id':cid+'-outcome'}]))
+        self.scheduler.peer_turn('arkady')
+        self.assertFalse(self.store.peer_context('arkady')['own_commitments'])
+        self.assertEqual(self.store.peer_context('arkady')['commitment_history'][0]['status'],'fulfilled')
+
+    def test_message_can_interrupt_elapsed_prefix_then_actor_really_goes_to_changed_meeting(self):
+        original=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Приходи во двор.',place_id='arkady_garage_yard'))
+        self.job('garik',peer_answer(decision='accept',recipient_actor_id='arkady',text='Позже зайду.',invitation_id=original))
+        cid=self.plan('garik',60,'home','Почитаю дома, потом схожу к другу.')
+        original_window=copy.deepcopy(self.store.cycle(cid)['value']['shared_window'])
+        self.now+=600;self.scheduler.advance()
+        changed=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Во дворе дождь, заходи прямо в гараж.',place_id='arkady_garage',invitation_id=original))
+        source=self.store.peer_context('garik')['invitations'][0]['source_id']
+        self.job('garik',peer_answer(decision='accept',recipient_actor_id='arkady',text='Ладно, книжку отложу и приду в гараж.',invitation_id=changed,
+                                  activity='reconsider',source_ids=[source],read_ids=[source]))
+        amended=self.store.cycle(cid)
+        self.assertEqual(amended['value']['original_shared_window'],original_window)
+        self.assertEqual(amended['value']['shared_window']['duration_minutes'],10)
+        self.assertNotIn('outcome',amended['value']['results'])
+        self.finish('garik',cid,10,observation='Отложил книгу после сообщения, пока дома.')
+        self.assertEqual(self.store.peer_context('garik')['place_id'],'home')
+        sent=self.backends['garik'].inputs[-3][2]
+        self.assertIn('interrupted_action',sent)
+        self.assertEqual(sent['shared_action_window']['duration_minutes'],10)
+        self.assertNotIn(source,json.dumps(sent['shared_scene']))
+        self.assertEqual(sent['shared_scene']['meetings'][0]['id'],original)
+        self.assertLessEqual(self.lives['garik'].get('life_status')['next_wake'],self.now)
+        arrival=self.plan('garik',5,'arkady_garage','Схожу к Аркадию в гараж.')
+        self.now+=300;self.finish('garik',arrival,5)
+        self.assertEqual(self.store.nearby('garik'),['arkady'])
+        self.assertEqual(self.store.peer_context('garik')['invitations'][0]['status'],'met')
+        self.assertFalse(self.store.peer_context('garik')['own_commitments'])
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM world_calls WHERE cycle_id=? AND stage='outcome'",(cid,)).fetchone()[0],1)
+
+    def test_actor_can_keep_action_and_reconsider_requires_received_cause(self):
+        cid=self.plan('garik',60,'home');window=copy.deepcopy(self.store.cycle(cid)['value']['shared_window'])
+        self.now+=600;self.scheduler.advance()
+        source=self.store.relay('arkady','garik','message','Можешь зайти?')
+        self.backends['garik'].answers.append(peer_answer(source_ids=[source],read_ids=[source]))
+        self.scheduler.peer_turn('garik')
+        self.assertEqual(self.store.cycle(cid)['value']['shared_window'],window)
+        self.backends['garik'].answers.append(peer_answer(activity='reconsider'))
+        with self.assertRaises(ValueError):self.scheduler.peer_turn('garik')
+        self.assertEqual(self.store.cycle(cid)['value']['shared_window'],window)
+
+    def test_agreement_history_obeys_frozen_time_and_survives_reopen(self):
+        invite=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Заходи.',place_id='arkady_garage'))
+        minute=self.store.get('minute')
+        self.now+=60;self.scheduler.advance()
+        self.job('garik',peer_answer(decision='accept',recipient_actor_id='arkady',text='Приду.',invitation_id=invite))
+        self.assertEqual(self.store.peer_context('garik',minute)['invitations'][0]['status'],'pending')
+        self.assertFalse(self.store.peer_context('garik',minute)['own_commitments'])
+        self.now+=60;self.scheduler.advance()
+        self.job('arkady',peer_answer(decision='cancel',recipient_actor_id='garik',text='Сегодня отмена.',invitation_id=invite))
+        self.assertEqual(self.store.peer_context('garik',minute+1)['invitations'][0]['status'],'accepted')
+        from persona_runtime.shared_agency import view
+        self.assertEqual(view(self.store,'garik',minute+2)[0][0]['status'],'cancelled')
+        import sqlite3
+        backup_dir=self.root/'reopened';backup_dir.mkdir()
+        backup=sqlite3.connect(backup_dir/'world.sqlite3')
+        self.store.db.backup(backup);backup.close()
+        reopened=SharedWorldStore(backup_dir)
+        try:self.assertEqual(reopened.peer_context('garik')['meeting_history'][0]['status'],'cancelled')
+        finally:reopened.close()
+
+    def test_unknown_peer_delivery_does_not_activate_or_replay_a_promise(self):
+        self.backends['garik'].answers.append(peer_answer(decision='message',recipient_actor_id='arkady',text='Проверю.',
+            commitment={'action':'Проверить крепление.','destination_id':None}))
+        self.scheduler.peer_turn('garik')
+        with self.store.db:self.store.db.execute("UPDATE peer_jobs SET status='unknown' WHERE sender='garik'")
+        row=self.store.db.execute("SELECT * FROM peer_jobs WHERE sender='garik'").fetchone()
+        self.assertFalse(self.scheduler.deliver_peer(row))
+        self.assertFalse(self.store.peer_context('garik')['own_commitments'])
+        self.assertFalse(self.store.db.execute('SELECT 1 FROM peer_deliveries').fetchone())
+
+    def test_cancel_before_pending_acceptance_delivery_does_not_reopen_meeting(self):
+        invite=self.job('arkady',peer_answer(decision='invite',recipient_actor_id='garik',text='Заходи.',place_id='arkady_garage'))
+        self.backends['garik'].answers.append(peer_answer(decision='accept',recipient_actor_id='arkady',text='Иду.',invitation_id=invite))
+        self.scheduler.peer_turn('garik')
+        self.job('arkady',peer_answer(decision='cancel',recipient_actor_id='garik',text='Планы поменялись.',invitation_id=invite))
+        row=self.store.db.execute("SELECT * FROM peer_jobs WHERE sender='garik'").fetchone()
+        self.scheduler.deliver_peer(row)
+        self.assertEqual(self.store.db.execute('SELECT status FROM peer_jobs WHERE id=?',(row['id'],)).fetchone()[0],'obsolete')
+        self.assertFalse(self.store.peer_context('garik')['own_commitments'])
+        self.assertFalse(self.store.peer_context('arkady')['invitations'])
+
+    def test_fulfillment_cannot_use_words_instead_of_linked_outcome(self):
+        self.job('garik',peer_answer(decision='message',recipient_actor_id='arkady',text='Сделаю.',
+            commitment={'action':'Проверить крепление.','destination_id':None}))
+        context=self.store.peer_context('garik');promise=context['own_commitments'][0]
+        source=context['events'][-1]['id']
+        answer=peer_answer(commitment_updates=[{'id':promise['id'],'status':'fulfilled','source_id':source}])
+        payload={'peer_context':context,'life':self.store.actor_view('garik'),'available_source_ids':[source]}
+        with self.assertRaises(ValueError):self.scheduler.validate_peer('garik',answer,payload)
+        self.assertEqual(self.store.peer_context('garik')['own_commitments'][0]['status'],'pending')
+
+    def test_due_action_can_no_longer_be_reconsidered(self):
+        cid=self.plan('garik',2,'home');self.now+=120;self.scheduler.advance()
+        source=self.store.relay('arkady','garik','message','Заходи.')
+        context=self.store.peer_context('garik')
+        self.assertIsNone(context['reconsider_action'])
+        payload={'peer_context':context,'life':self.store.actor_view('garik'),'available_source_ids':[source]}
+        with self.assertRaises(ValueError):self.scheduler.validate_peer('garik',peer_answer(activity='reconsider',source_ids=[source]),payload)
+        self.assertNotIn('interruption',self.store.cycle(cid)['value'])
+
+    def test_received_trigger_is_not_played_retroactively_when_read_later(self):
+        cid=self.plan('garik',60,'home','Почитаю дома до сообщения друга.')
+        self.now+=180;self.scheduler.advance()
+        source=self.store.relay('arkady','garik','message','Я освободился, заходи сейчас.')
+        self.now+=120;self.scheduler.advance()
+        self.backends['garik'].answers.append(peer_answer(activity='reconsider',source_ids=[source],read_ids=[source]))
+        self.scheduler.peer_turn('garik')
+        cycle=self.store.cycle(cid)
+        payload=SharedTimeline(self.store).enrich('outcome',{'world':self.store.state()},cycle)
+        self.assertEqual(payload['shared_action_window']['duration_minutes'],5)
+        self.assertNotIn(source,json.dumps(payload['shared_scene']))
+        own=SharedTimeline(self.store).enrich('experience',{},cycle)
+        self.assertEqual(own['action_timing']['interruption']['at_minute'],self.store.get('minute'))
+
+    def test_rejected_adapter_can_be_explicitly_released_without_action_or_replay(self):
+        from test_world_intent import routed
+        life=self.lives['arkady'];life.lab.session.lossless_intentions=True
+        observed=quiet();observed.update(visible_to=['arkady'],entity_ids=['arkady_garage'])
+        self.backends['arkady'].answers=[observed,'Пойду в гараж.',{**routed([('attempt','Пойдув гараж.')]),'duration_minutes':5,'destination_id':'arkady_garage'}]
+        cid=life.lab.session.prepare('arkady',minutes=0,draw=1)['id']
+        life.lab.session.step(cid);life.lab.session.step(cid)
+        with self.assertRaises(ValueError):life.lab.session.step(cid)
+        calls=[tuple(r) for r in self.store.db.execute('SELECT * FROM world_calls')]
+        positions=self.store.state()['positions']
+        with self.assertRaises(WorldConflict):self.store.release_rejected_choice(cid,'Explicit test review')
+        for item in self.lives.values():item.action(False)
+        self.store.release_rejected_choice(cid,'Explicit test review')
+        self.store.release_rejected_choice(cid,'Idempotent repeated review')
+        self.assertEqual(self.store.cycle(cid)['status'],'abandoned')
+        self.assertNotIn('choice',self.store.cycle(cid)['value']['results'])
+        self.assertEqual(calls,[tuple(r) for r in self.store.db.execute('SELECT * FROM world_calls')])
+        self.assertEqual(positions,self.store.state()['positions'])
+        self.assertEqual(len(self.store.get('rejected_choice_reviews')),1)
 
 
 class PeerProtocolTests(unittest.TestCase):

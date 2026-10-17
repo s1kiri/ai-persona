@@ -33,15 +33,20 @@ def validate(links,state,entities):
             if not set(previous['known_to'])<=set(link['known_to']):raise ValueError('known route cannot become unknown')
 
 
-def extract(answer,payload,store,cycle,stage):
-    links=answer.get('place_links',[])
-    validate(links,payload['world'],answer.get('entities',[]))
-    old={link['id']:set(link['known_to']) for link in payload['world'].get('place_links',[])}
+def event_observers(answer,store,cycle,stage):
     observers=set(answer.get('visible_to',[cycle['actor_id']]))
     # An outcome may share an observed route only with confirmed companions.
     if stage=='outcome' and cycle['value'].get('shared_window'):
         window=cycle['value']['shared_window']
         observers={cycle['actor_id'],*(set(window['present_actor_ids']) & set(store.nearby(cycle['actor_id'])))}
+    return observers
+
+
+def extract(answer,payload,store,cycle,stage):
+    links=answer.get('place_links',[])
+    validate(links,payload['world'],answer.get('entities',[]))
+    old={link['id']:set(link['known_to']) for link in payload['world'].get('place_links',[])}
+    observers=event_observers(answer,store,cycle,stage)
     if any(set(link['known_to'])-old.get(link['id'],set())-observers for link in links):
         raise ValueError('new route knowledge needs an observer of this event')
     if 'place_links' in answer:
@@ -56,10 +61,33 @@ def apply(store,links,cycle,stage):
     # Revalidate against current committed entities inside the outcome transaction.
     validate(links,store.state(),[])
     source=cycle['id']+'-'+stage
+    observers=event_observers(cycle['value']['results'][stage],store,cycle,stage)
     for link in links:
+        row=store.db.execute('SELECT value,source FROM world_place_links WHERE id=?',(link['id'],)).fetchone()
+        old=json.loads(row['value']) if row else {}
+        snapshots={a:(items if isinstance(items,list) else [items]) for a,items in old.get('_observer_views',{}).items()}
+        if row and not snapshots:
+            snapshots={a:[{'value':old,'source_id':row['source'],'minute':0,'revision':0}] for a in old['known_to']}
+        for actor in set(link['known_to']) & observers:
+            versions=snapshots.setdefault(actor,[])
+            if not versions or versions[-1]['value']!=link:
+                versions.append({'value':link,'source_id':source,'minute':store.get('minute'),'revision':store.get('revision')+1})
         store.db.execute('INSERT OR REPLACE INTO world_place_links VALUES(?,?,?)',
-            (link['id'],json.dumps(link,ensure_ascii=False),source))
+            (link['id'],json.dumps({**link,'_observer_views':snapshots},ensure_ascii=False),source))
     if links:cycle['value'].setdefault('geography_receipts',{})[stage]={'source_id':source,'links':links}
+
+
+def actor_links(store,actor,links,minute,revision):
+    result=[]
+    for link in links:
+        row=store.db.execute('SELECT value FROM world_place_links WHERE id=?',(link['id'],)).fetchone()
+        versions=json.loads(row['value']).get('_observer_views',{}).get(actor,[]) if row else []
+        if isinstance(versions,dict):versions=[versions]
+        eligible=[v for v in versions if v.get('minute',0)<=minute and v.get('revision',0)<=revision]
+        if versions and not eligible:continue
+        snapshot=eligible[-1] if eligible else None
+        result.append({**snapshot['value'],'source_id':snapshot['source_id']} if snapshot else link)
+    return result
 
 
 INSTRUCTIONS = '''

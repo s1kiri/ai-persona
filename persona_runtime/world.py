@@ -229,8 +229,9 @@ class WorldStore:
             raise WorldConflict('comment visit requires an unchanged waiting action')
         visible = copy.deepcopy(state)
         visible['minute'] = cycle['value']['service_minute']
-        for key in ('entities', 'threads', 'thread_links', 'hooks'):
-            visible[key] = copy.deepcopy(before[key])
+        for key in ('entities', 'threads', 'thread_links', 'hooks','place_links'):
+            visible[key] = copy.deepcopy(before.get(key,[]))
+        visible['_geography_revision']=before['revision']
         visible['history'] = [e for e in state['history'] if e['minute'] <= visible['minute'] and
                               e['id'] != suspended + '-outcome']
         return visible
@@ -270,7 +271,7 @@ class WorldStore:
                     'settings': self.get('settings'), 'settings_revision': self.get('settings_revision'),
                     'paused': self.get('paused'), 'actors': self._rows('world_actors'),
                     'entities': entities, 'threads': threads, 'thread_links': self._rows('world_thread_links'),
-                    'place_links':[{**json.loads(r['value']),'source_id':r['source']} for r in self._rows('world_place_links')],
+                    'place_links':[{**{k:v for k,v in json.loads(r['value']).items() if k!='_observer_views'},'source_id':r['source']} for r in self._rows('world_place_links')],
                     'hooks': [json.loads(r['value']) for r in self._rows('world_hooks')], 'history': history}
 
     @locked
@@ -281,6 +282,8 @@ class WorldStore:
         known_places={e['id'] for e in state['entities'] if e['kind']=='place'}
         state['place_links']=[link for link in state.get('place_links',[]) if actor_id in link['known_to']
                               and {link['from_id'],link['to_id']}<=known_places]
+        from .world_geography import actor_links
+        state['place_links']=actor_links(self,actor_id,state['place_links'],state['minute'],state.pop('_geography_revision',state['revision']))
         state['threads'] = [t for t in state['threads'] if actor_id in t['visible_to']]
         visible_threads = {t['id'] for t in state['threads']}
         state['thread_links'] = [link for link in state['thread_links']
@@ -1176,6 +1179,8 @@ class WorldSession:
                 answer={'hooks':[{k:v for k,v in h.items() if k!='view_from'} for h in answer['hooks']]}
             geography=[]
             if stage in ('world','outcome'):
+                from .world_wire import extract as extract_wire
+                answer=extract_wire(answer,stage,payload,self.store,cycle)
                 from .world_geography import extract
                 answer,geography=extract(answer,payload,self.store,cycle,stage)
             social_answer=answer if social_role else None

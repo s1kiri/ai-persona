@@ -66,6 +66,8 @@ class WorldBackend(AppServerBackend):
                 props['id']['pattern']='^[a-z][a-z0-9_-]{0,79}$'
                 audience=props.get('known_to',props.get('visible_to'))
                 if actors:audience['items']['enum']=actors
+            from .world_wire import schema
+            params['outputSchema']=schema(params['outputSchema'],stage,payload)
         if stage=='outcome' and payload.get('research_failure'):
             params['outputSchema']=copy.deepcopy(params['outputSchema'])
             params['outputSchema']['properties']['status']['enum']=['failed']

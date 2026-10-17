@@ -211,6 +211,31 @@ class SharedWorldStore(WorldStore):
             # A world-stage observation is not a movement; preserve the confirmed position.
             self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
 
+    def release_rejected_map_event(self,cycle_id,reason):
+        """Explicitly discard an uncommitted legacy map observation, never publish or replay it."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if any(r['cycle_id']==cycle_id for r in self.get('rejected_map_reviews') or []):return cycle
+            self._require_paused_review();v=cycle['value'];rejected=v.get('rejected',{});answer=rejected.get('answer',{})
+            prior=v.get('inputs',{}).get('world',{}).get('world',{})
+            known={e['id'] for e in prior.get('entities',[]) if cycle['actor_id'] in e['known_to']}
+            known|={e['id'] for e in answer.get('entities',[]) if cycle['actor_id'] in e.get('known_to',[])}
+            old={link['id']:set(link['known_to']) for link in prior.get('place_links',[])}
+            unknown_refs=set(answer.get('entity_ids',[]))-known
+            remote=any(set(link.get('known_to',[]))-old.get(link['id'],set())-set(answer.get('visible_to',[])) for link in answer.get('place_links',[]))
+            if (cycle['status']!='blocked' or cycle['phase']!='world' or rejected.get('stage')!='world'
+                    or rejected.get('error_type')!='ValueError' or v.get('results') or answer.get('domain')!='city'
+                    or not answer.get('place_links') or not (unknown_refs or remote)):
+                raise WorldConflict('uncommitted legacy map with invalid references or remote discovery required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='world' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            self.put('rejected_map_reviews',[*(self.get('rejected_map_reviews') or []),
+                {'cycle_id':cycle_id,'at':time.time(),'reason':reason,'original_cycle':cycle,'original_call':dict(call),
+                 'unknown_refs':sorted(unknown_refs),'remote_route_discovery':remote,'model_replayed':False,'event_applied':False}])
+            self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id=?",(cycle_id,))
+            self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
+
     def resolve_failed_research(self,cycle_id):
         """Retain a failed read-only attempt; advance to its failed outcome, never search again."""
         with self.lock,self.db:

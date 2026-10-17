@@ -15,6 +15,23 @@ class SharedMediaTests(unittest.TestCase):
         f=SharedLifeTests();f.setUp();self.addCleanup(f.doCleanups)
         self.f=f;self.store=f.store;self.gallery=Gallery(f.store)
 
+    def test_author_portrait_migration_keeps_both_accepted_action_windows(self):
+        from dataclasses import replace
+        from persona_runtime.profile_update import revise_visual_reference
+        f=self.f
+        ids=[f.plan('arkady',30,'arkady_garage'),f.plan('garik',5,'home')]
+        before={cid:f.store.cycle(cid)['value'] for cid in ids}
+        calls=[tuple(r) for r in f.store.db.execute('SELECT * FROM world_calls')]
+        packages=f.store.get('character_packages')
+        for life in f.lives.values():life.action(False)
+        path=f.root/'portrait.jpg';path.write_bytes(b'approved-fixture')
+        previous=f.profiles['arkady']
+        updated=replace(previous,references={**previous.references,'arkady':str(path)},digest='new-approved-portrait')
+        revise_visual_reference(f.store,previous,updated,'Owner approved the appearance',shared_owner=True)
+        for cid in ids:self.assertEqual(before[cid],f.store.cycle(cid)['value'])
+        self.assertEqual(calls,[tuple(r) for r in f.store.db.execute('SELECT * FROM world_calls')])
+        self.assertEqual(packages['garik'],f.store.get('character_packages')['garik'])
+
     def photo(self, label, *, delivered=False, minute=None):
         s=self.store;path=s.directory/(label+'.png');path.write_bytes(b'\x89PNG\r\n\x1a\n'+label.encode())
         image={'image_path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'subject_ids':['arkady_garage_yard']}

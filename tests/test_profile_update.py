@@ -8,7 +8,7 @@ import unittest
 
 from persona_runtime.character_profile import CharacterProfile
 from persona_runtime.profile_host import open_world
-from persona_runtime.profile_update import revise_profile
+from persona_runtime.profile_update import revise_profile, revise_visual_reference
 from persona_runtime.world import WorldConflict
 import test_character_profile as fixtures
 import test_comments_during_action as waiting
@@ -78,6 +78,26 @@ class ProfileRevisionTests(unittest.TestCase):
                                persona=self.previous.persona + '\nAuthor revision.',
                                canon=self.previous.canon + '\nNew author fact.',
                                digest='revision-fixture', memories=(*self.previous.memories, record))
+
+    def test_approved_portrait_migration_preserves_life_and_rejects_other_changes(self):
+        portrait=self.root/'approved.jpg';portrait.write_bytes(b'approved-reference-fixture')
+        updated=replace(self.previous,references={**self.previous.references,'arkady':str(portrait)},
+                        photo_style='Old phone, identity from reference only.',digest='portrait-fixture')
+        before={t:[tuple(r) for r in self.store.db.execute('SELECT * FROM '+t)]
+                for t in ('world_events','world_calls','world_memories','world_concerns','world_undertakings')}
+        with self.assertRaises(WorldConflict):revise_profile(self.store,self.previous,updated,'Not a generic author edit')
+        with self.assertRaises(WorldConflict):revise_visual_reference(self.store,self.previous,replace(updated,persona='Other voice'),'Portrait only')
+        with self.assertRaises(WorldConflict):revise_visual_reference(self.store,self.previous,replace(updated,references={**updated.references,'arkady_garage':str(portrait)}),'Own appearance only')
+        revise_visual_reference(self.store,self.previous,updated,'Owner supplied and approved portrait')
+        self.assertEqual(self.store.get('character_packages')['arkady'],updated.digest)
+        self.assertEqual(self.store.get('profile_revisions')[-1]['kind'],'visual_reference')
+        for t,rows in before.items():self.assertEqual(rows,[tuple(r) for r in self.store.db.execute('SELECT * FROM '+t)],t)
+
+    def test_portrait_migration_requires_paused_world(self):
+        portrait=self.root/'approved.jpg';portrait.write_bytes(b'approved-reference-fixture')
+        updated=replace(self.previous,references={**self.previous.references,'arkady':str(portrait)},digest='portrait-fixture')
+        self.store.pause(False)
+        with self.assertRaises(WorldConflict):revise_visual_reference(self.store,self.previous,updated,'Owner approval still needs safe boundary')
 
     def test_revision_preserves_concerns_events_controls_deliveries_and_entity_condition(self):
         with self.store.lock, self.store.db:

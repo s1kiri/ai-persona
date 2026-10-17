@@ -15,5 +15,7 @@
   "runtime": {
     "model": "gpt-6-luna",
     "reasoning_effort": "medium"
-  }
+  },
+  "visual_references": "references.json",
+  "photo_style": "photo-style.md"
 }

@@ -14,12 +14,29 @@ from .world import WorldConflict, WorldStore
 
 def revise_profile(store, previous, updated, reason, *, shared_owner=False):
     """Change author material only. Accepted outcomes, deadlines and deliveries survive."""
+    return _revise_profile(store,previous,updated,reason,shared_owner=shared_owner)
+
+
+def revise_visual_reference(store, previous, updated, reason, *, shared_owner=False):
+    """Explicit approval of this actor's portrait/camera, never a voice or life reset."""
+    return _revise_profile(store,previous,updated,reason,shared_owner=shared_owner,visual=True)
+
+
+def _revise_profile(store, previous, updated, reason, *, shared_owner=False, visual=False):
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError('an author revision needs a reason')
     def reference_bytes(profile):
         return {key: hashlib.sha256(Path(path).read_bytes()).hexdigest() for key,path in profile.references.items()}
+    old_refs,new_refs=reference_bytes(previous),reference_bytes(updated)
+    if visual:
+        fields=('actor_id','name','environment','persona','speech_contract','canon','memories','concerns','runtime')
+        if any(getattr(previous,k)!=getattr(updated,k) for k in fields):
+            raise WorldConflict('portrait migration cannot change voice, canon, memory or runtime')
+        subject=previous.actor_id
+        if subject not in new_refs or {k:v for k,v in old_refs.items() if k!=subject}!={k:v for k,v in new_refs.items() if k!=subject}:
+            raise WorldConflict('portrait migration changes only the approved actor reference')
     if (previous.actor_id != updated.actor_id or previous.environment != updated.environment or
-            reference_bytes(previous) != reference_bytes(updated)):
+            not visual and old_refs != new_refs):
         raise WorldConflict('identity, environment or visual changes require a separate migration')
     old_memories = {r['id']: r for r in previous.memories}
     new_memories = {r['id']: r for r in updated.memories}
@@ -64,6 +81,8 @@ def revise_profile(store, previous, updated, reason, *, shared_owner=False):
                 raise WorldConflict('new authored memory collides with lived memory')
         at = datetime.now(timezone.utc).isoformat()
         audit = {'actor_id': actor, 'at': at, 'reason': reason,
+                 'kind':'visual_reference' if visual else 'author_material',
+                 'previous_reference_digests':old_refs,'reference_digests':new_refs,
                  'previous_digest': previous.digest, 'digest': updated.digest,
                  'previous_name': previous.name, 'name': updated.name,
                  'previous_persona': previous.persona, 'persona': updated.persona,
@@ -76,13 +95,14 @@ def revise_profile(store, previous, updated, reason, *, shared_owner=False):
                  'concerns_policy': 'preserve all lived concerns; do not re-seed'}
         store.put('profile_revisions', [*(store.get('profile_revisions') or []), audit])
         store.put('basis', {**store.get('basis'), actor: updated.canon})
-        store.db.execute('UPDATE world_actors SET name=? WHERE id=?', (updated.name, actor))
-        entity = json.loads(store.db.execute('SELECT value FROM world_entities WHERE id=?', (actor,)).fetchone()[0])
-        entity['name'] = updated.name
-        store.db.execute('UPDATE world_entities SET value=? WHERE id=?', (json.dumps(entity, ensure_ascii=False), actor))
-        for key, record in new_memories.items():
-            store.db.execute('INSERT OR REPLACE INTO world_memories VALUES(?,?,?)',
-                             (actor, key, json.dumps(record, ensure_ascii=False)))
+        if not visual:
+            store.db.execute('UPDATE world_actors SET name=? WHERE id=?', (updated.name, actor))
+            entity = json.loads(store.db.execute('SELECT value FROM world_entities WHERE id=?', (actor,)).fetchone()[0])
+            entity['name'] = updated.name
+            store.db.execute('UPDATE world_entities SET value=? WHERE id=?', (json.dumps(entity, ensure_ascii=False), actor))
+            for key, record in new_memories.items():
+                store.db.execute('INSERT OR REPLACE INTO world_memories VALUES(?,?,?)',
+                                 (actor, key, json.dumps(record, ensure_ascii=False)))
         store.put('character_packages', {**packages, actor: updated.digest})
         if shared_owner:
             store.put('shared_host', {**shared, 'profiles': {**shared['profiles'], actor: updated.digest}})

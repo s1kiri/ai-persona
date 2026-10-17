@@ -501,7 +501,7 @@ class WorldStore:
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
                  after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False, media_attached=False,
-                 _reviewed_outcome=False, _reviewed_world_state=False):
+                 _reviewed_outcome=False, _reviewed_world_state=False, _reviewed_thread_omissions=None):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -509,11 +509,18 @@ class WorldStore:
             if call['status'] == 'completed':
                 return False
             cycle = self.cycle(call['cycle_id'])
-            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome or _reviewed_world_state
+            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome or _reviewed_world_state or _reviewed_thread_omissions is not None
             expected_call, expected_cycle = ('failed', 'blocked') if reviewed else ('started', 'running')
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
+            if _reviewed_thread_omissions is not None:
+                saved=cycle['value'].get('rejected',{}).get('answer',{})
+                omitted=set(_reviewed_thread_omissions)
+                projected={**saved,'threads':[t for t in saved.get('threads',[]) if t['id'] not in omitted]}
+                if (stage!='outcome' or not omitted or omitted!={t['id'] for t in saved.get('threads',[]) if t['id'] in omitted}
+                        or value!=projected or any((_reviewed_experience,_reviewed_channel,_reviewed_outcome,_reviewed_world_state))):
+                    raise WorldConflict('review can only omit named thread patches from the saved outcome')
             if _reviewed_world_state and (_reviewed_experience or _reviewed_channel or _reviewed_outcome or
                     stage not in ('world','outcome') or value!=cycle['value'].get('rejected',{}).get('answer')):
                 raise WorldConflict('shared state review can only apply the exact saved world result')
@@ -684,7 +691,7 @@ class WorldStore:
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if reviewed:
                 self.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',
-                                (cycle['id'], call_id, stage, 'Reviewed exact saved world result under corrected shared causes/capacity; no model call' if _reviewed_world_state else 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
+                                (cycle['id'], call_id, stage, 'Reviewed saved outcome with invalid thread patches omitted; original preserved; no model call' if _reviewed_thread_omissions is not None else 'Reviewed exact saved world result under corrected shared causes/capacity; no model call' if _reviewed_world_state else 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
             else:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
@@ -1147,6 +1154,8 @@ class WorldSession:
             timing = None
             if self.timeline and stage == 'choice':
                 answer, timing = self.timeline.extract(answer, payload, cycle)
+            if self.timeline and stage=='outcome':
+                answer,timing=self.timeline.extract_outcome(answer,payload,cycle)
             if social_role:
                 answer=self.channel_extension.validate(stage,answer,payload,actor)
                 if stage=='share':

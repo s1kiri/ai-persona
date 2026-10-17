@@ -331,12 +331,13 @@ class SharedScheduler:
                 return
             raise
         updated = self.store.cycle(cycle['id'])
-        if cycle['phase']=='outcome' and updated['value'].get('shared_window',{}).get('destination_id') and updated['value']['results']['outcome']['status']=='succeeded':
+        arrival=updated['value'].get('position_receipt',{}).get('final_place_id')
+        if cycle['phase']=='outcome' and arrival:
             with self.store.lock,self.store.db:
                 previous_revision=self.store.get('revision')
                 self.store.db.execute('UPDATE world_cycles SET revision=revision WHERE id=?',(cycle['id'],))
-                place=updated['value']['shared_window']['destination_id']
-                for peer in self.store.nearby(actor):
+                place=arrival
+                for peer in self.store.nearby(actor) if place!=updated['value']['shared_window']['origin_id'] else []:
                     self.store.relay(actor,peer,'arrival',life.name+' пришёл в общую локацию.',
                         source_ids=[cycle['id']+'-outcome'],delivery_id='arrival:'+cycle['id']+':'+peer,details={'place_id':place})
                 if self.store.get('revision')!=previous_revision:

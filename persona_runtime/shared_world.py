@@ -90,6 +90,62 @@ class SharedWorldStore(WorldStore):
             self.db.execute("UPDATE world_cycles SET status='held' WHERE id=? AND status='ready'",(cycle_id,))
             self.snapshot();return self.cycle(cycle_id)
 
+    def review_saved_outcome(self,cycle_id,omitted_thread_ids,final_place_id,reason):
+        """Paused human/maintenance review: keep physical facts, quarantine invalid story metadata."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if self.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cycle_id,)).fetchone():return cycle
+            self._require_paused_review()
+            rejected=cycle['value'].get('rejected',{})
+            if cycle['status']!='blocked' or cycle['phase']!='outcome' or rejected.get('stage')!='outcome' or rejected.get('error_type')!='ValueError':
+                raise WorldConflict('saved rejected outcome required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='outcome' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            import copy
+            saved=rejected['answer'];state=self.state();entities={e['id']:e for e in state['entities']}
+            entities.update({e['id']:e for e in saved['entities']})
+            omitted=set(omitted_thread_ids)
+            invalid={t['id'] for t in saved['threads'] if any(
+                eid in entities and set(t['visible_to'])-set(entities[eid]['known_to']) for eid in t['entity_ids'])}
+            if not omitted or not omitted<=invalid:raise WorldConflict('only undiscovered-entity thread patches can be quarantined')
+            if final_place_id is not None and (final_place_id not in entities or entities[final_place_id]['kind']!='place' or cycle['actor_id'] not in entities[final_place_id]['known_to']):
+                raise ValueError('reviewed final place must be an observed location')
+            audit={'cycle_id':cycle_id,'at':time.time(),'reason':reason,'original_cycle':copy.deepcopy(cycle),
+                   'original_call':dict(call),'omitted_thread_ids':sorted(omitted),'final_place_id':final_place_id,'model_replayed':False}
+            self.put('shared_outcome_reviews',[*(self.get('shared_outcome_reviews') or []),audit])
+            receipt={'final_place_id':final_place_id,'basis':'explicit_saved_outcome_review'}
+            projected={**saved,'threads':[t for t in saved['threads'] if t['id'] not in omitted]}
+            self.db.execute('UPDATE world_cycles SET revision=? WHERE id=?',(self.get('revision'),cycle_id))
+            self.complete(call['id'],projected,{},after_outcome='experience',_reviewed_thread_omissions=sorted(omitted),
+                          extra_apply=lambda c:SharedTimeline(self).apply('outcome',receipt,c))
+            self.db.execute("UPDATE world_cycles SET status='held' WHERE id=? AND status='ready'",(cycle_id,))
+            self.snapshot();return self.cycle(cycle_id)
+
+    def _require_paused_review(self):
+        if not self.get('paused') or self.db.execute("SELECT 1 FROM world_calls WHERE status='started'").fetchone():
+            raise WorldConflict('pause both characters and wait for calls')
+        if any((self.actor_get(a['id'],'life_status') or {}).get('status')=='running' for a in self.state()['actors']):
+            raise WorldConflict('pause both characters before review')
+
+    def release_interrupted_outcome(self,cycle_id,reason):
+        """Leave an unanswered attempt unfinished, available to a new voluntary choice; no replay."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if any(r['cycle_id']==cycle_id for r in self.get('interrupted_outcome_reviews') or []):return cycle
+            self._require_paused_review();v=cycle['value'];failure=v.get('failure',{})
+            if (cycle['status']!='blocked' or cycle['phase']!='outcome' or failure.get('error_type')!='CodexError'
+                    or v.get('rejected') or 'outcome' in v.get('results',{}) or failure.get('diagnostics',{}).get('turn_completed')):
+                raise WorldConflict('unanswered interrupted outcome required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='outcome' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            self.put('interrupted_outcome_reviews',[*(self.get('interrupted_outcome_reviews') or []),
+                {'cycle_id':cycle_id,'at':time.time(),'reason':reason,'original_cycle':cycle,'original_call':dict(call),'model_replayed':False}])
+            self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id=?",(cycle_id,))
+            self.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?',(cycle_id+'-unresolved',cycle['actor_id']))
+            self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
+
     def resolve_failed_research(self,cycle_id):
         """Retain a failed read-only attempt; advance to its failed outcome, never search again."""
         with self.lock,self.db:
@@ -212,7 +268,7 @@ duration_minutes — реалистичный план времени дорог
 занятия, от 1 до 1440 минут; это не результат и не квота публикаций.
 destination_id — известная локация, куда персонаж явно решил добраться
 или где явно решил провести выбранное занятие, иначе null. Она подтверждается
-только успешным outcome. Если остаёшься в известном месте, укажи его ID;
+только фактическим final_place_id из outcome. Если остаёшься в известном месте, укажи его ID;
 null означает неподтверждённое местоположение, а не присутствие в прежнем.
 Приглашение/согласие само по себе не дорога.
 life.peer_context.invitations хранит доставленные предложения и ответы.
@@ -233,6 +289,18 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
 Не назначай второму управляемому герою реплики, согласие, чувства или новое
 действие. Учитывай только его уже совершённое и доставленные слова.
 Не меняй entities для actor_id из world.actors; положение учитывает хост.
+final_place_id — подтверждённое МЕСТО В КОНЦЕ попытки, либо null, если оно
+не установлено. Это не план destination_id. Если условие выхода не наступило
+и герой остался дома, укажи дом, а не намеченную цель. Если вышел и вернулся,
+укажи место возвращения. Общий status=succeeded не подтверждает прибытие.
+Используй известное герою место либо новое место, действительно открытое
+в этом outcome. Не придумывай местонахождение по одному намерению.
+Слова другого героя, доставленные через хост, уже записаны в shared_scene.
+Не создавай новую доставку сообщения силами физического мира.
+Для общей истории entity_ids должны быть известны ВСЕМ из visible_to.
+Нельзя расширять аудиторию вместе с незнакомым ей частным оборудованием.
+Если место в квоте нового участника занято, оставь факты в observation,
+а существующую частную историю обновляй для её прежней аудитории.
 '''
 
     def __init__(self, store):
@@ -250,7 +318,7 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
             payload['shared_scene'] = {'nearby_actor_ids': self.store.nearby(cycle['actor_id']),
                 'meetings':[i for i in self.store.peer_context(cycle['actor_id'])['invitations'] if i['status'] in ('accepted','met')],
                 'delivered_words': [e for e in self.store.peer_context(cycle['actor_id'])['events']
-                                    if e['value']['kind'] in ('say', 'accept', 'decline')]}
+                                    if e['value']['kind'] in ('say','message','invite','accept','decline','comment')]}
         return payload
 
     def extract(self, answer, payload, cycle):
@@ -262,6 +330,20 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
             raise ValueError('a destination must be an observed place')
         return ({k: v for k, v in answer.items() if k not in ('duration_minutes', 'destination_id')},
                 {k: answer[k] for k in ('duration_minutes', 'destination_id')})
+
+    def extract_outcome(self,answer,payload,cycle):
+        # Old recorded results without a location receipt never imply arrival.
+        place=answer.get('final_place_id')
+        actor=cycle['actor_id']
+        entities={e['id']:e for e in payload['world']['entities']}
+        entities.update({e['id']:e for e in answer.get('entities',[])})
+        if place is not None and (place not in entities or entities[place]['kind']!='place' or actor not in entities[place]['known_to']):
+            raise ValueError('outcome final place must be an observed location')
+        receipt={'final_place_id':place,'basis':'outcome' if 'final_place_id' in answer else 'legacy_unconfirmed'}
+        with self.store.lock,self.store.db:
+            current=self.store.cycle(cycle['id']);current['value']['outcome_position_proposal']=receipt
+            self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(current['value'],ensure_ascii=False),cycle['id']))
+        return {k:v for k,v in answer.items() if k!='final_place_id'},receipt
 
     def apply(self, stage, timing, cycle):
         actor = cycle['actor_id']
@@ -278,9 +360,10 @@ duration_minutes этого окна: эти минуты УЖЕ прошли, c
             outcome = cycle['value']['results']['outcome']
             if outcome['elapsed_minutes'] != window['duration_minutes']:
                 raise ValueError('shared outcome cannot change elapsed wall time')
-            if window['destination_id'] and outcome['status'] == 'succeeded':
-                self.store.db.execute('UPDATE peer_positions SET place_id=?,source_id=? WHERE actor=?',
-                                     (window['destination_id'], cycle['id']+'-outcome', actor))
+            receipt=timing or cycle['value'].get('outcome_position_proposal') or {'final_place_id':None,'basis':'legacy_unconfirmed'}
+            cycle['value']['position_receipt']=receipt
+            self.store.db.execute('UPDATE peer_positions SET place_id=?,source_id=? WHERE actor=?',
+                                 (receipt['final_place_id'],cycle['id']+'-outcome',actor))
             observers = set(window['present_actor_ids']) & set(self.store.nearby(actor))
             # Shared consequences, no private diary/intent. Nobody gains knowledge remotely.
             row = self.store.db.execute('SELECT value FROM world_events WHERE id=?', (cycle['id']+'-outcome',)).fetchone()

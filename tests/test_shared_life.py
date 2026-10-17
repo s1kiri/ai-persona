@@ -82,7 +82,8 @@ class SharedLifeTests(unittest.TestCase):
         return cycle['id']
 
     def finish(self,actor,cid,minutes,**changes):
-        self.backends[actor].answers += [outcome(elapsed_minutes=minutes,time_costs=[{'activity':'Занятие','minutes':minutes}],**changes),
+        final_place=changes.pop('final_place_id',self.store.cycle(cid)['value']['shared_window']['destination_id'])
+        self.backends[actor].answers += [{**outcome(elapsed_minutes=minutes,time_costs=[{'activity':'Занятие','minutes':minutes}],**changes),'final_place_id':final_place},
             {**experience(cid+'-outcome',concerns=[]),'intent_updates':[]},rich()]
         for _ in range(12):
             self.scheduler.tick()

@@ -58,6 +58,10 @@ class WorldBackend(AppServerBackend):
         if stage=='outcome' and payload.get('research_failure'):
             params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
             params['outputSchema']['properties']['status']['enum']=['failed']
+        if stage=='outcome' and payload.get('shared_action_window'):
+            params['outputSchema']=copy.deepcopy(params['outputSchema'])
+            params['outputSchema']['properties']['final_place_id']={'type':['string','null'],'maxLength':80}
+            params['outputSchema']['required'].append('final_place_id')
         if stage=='horizon':
             params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
             props=params['outputSchema']['properties']['hooks']['items']['properties']

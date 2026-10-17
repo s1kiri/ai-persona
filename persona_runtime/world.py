@@ -43,7 +43,8 @@ def director(state, actor_id, elapsed, draw):
     settings = state['settings']
     history = state['history']
     recent = [e for e in history if e['stage'] == 'world' and e['value']['beat'] != 'quiet'][-8:]
-    due = [t for t in state['threads'] if t['status'] != 'closed' and
+    own_threads=[t for t in state['threads'] if actor_id in t['visible_to']]
+    due = [t for t in own_threads if t['status'] != 'closed' and
            t['due_minute'] is not None and t['due_minute'] <= state['minute']]
     probability = -math.expm1(-settings['events_per_hour'] * elapsed / 60)
     novel = draw < probability
@@ -81,7 +82,7 @@ def director(state, actor_id, elapsed, draw):
             'recent_patterns': [e['value']['pattern'] for e in recent[-6:]],
             'due_threads': [t['id'] for t in due], 'cause_ids': causes,
             'surprise_ceiling': settings['surprise'],
-            'open_slots': max(0, settings['max_threads'] - sum(t['status'] != 'closed' for t in state['threads']))}
+            'open_slots': max(0, settings['max_threads'] - sum(t['status'] != 'closed' for t in own_threads))}
 
 
 class WorldConflict(RuntimeError):
@@ -500,7 +501,7 @@ class WorldStore:
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
                  after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False, media_attached=False,
-                 _reviewed_outcome=False):
+                 _reviewed_outcome=False, _reviewed_world_state=False):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -508,11 +509,14 @@ class WorldStore:
             if call['status'] == 'completed':
                 return False
             cycle = self.cycle(call['cycle_id'])
-            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome
+            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome or _reviewed_world_state
             expected_call, expected_cycle = ('failed', 'blocked') if reviewed else ('started', 'running')
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
+            if _reviewed_world_state and (_reviewed_experience or _reviewed_channel or _reviewed_outcome or
+                    stage not in ('world','outcome') or value!=cycle['value'].get('rejected',{}).get('answer')):
+                raise WorldConflict('shared state review can only apply the exact saved world result')
             if stage in ('speech','post','impulse','experience') or stage=='share' and cycle['value'].get('direct_channel'):
                 from .role_boundary import check_character_speech
                 expression=value if isinstance(value,str) else value.get('note','') if stage=='experience' else value.get('text','')
@@ -680,7 +684,7 @@ class WorldStore:
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if reviewed:
                 self.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',
-                                (cycle['id'], call_id, stage, 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
+                                (cycle['id'], call_id, stage, 'Reviewed exact saved world result under corrected shared causes/capacity; no model call' if _reviewed_world_state else 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
             else:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
@@ -1180,6 +1184,9 @@ class WorldSession:
             return self.store.cycle(cycle_id)
         except Exception as error:
             rejected = social_answer if social_answer is not None else answer if answer is not None else getattr(active_backend, 'last_output', None)
+            diagnostics=copy.deepcopy(getattr(active_backend,'last_diagnostics',{}))
+            validation={'invented causal receipt':'invented_causal_receipt','too many open stories':'story_capacity'}.get(str(error))
+            if validation:diagnostics['validation_reason']=validation
             self.store.fail(call_id, usage if usage is not None else getattr(active_backend, 'last_usage', {}), rejected, type(error).__name__,
-                            getattr(active_backend, 'last_diagnostics', {}))
+                            diagnostics)
             raise

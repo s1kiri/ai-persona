@@ -38,6 +38,58 @@ class SharedWorldStore(WorldStore):
             "SELECT 1 FROM sqlite_master WHERE name='peer_positions'").fetchone() else []
         return state
 
+    def prepare(self,*args,**kwargs):
+        # Only the world director receives authoritative applied-event IDs.
+        # They never grant a character awareness of the event or its news.
+        with self.lock,self.db:
+            cycle=super().prepare(*args,**kwargs)
+            from .world_interventions import facts
+            ids=[e['id'] for e in facts(self) if e['minute']<=self.get('minute')]
+            brief=cycle['value']['brief']
+            brief['cause_ids']=list(dict.fromkeys([*brief['cause_ids'],*ids]))
+            if ids:
+                for beat in ('consequence','return','closure'):
+                    if beat not in brief['allowed_beats']:
+                        brief['allowed_beats'].append(beat);brief['beat_weights'][beat]=1.0
+            self.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(cycle['value'],ensure_ascii=False),cycle['id']))
+            return self.cycle(cycle['id'])
+
+    def recover_saved_shared_stage(self,cycle_id,reason):
+        """Explicit paused review under corrected receipts/capacity; exact answer, no replay."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if self.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cycle_id,)).fetchone():return cycle
+            if not self.get('paused') or self.db.execute("SELECT 1 FROM world_calls WHERE status='started'").fetchone():
+                raise WorldConflict('pause both characters and wait for calls')
+            if any((self.actor_get(a['id'],'life_status') or {}).get('status')=='running' for a in self.state()['actors']):
+                raise WorldConflict('pause both characters before review')
+            rejected=cycle['value'].get('rejected',{});stage=cycle['phase']
+            if cycle['status']!='blocked' or stage not in ('world','outcome') or rejected.get('stage')!=stage or rejected.get('error_type')!='ValueError':
+                raise WorldConflict('saved rejected world result required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage=? AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,stage)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            import copy
+            previous=copy.deepcopy(cycle)
+            if stage=='world':
+                supplied=cycle['value']['inputs']['world'].get('author_world_facts',[])
+                from .world_interventions import facts
+                applied={e['id'] for e in facts(self)}
+                ids=[e['id'] for e in supplied if e['id'] in applied]
+                brief=cycle['value']['brief'];brief['cause_ids']=list(dict.fromkeys([*brief['cause_ids'],*ids]))
+            self.db.execute('UPDATE world_cycles SET revision=?,value=? WHERE id=?',
+                (self.get('revision'),json.dumps(cycle['value'],ensure_ascii=False),cycle_id))
+            audit={'cycle_id':cycle_id,'reason':reason,'at':time.time(),'original_cycle':previous,
+                   'original_call':dict(call),'model_replayed':False}
+            self.put('shared_stage_repairs',[*(self.get('shared_stage_repairs') or []),audit])
+            apply=(lambda committed:SharedTimeline(self).apply('outcome',None,committed)) if stage=='outcome' else None
+            self.complete(call['id'],rejected['answer'],{},after_world='impulse',after_outcome='experience',
+                          _reviewed_world_state=True,extra_apply=apply)
+            # Several actors may be reviewed while paused. Promote each next
+            # stage through the existing held path with a fresh shared revision.
+            self.db.execute("UPDATE world_cycles SET status='held' WHERE id=? AND status='ready'",(cycle_id,))
+            self.snapshot();return self.cycle(cycle_id)
+
     def resolve_failed_research(self,cycle_id):
         """Retain a failed read-only attempt; advance to its failed outcome, never search again."""
         with self.lock,self.db:

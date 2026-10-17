@@ -165,10 +165,17 @@ def validate_patch(value, state, settings):
             raise ValueError('thread deadline is in the past')
         threads[thread['id']] = thread
         updated.add(thread['id'])
-    active_before = sum(t['status'] != 'closed' for t in state['threads'])
-    active_after = sum(t['status'] != 'closed' for t in threads.values())
-    # Lowering a slider does not destroy existing stories, but blocks new ones.
-    if active_after > max(active_before, settings['max_threads']):
+    # A shared story occupies a slot for every observer; one actor's private
+    # backlog cannot consume another actor's capacity. Lowering never erases history.
+    limit=settings['max_threads']
+    for actor in actors:
+        before=sum(t['status']!='closed' and actor in t['visible_to'] for t in state['threads'])
+        after=sum(t['status']!='closed' and actor in t['visible_to'] for t in threads.values())
+        if after>max(before,limit):raise ValueError('too many open stories')
+    # Stories without an audience have a separate finite backstage allowance.
+    before=sum(t['status']!='closed' and not t['visible_to'] for t in state['threads'])
+    after=sum(t['status']!='closed' and not t['visible_to'] for t in threads.values())
+    if after > max(before,limit):
         raise ValueError('too many open stories')
     return ids, threads
 

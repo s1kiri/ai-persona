@@ -146,6 +146,28 @@ class SharedWorldStore(WorldStore):
             self.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?',(cycle_id+'-unresolved',cycle['actor_id']))
             self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
 
+    def release_rejected_timing_outcome(self,cycle_id,reason):
+        """Explicit review: retain an impossible timed answer without asserting its events."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if any(r['cycle_id']==cycle_id for r in self.get('rejected_timing_reviews') or []):return cycle
+            self._require_paused_review();v=cycle['value'];rejected=v.get('rejected',{})
+            answer=rejected.get('answer',{});duration=v.get('shared_window',{}).get('duration_minutes')
+            if (cycle['status']!='blocked' or cycle['phase']!='outcome' or rejected.get('stage')!='outcome'
+                    or rejected.get('error_type')!='ValueError' or not isinstance(answer,dict)
+                    or not isinstance(duration,int) or answer.get('elapsed_minutes')==duration
+                    or not isinstance(answer.get('elapsed_minutes'),int) or 'outcome' in v.get('results',{})):
+                raise WorldConflict('saved rejected outcome with incompatible elapsed time required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='outcome' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            self.put('rejected_timing_reviews',[*(self.get('rejected_timing_reviews') or []),
+                {'cycle_id':cycle_id,'at':time.time(),'reason':reason,'original_cycle':cycle,'original_call':dict(call),
+                 'model_replayed':False,'outcome_applied':False}])
+            self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id=?",(cycle_id,))
+            self.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?',(cycle_id+'-unresolved',cycle['actor_id']))
+            self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
+
     def resolve_failed_research(self,cycle_id):
         """Retain a failed read-only attempt; advance to its failed outcome, never search again."""
         with self.lock,self.db:

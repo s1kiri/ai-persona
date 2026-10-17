@@ -60,6 +60,8 @@ class WorldBackend(AppServerBackend):
             params['outputSchema']['properties']['status']['enum']=['failed']
         if stage=='outcome' and payload.get('shared_action_window'):
             params['outputSchema']=copy.deepcopy(params['outputSchema'])
+            # The elapsed window is an existing receipt, never a model estimate.
+            params['outputSchema']['properties']['elapsed_minutes']['enum']=[payload['shared_action_window']['duration_minutes']]
             params['outputSchema']['properties']['final_place_id']={'type':['string','null'],'maxLength':80}
             params['outputSchema']['required'].append('final_place_id')
         if stage=='horizon':

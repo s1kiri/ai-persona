@@ -111,10 +111,37 @@ class OutcomeReceiptTests(unittest.TestCase):
         cid=self.rejected();self.pause()
         with self.assertRaises(WorldConflict):self.store.release_interrupted_outcome(cid,'not an interrupted attempt')
 
+    def test_incompatible_timing_review_preserves_answer_and_never_applies_it(self):
+        cid=self.f.plan('garik',5,'home');self.due(cid)
+        self.f.backends['garik'].answers=[{**outcome(elapsed_minutes=10,observation='UNACCEPTED physical result.'),'final_place_id':'home'}]
+        with self.assertRaisesRegex(ValueError,'elapsed wall time'):self.f.lives['garik'].lab.session.step(cid)
+        before=copy.deepcopy(self.store.cycle(cid));state=copy.deepcopy(self.store.state())
+        call=dict(self.store.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='outcome'",(cid,)).fetchone())
+        with self.assertRaises(WorldConflict):self.store.release_rejected_timing_outcome(cid,'review')
+        self.pause();self.store.release_rejected_timing_outcome(cid,'Completed answer exceeds accepted action window; no canonical result.')
+        self.store.release_rejected_timing_outcome(cid,'idempotent')
+        after=self.store.cycle(cid)
+        self.assertEqual(after['status'],'abandoned');self.assertEqual(after['value'],before['value'])
+        self.assertEqual(self.store.get('minute'),state['minute'])
+        self.assertEqual(self.store.state()['entities'],state['entities']);self.assertEqual(self.store.state()['threads'],state['threads'])
+        self.assertEqual(call,dict(self.store.db.execute('SELECT * FROM world_calls WHERE id=?',(call['id'],)).fetchone()))
+        self.assertNotIn('UNACCEPTED',json.dumps(self.store.actor_view('garik')))
+        self.assertTrue(any(a['cycle_id']==cid for a in self.store.actor_view('garik')['unfinished_attempts']))
+        self.assertFalse(self.store.db.execute("SELECT 1 FROM world_events WHERE cycle_id=? AND stage='outcome'",(cid,)).fetchone())
+        self.assertEqual(len(self.store.get('rejected_timing_reviews')),1)
+        self.assertEqual(len(self.f.backends['garik'].inputs),4)
+
+    def test_matching_time_rejection_cannot_be_released_through_timing_review(self):
+        cid=self.rejected();self.pause();before=copy.deepcopy(self.store.cycle(cid))
+        with self.assertRaises(WorldConflict):self.store.release_rejected_timing_outcome(cid,'unrelated failure')
+        self.assertEqual(self.store.cycle(cid),before)
+
     def test_native_schema_adds_location_only_for_shared_outcome(self):
         backend=WorldBackend(self.f.root/'backend');backend._start=lambda:None;backend.overrides={};backend.workspace=self.f.root
         backend.client=Client({**outcome(),'final_place_id':'home'})
         backend.generate('outcome','test',{'shared_action_window':{'duration_minutes':15}})
         schema=next(p['outputSchema'] for m,p in backend.client.calls if m=='turn/start')
         self.assertIn('final_place_id',schema['required'])
+        self.assertEqual(schema['properties']['elapsed_minutes']['enum'],[15])
         self.assertNotIn('final_place_id',SCHEMAS['outcome']['properties'])
+        self.assertNotIn('enum',SCHEMAS['outcome']['properties']['elapsed_minutes'])

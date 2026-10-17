@@ -122,6 +122,27 @@ class SharedWorldStore(WorldStore):
             self.db.execute("UPDATE world_cycles SET status='held' WHERE id=? AND status='ready'",(cycle_id,))
             self.snapshot();return self.cycle(cycle_id)
 
+    def recover_horizon_identities(self,cycle_id,reason):
+        """Explicit paused repair of service identifiers, never scene content or a model replay."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if self.db.execute('SELECT 1 FROM world_repairs WHERE cycle_id=?',(cycle_id,)).fetchone():return cycle
+            self._require_paused_review();rejected=cycle['value'].get('rejected',{})
+            if cycle['status']!='blocked' or cycle['phase']!='horizon' or rejected.get('stage')!='horizon' or rejected.get('error_type')!='ValueError':
+                raise WorldConflict('saved rejected horizon required')
+            from .world_hooks import assigned_hooks
+            projected=assigned_hooks(rejected['answer'],cycle_id)
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='horizon' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            self.put('horizon_id_reviews',[*(self.get('horizon_id_reviews') or []),{'cycle_id':cycle_id,'reason':reason,'at':time.time(),'original_cycle':cycle,'original_call':dict(call),'model_replayed':False}])
+            views=cycle['value'].get('hook_view_proposals',{})
+            cycle['value']['hook_view_proposals']={b['id']:views[a['id']] for a,b in zip(rejected['answer']['hooks'],projected['hooks']) if a['id'] in views}
+            self.db.execute('UPDATE world_cycles SET revision=?,value=? WHERE id=?',(self.get('revision'),json.dumps(cycle['value'],ensure_ascii=False),cycle_id))
+            self.complete(call['id'],projected,{},_reviewed_horizon_ids=True)
+            self.db.execute("UPDATE world_cycles SET status='held' WHERE id=? AND status='ready'",(cycle_id,))
+            self.snapshot();return self.cycle(cycle_id)
+
     def _require_paused_review(self):
         if not self.get('paused') or self.db.execute("SELECT 1 FROM world_calls WHERE status='started'").fetchone():
             raise WorldConflict('pause both characters and wait for calls')
@@ -232,6 +253,17 @@ class SharedWorldStore(WorldStore):
         call = self.db.execute('SELECT cycle_id FROM world_calls WHERE id=?', (call_id,)).fetchone()
         if call:
             cycle = self.cycle(call[0])
+            if cycle['phase'] in ('world','outcome'):
+                import re
+                own_name=next(a['name'].split()[0] for a in self.state()['actors'] if a['id']==cycle['actor_id'])
+                for actor in self.state()['actors']:
+                    if actor['id']==cycle['actor_id']:continue
+                    parts=actor['name'].split();name=re.escape(parts[0])
+                    tail=r'(?:\s+'+re.escape(' '.join(parts[1:]))+r')?' if len(parts)>1 else ''
+                    pattern=r'\b'+name+tail+r'\s+(?:(?:ему|ей|мне|коротко|сразу|тихо|снова|потом|тут)\s+){0,3}(?:ответил|сказал|согласился|пообещал|предложил|позвал|пригласил|попросил|отказался|пришёл|пришел|дошёл|дошел|спустился|вернулся|подошёл|подошел|сел|поел|ел|ждал|заказал|взял|принёс|принес|показал|сделал|проверил|осмотрел|ушёл|ушел)\b'
+                    joint=r'\b(?:'+name+tail+r'\s+и\s+'+re.escape(own_name)+'|'+re.escape(own_name)+r'\s+и\s+'+name+tail+r')\b'
+                    if re.search(pattern,value.get('observation',''),re.I) or re.search(joint,value.get('observation',''),re.I):
+                        raise ValueError('world cannot narrate another managed actor speech/actions; use committed receipts')
             if cycle['phase'] == 'world' and set(value.get('visible_to', [])) - {cycle['actor_id'], *self.nearby(cycle['actor_id'])}:
                 raise ValueError('a distant actor cannot observe a private world event')
         return super().complete(call_id, value, usage, *args, **kwargs)
@@ -256,7 +288,7 @@ class SharedWorldStore(WorldStore):
             if eid not in known:
                 r = self.db.execute('SELECT id,actor_id,minute,value FROM world_events WHERE id=?', (eid,)).fetchone()
                 events.append({**dict(r), 'value': json.loads(r['value'])})
-        own = self.db.execute('SELECT place_id FROM peer_positions WHERE actor=?', (actor,)).fetchone()
+        own = self.db.execute('SELECT place_id,source_id FROM peer_positions WHERE actor=?', (actor,)).fetchone()
         waiting = self.db.execute("SELECT value FROM world_cycles WHERE actor_id=? AND status='waiting'", (actor,)).fetchone()
         invitations=[]
         for row in self.db.execute("SELECT * FROM peer_invitations WHERE (sender=? OR recipient=?) AND status IN ('pending','accepted','met') ORDER BY rowid DESC LIMIT 8",(actor,actor)):
@@ -266,9 +298,16 @@ class SharedWorldStore(WorldStore):
             invitation['responses']=[{'actor_id':r['sender'],'text':json.loads(r['value'])['text']}
                 for r in self.db.execute("SELECT sender,value FROM peer_jobs WHERE status='sent' AND json_extract(value,'$.invitation_id')=? ORDER BY rowid",(row['id'],))]
             invitations.append(invitation)
-        return {'events': list(reversed(events)), 'unread_ids': unread,
+        nearby=self.nearby(actor)
+        place=self.db.execute('SELECT value FROM world_entities WHERE id=?',(own[0],)).fetchone() if own and own[0] else None
+        place_name=json.loads(place[0])['name'] if place else None
+        names={r['id']:r['name'] for r in self.db.execute('SELECT * FROM world_actors')}
+        scene={'place_id':own[0] if own else None,'place_name':place_name,'source_id':own[1] if own else None,
+               'nearby':[{'actor_id':a,'name':names[a]} for a in nearby],
+               'meaning':'Последняя подтверждённая позиция. Перечисленные рядом герои имеют квитанцию того же места; чужой план их не перемещает.'}
+        return {'events': list(reversed(events)), 'unread_ids': unread,'current_scene':scene,
                 'invitations':list(reversed(invitations)),
-                'place_id': own[0] if own else None, 'nearby_actor_ids': self.nearby(actor),
+                'place_id': own[0] if own else None, 'nearby_actor_ids': nearby,
                 'available_actor_ids': [r[0] for r in self.db.execute('SELECT id FROM world_actors WHERE id!=?', (actor,))],
                 'ongoing_action': json.loads(waiting[0])['results']['choice']['action'] if waiting else None}
 
@@ -309,6 +348,10 @@ class SharedWorldStore(WorldStore):
 class SharedTimeline:
     world_instruction = '''
 world_contract.location — последнее подтверждённое место наблюдателя, с квитанцией.
+managed_actor_locations отдельно показывает текущие подтверждённые места
+всех управляемых героев. Другой герой не появляется рядом потому, что его
+хотят встретить. При другом месте или null встречу не придумывай. Его слова
+приходят отдельным peer-событием; world не разыгрывает его как NPC.
 При известном месте показывай доступное оттуда; world не перемещает героя.
 История про квартиру не означает, что герой уже вернулся туда из шаурмичной.
 При неизвестном месте не придумывай точку наблюдения. У outcome конечное место
@@ -324,6 +367,9 @@ destination_id — известная локация, куда персонаж 
 только фактическим final_place_id из outcome. Если остаёшься в известном месте, укажи его ID;
 null означает неподтверждённое местоположение, а не присутствие в прежнем.
 Приглашение/согласие само по себе не дорога.
+Для совместной затеи при разных местах сначала выбери свой приход к месту
+встречи. Дальнейшее общее занятие выбирается после подтверждённой встречи;
+не упаковывай ещё не состоявшийся приход другого в готовый совместный итог.
 life.peer_context.invitations хранит доставленные предложения и ответы.
 Принятая встреча может стать твоим ближайшим делом, когда освободишься:
 дойти, встретиться, затем выбрать собственное участие в предложенной затее.
@@ -350,6 +396,17 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
 в этом outcome. Не придумывай местонахождение по одному намерению.
 Слова другого героя, доставленные через хост, уже записаны в shared_scene.
 Не создавай новую доставку сообщения силами физического мира.
+Не пиши «Аркадий ответил/сказал» или «Гарик согласился» за другого героя,
+даже если это кажется естественным продолжением собственной попытки.
+Его речь живёт в отдельных peer-квитанциях. Наблюдение описывает доступные
+обстоятельства; вопрос своего героя можно задать, но ответа за него нет.
+Также не выполняй за него дорогу, еду и чужое принятое намерение. Пока его
+эпизод не завершён, он не «пришёл и поел» потому, что звал или собирался.
+Разыгрывай только попытку текущего actor_id; для другого есть отдельный цикл.
+Не объединяй их в подлежащее «Аркадий и Гарик» и не приписывай обоим общий
+поступок. Речь другого — его утверждение, а не квитанция твоего прошлого:
+если он говорит «мы уже поели», это не отменяет собственный исход, где ты
+остался в гараже. Не объясняй расхождение внезапным забытым обедом.
 Для общей истории entity_ids должны быть известны ВСЕМ из visible_to.
 Нельзя расширять аудиторию вместе с незнакомым ей частным оборудованием.
 Если место в квоте нового участника занято, оставь факты в observation,
@@ -368,6 +425,7 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
             location=next((p for p in positions if p['actor']==cycle['actor_id']),None)
             payload['world_contract']={'observer_actor_id':cycle['actor_id'],
                 'location':{'place_id':location['place_id'] if location else None,'source_id':location['source_id'] if location else None},
+                'managed_actor_locations':[{**p,'name':next(a['name'] for a in payload['world']['actors'] if a['id']==p['actor'])} for p in positions],
                 'fixed_place_fields':[{k:e[k] for k in ('id','name','kind','description')}
                     for e in payload['world']['entities'] if e['id'] in ('home','shawarma')]}
         if stage == 'outcome':

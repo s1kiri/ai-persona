@@ -15,6 +15,9 @@
 - [Telegram Bot API](telegram-connection.md) — BotFather, права, обсуждение, токен.
 - [Лаборатория мира](world-lab.md) — отдельная база и пульт.
 - [Собственные затеи и лор](world-expression.md).
+- [Память города, доступность сцен и самостоятельность участников](world-geography.md).
+- [Проверка характера по цепочке эпизодов](character-agency-evaluation.md).
+- [Диагностика общей остановки](shared-common-error.md).
 - [Прямые публикации](channel-expression.md) и [автономные фотографии](world-photos.md).
 
 ## Отдельный личный чат

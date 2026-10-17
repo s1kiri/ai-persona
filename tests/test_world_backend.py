@@ -98,14 +98,25 @@ class BackendTests(unittest.TestCase):
 
     def test_resident_plans_cannot_select_empty_or_invented_participants(self):
         self.backend.client=Client({'hooks':[]})
-        self.backend.generate('horizon','Synthetic world',{'world':{'actors':[{'id':'hero'}],'entities':[{'id':'street'}]}})
+        self.backend.generate('horizon','Synthetic world',{'world':{'actors':[{'id':'hero'}],'entities':[{'id':'street','kind':'place'}]}})
         start=next(p for m,p in self.backend.client.calls if m=='turn/start')
         props=start['outputSchema']['properties']['hooks']['items']['properties']
         self.assertEqual(props['actor_ids']['minItems'],1)
         self.assertEqual(props['actor_ids']['items']['enum'],['hero'])
         self.assertEqual(props['anchor_ids']['minItems'],1)
         self.assertEqual(props['anchor_ids']['items']['enum'],['street'])
+        self.assertEqual(props['view_from']['items']['enum'],['street'])
         self.assertNotIn('enum',__import__('persona_runtime.world_protocol',fromlist=['HOOK']).HOOK['properties']['actor_ids']['items'])
+
+    def test_native_plan_id_is_host_assigned_without_changing_scene(self):
+        hook={'anchor_ids':['street'],'actor_ids':['hero'],'domain':'city','opens_minute':10,'closes_minute':20,
+              'route':'На улице.','npc_want':'Пронести коробку.','friction':'Тесно.','temptation':'Поглядеть.','view_from':['street']}
+        self.backend.client=Client({'hooks':[hook]})
+        answer,_=self.backend.generate('horizon','Synthetic world',{'world':{'actors':[{'id':'hero'}],'entities':[{'id':'street','kind':'place'}]}})
+        wire=next(p['outputSchema'] for m,p in self.backend.client.calls if m=='turn/start')['properties']['hooks']['items']
+        self.assertNotIn('id',wire['properties']);self.assertNotIn('id',wire['required'])
+        self.assertRegex(answer['hooks'][0]['id'],r'^hook_[0-9a-f]{24}$')
+        self.assertEqual({k:v for k,v in answer['hooks'][0].items() if k!='id'},hook)
 
     def test_tool_rejected_without_retry_and_usage_survives(self):
         self.backend.client = Client(event(), unexpected=True)

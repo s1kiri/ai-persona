@@ -31,7 +31,7 @@ REVIEW_INTENT = obj({'key': string(80), 'kind': enum(('life', 'post')), 'action'
                     'status': enum(('pending', 'done', 'dropped')), 'source_ids': array(string(80), 4)})
 SOCIAL_REVIEW = obj({'people': array(PERSON, 8), 'intentions': array(REVIEW_INTENT, 5)})
 
-SOURCE_FIELDS={'id','source_ids','sources','post_id','audience_id','focus_ids','reply_to','read_ids','defer_ids'}
+SOURCE_FIELDS={'id','source_id','source_ids','sources','post_id','audience_id','focus_ids','reply_to','read_ids','defer_ids'}
 
 
 def map_sources(value,mapping,field=None):

@@ -21,6 +21,8 @@ class SharedChannelLife(ChannelLife):
     def state(self):
         value = super().state()
         value.update(paused=self.store.get('paused') or value['status'] != 'running', shared=True)
+        if self.store.get('shared_error'):
+            value.update(status='error',error=self.store.get('shared_error'),paused=True)
         issue=self.store.db.execute("SELECT id,status,error FROM peer_jobs WHERE sender=? AND status IN ('unknown','sending') ORDER BY rowid DESC LIMIT 1",(self.actor_id,)).fetchone()
         value['peer_delivery_issue']=dict(issue) if issue else None
         return value
@@ -31,6 +33,8 @@ class SharedChannelLife(ChannelLife):
         with self.store.lock, self.store.db:
             status = self.get('life_status')
             if running:
+                if self.store.get('shared_error'):
+                    raise TelegramError('Общий этап остановлен; сначала нужен отдельный разбор сбоя.')
                 unknown = self.store.db.execute("SELECT 1 FROM channel_jobs j JOIN world_events e ON e.id=j.post_id WHERE e.actor_id=? AND j.status IN ('unknown','sending')", (self.actor_id,)).fetchone()
                 blocked = self.store.db.execute("SELECT 1 FROM world_cycles WHERE actor_id=? AND status IN ('blocked','running')", (self.actor_id,)).fetchone()
                 if unknown or blocked or status['status'] == 'error' or self.connection.poll_blocked:
@@ -438,6 +442,10 @@ class SharedScheduler:
                 self.lives[actor].block('Этап остановлен: '+type(error).__name__+'. Результат сохранён; автоматического повтора нет.')
             else:
                 with self.store.lock,self.store.db:
+                    import traceback
+                    frames=[{'file':frame.filename.rsplit('/',1)[-1],'function':frame.name,'line':frame.lineno}
+                            for frame in traceback.extract_tb(error.__traceback__)]
+                    self.store.put('shared_error_diagnostics',{'type':type(error).__name__,'at':self.now(),'frames':frames})
                     self.store.put('shared_error','Общий этап остановлен: '+type(error).__name__+'. Нужна проверка; повтора нет.')
                     self.store.put('paused',True)
         finally:

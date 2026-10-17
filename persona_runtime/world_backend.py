@@ -55,8 +55,19 @@ class WorldBackend(AppServerBackend):
                   'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False}}
         if stage in SCHEMAS:
             params['outputSchema'] = SCHEMAS[stage]
+        if stage in ('world','outcome'):
+            from .world_geography import LINKS
+            params['outputSchema']=copy.deepcopy(params['outputSchema'])
+            params['outputSchema']['properties']['place_links']=copy.deepcopy(LINKS)
+            params['outputSchema']['required'].append('place_links')
+            actors=[a['id'] for a in payload.get('world',{}).get('actors',[])]
+            for field in ('entities','threads','place_links'):
+                props=params['outputSchema']['properties'][field]['items']['properties']
+                props['id']['pattern']='^[a-z][a-z0-9_-]{0,79}$'
+                audience=props.get('known_to',props.get('visible_to'))
+                if actors:audience['items']['enum']=actors
         if stage=='outcome' and payload.get('research_failure'):
-            params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
+            params['outputSchema']=copy.deepcopy(params['outputSchema'])
             params['outputSchema']['properties']['status']['enum']=['failed']
         if stage=='outcome' and payload.get('shared_action_window'):
             params['outputSchema']=copy.deepcopy(params['outputSchema'])
@@ -67,9 +78,14 @@ class WorldBackend(AppServerBackend):
         if stage=='horizon':
             params['outputSchema']=copy.deepcopy(SCHEMAS[stage])
             props=params['outputSchema']['properties']['hooks']['items']['properties']
+            props.pop('id')
+            params['outputSchema']['properties']['hooks']['items']['required'].remove('id')
             for field,table in (('actor_ids','actors'),('anchor_ids','entities')):
                 choices=[item['id'] for item in payload.get('world',{}).get(table,[])]
                 if choices:props[field]['items']['enum']=choices
+            places=[e['id'] for e in payload.get('world',{}).get('entities',[]) if e['kind']=='place']
+            props['view_from']={'type':'array','items':{'type':'string',**({'enum':places} if places else {})},'maxItems':8,'minItems':1 if places else 0}
+            params['outputSchema']['properties']['hooks']['items']['required'].append('view_from')
         if web:
             params['outputSchema'] = research.SCHEMA
         if stage == 'intent':
@@ -200,7 +216,11 @@ class WorldBackend(AppServerBackend):
                 if value['task_id'] != payload['task_id']:
                     raise ValueError('research task identity differs')
                 return {**value, 'tool_events': web_events}, self.last_usage
-            return (json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice','world_intervention') else answer), self.last_usage
+            value=json.loads(answer) if stage in SCHEMAS or stage in ('intent', 'photo_choice', 'timed_intent', 'timed_choice', 'peer_choice','world_intervention') else answer
+            if stage=='horizon':
+                from .world_hooks import assigned_hooks
+                value=assigned_hooks(value,thread)
+            return value,self.last_usage
         except Exception as error:
             reasons={'world research web call limit exceeded':'web_call_limit',
                      'unexpected operation in world laboratory':'unexpected_operation',

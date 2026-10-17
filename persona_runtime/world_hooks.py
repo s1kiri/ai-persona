@@ -1,5 +1,12 @@
 """Private resident plans become observable openings before the actor chooses."""
 from .world_protocol import identifier, HORIZON_SCHEMA
+import hashlib
+
+
+def assigned_hooks(answer,seed):
+    """New private plan IDs belong to the host; the model supplies scene content."""
+    return {'hooks':[{**hook,'id':'hook_'+hashlib.sha256((seed+':'+str(n)).encode()).hexdigest()[:24]}
+                     for n,hook in enumerate(answer['hooks'])]}
 
 
 def validate_horizon(value, state):
@@ -35,6 +42,10 @@ def select_hook(state, actor, brief):
         return None
     candidates = pending_hooks(state, actor, available=True)
     candidates = [h for h in candidates if h['domain'] in brief['allowed_domains']]
+    if 'positions' in state:
+        place=next((p['place_id'] for p in state['positions'] if p['actor']==actor),None)
+        places={e['id'] for e in state['entities'] if e['kind']=='place'}
+        candidates=[h for h in candidates if place and place in h.get('view_from',[p for p in h['anchor_ids'] if p in places])]
     # An unencountered corner of the world gets a route into perception.
     # No knowledge is granted by selection; the world must expose it in a
     # validated observation. Remaining plans wait for a later event slot.
@@ -46,6 +57,8 @@ def select_hook(state, actor, brief):
 
 
 HORIZON = '''Ты планируешь ближайшие дела жителей обычного вымышленного мира.
+view_from перечисляет существующие place_id, из которых случай виден/слышен,
+в отличие от anchor_ids предметов и участников. Дорога не равна видимости.
 Это НЕ управляемый персонаж, не его желания и не готовые посты. Создай от1 до3 разных
 поводов на ближайшие сутки. Это ещё не случившиеся события, а частные планы
 и возможности; хост позже выберет доступный повод, мир покажет его участнику,
@@ -88,8 +101,10 @@ director.exposure — выбранный доступный план жител�
 стать наблюдаемым поводом. Покажи его через route, сохраняя npc_want и
 friction конкретными поступками или словами, а не доброжелательным
 пересказом. temptation — возможность, не уже возникшее желание героя.
-Это один сдвиг, не список приглашений. Оставь открытый выбор и отдельную
-незакрытую историю. quiet здесь недоступен. Хотя бы один anchor_id должен
+Это один сдвиг, не список приглашений. Оставь выбор участия самому герою.
+Отдельная незакрытая история нужна только для значимого продолжения, не
+для каждой замеченной мелочи; thread_id=null и threads=[] допустимы.
+quiet здесь недоступен. Хотя бы один anchor_id должен
 стать наблюдаемым entity_id с корректным known_to. Не раскрывай тайные
 мотивы как прочитанные мысли; не разыгрывай за героя отклик, поход или
 согласие. Только после этого герой выберет свой поступок.

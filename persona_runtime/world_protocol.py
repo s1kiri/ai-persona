@@ -237,13 +237,17 @@ def validate_result(stage, value, state, brief):
     if stage == 'world':
         exposure = brief.get('exposure')
         required_anchors = ((set(exposure['anchor_ids']) - known) or set(exposure['anchor_ids'])) if exposure else set()
-        if exposure and (value['beat'] == 'quiet' or not value['thread_id'] or
+        if exposure and (value['beat'] == 'quiet' or
                          not required_anchors & set(value['entity_ids'])):
-            raise ValueError('selected opening must become an observable unfinished situation')
+            raise ValueError('selected opening must become an observable situation')
         if not brief['new_event_allowed']:
             existing_entities = {e['id'] for e in state['entities']}
             existing_threads = {t['id'] for t in state['threads']}
-            if any(e['id'] not in existing_entities for e in value['entities']) or any(t['id'] not in existing_threads for t in value['threads']):
+            # Filling a fictional map is not an external incident or a new story.
+            geography_only=(value['beat']=='progress' and value['domain']=='city' and value['surprise']==0
+                and value['thread_id'] is None and not value['threads'] and bool(value['entities'])
+                and all(e['kind']=='place' and e['id'] not in existing_entities for e in value['entities']))
+            if (any(e['id'] not in existing_entities for e in value['entities']) or any(t['id'] not in existing_threads for t in value['threads'])) and not geography_only:
                 raise ValueError('new incidents are not due; continue existing causes or stay quiet')
         if value['beat'] not in brief['allowed_beats']:
             raise ValueError('beat is unavailable at this moment')
@@ -272,8 +276,6 @@ def validate_result(stage, value, state, brief):
         thread_id = value['thread_id']
         if thread_id is not None and thread_id not in threads:
             raise ValueError('unknown story')
-        if exposure and threads[thread_id]['status'] == 'closed':
-            raise ValueError('opening cannot resolve the story before the actor chooses')
         if value['beat'] in ('consequence', 'return', 'closure') and not value['causes']:
             raise ValueError('continuation requires a stored cause')
     return value

@@ -121,6 +121,7 @@ class WorldStore:
             CREATE TABLE IF NOT EXISTS world_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_actors(id TEXT PRIMARY KEY,name TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_entities(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS world_place_links(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_threads(id TEXT PRIMARY KEY,value TEXT NOT NULL,source TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS world_thread_links(child TEXT PRIMARY KEY REFERENCES world_threads(id),
                 parent TEXT NOT NULL REFERENCES world_threads(id),source TEXT NOT NULL);
@@ -269,6 +270,7 @@ class WorldStore:
                     'settings': self.get('settings'), 'settings_revision': self.get('settings_revision'),
                     'paused': self.get('paused'), 'actors': self._rows('world_actors'),
                     'entities': entities, 'threads': threads, 'thread_links': self._rows('world_thread_links'),
+                    'place_links':[{**json.loads(r['value']),'source_id':r['source']} for r in self._rows('world_place_links')],
                     'hooks': [json.loads(r['value']) for r in self._rows('world_hooks')], 'history': history}
 
     @locked
@@ -276,6 +278,9 @@ class WorldStore:
         state = copy.deepcopy(state or self.state())
         state['entities'] = [{k: v for k, v in e.items() if k != 'world_note'}
                              for e in state['entities'] if actor_id in e['known_to']]
+        known_places={e['id'] for e in state['entities'] if e['kind']=='place'}
+        state['place_links']=[link for link in state.get('place_links',[]) if actor_id in link['known_to']
+                              and {link['from_id'],link['to_id']}<=known_places]
         state['threads'] = [t for t in state['threads'] if actor_id in t['visible_to']]
         visible_threads = {t['id'] for t in state['threads']}
         state['thread_links'] = [link for link in state['thread_links']
@@ -501,7 +506,7 @@ class WorldStore:
 
     def complete(self, call_id, value, usage, after_outcome='done', after_world='choice', after_choice='outcome', after_experience='done',
                  after_audience='impulse', _reviewed_experience=False, extra_apply=None, _reviewed_channel=False, media_attached=False,
-                 _reviewed_outcome=False, _reviewed_world_state=False, _reviewed_thread_omissions=None):
+                 _reviewed_outcome=False, _reviewed_world_state=False, _reviewed_thread_omissions=None, _reviewed_horizon_ids=False):
         with self.lock, self.db:
             call = self.db.execute('SELECT * FROM world_calls WHERE id=?', (call_id,)).fetchone()
             if not call:
@@ -509,11 +514,17 @@ class WorldStore:
             if call['status'] == 'completed':
                 return False
             cycle = self.cycle(call['cycle_id'])
-            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome or _reviewed_world_state or _reviewed_thread_omissions is not None
+            reviewed = _reviewed_experience or _reviewed_channel or _reviewed_outcome or _reviewed_world_state or _reviewed_thread_omissions is not None or _reviewed_horizon_ids
             expected_call, expected_cycle = ('failed', 'blocked') if reviewed else ('started', 'running')
             if call['status'] != expected_call or cycle['status'] != expected_cycle or cycle['revision'] != self.get('revision'):
                 raise WorldConflict('stale or interrupted result')
             stage = cycle['phase']
+            if _reviewed_horizon_ids:
+                from .world_hooks import assigned_hooks
+                saved=cycle['value'].get('rejected',{}).get('answer',{})
+                if (stage!='horizon' or 'hooks' not in saved or value!=assigned_hooks(saved,cycle['id'])
+                        or any((_reviewed_experience,_reviewed_channel,_reviewed_outcome,_reviewed_world_state,_reviewed_thread_omissions is not None))):
+                    raise WorldConflict('review can only assign host IDs to exact saved plans')
             if _reviewed_thread_omissions is not None:
                 saved=cycle['value'].get('rejected',{}).get('answer',{})
                 omitted=set(_reviewed_thread_omissions)
@@ -610,6 +621,8 @@ class WorldStore:
                     from .world_dynamics import assign_plans
                     planned=assign_plans(value,brief['plan_directions'])
                 for hook in planned['hooks']:
+                    views=cycle['value'].get('hook_view_proposals',{}).get(hook['id'])
+                    if views:hook={**hook,'view_from':views}
                     self.db.execute('INSERT INTO world_hooks VALUES(?,?,?)',
                                     (hook['id'], json.dumps({**hook, 'exposed_to': []}, ensure_ascii=False), event_id))
             if stage in ('world', 'outcome'):
@@ -627,7 +640,7 @@ class WorldStore:
                     hook = copy.deepcopy(brief['exposure'])
                     hook['exposed_to'] = list(dict.fromkeys([*hook['exposed_to'], cycle['actor_id']]))
                     if brief.get('lively_world'):
-                        hook.update(exposed_minute=state['minute'],thread_ids=[value['thread_id']])
+                        hook.update(exposed_minute=state['minute'],thread_ids=[value['thread_id']] if value['thread_id'] else [])
                     self.db.execute('UPDATE world_hooks SET value=? WHERE id=?',
                                     (json.dumps(hook, ensure_ascii=False), hook['id']))
             if stage == 'choice' and value['note'].strip():
@@ -691,7 +704,7 @@ class WorldStore:
                             (status, next_phase, revision, json.dumps(cycle['value'], ensure_ascii=False), cycle['id']))
             if reviewed:
                 self.db.execute('INSERT INTO world_repairs VALUES(?,?,?,?)',
-                                (cycle['id'], call_id, stage, 'Reviewed saved outcome with invalid thread patches omitted; original preserved; no model call' if _reviewed_thread_omissions is not None else 'Reviewed exact saved world result under corrected shared causes/capacity; no model call' if _reviewed_world_state else 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
+                                (cycle['id'], call_id, stage, 'Assigned host IDs to saved horizon; content and failed call preserved; no model call' if _reviewed_horizon_ids else 'Reviewed saved outcome with invalid thread patches omitted; original preserved; no model call' if _reviewed_thread_omissions is not None else 'Reviewed exact saved world result under corrected shared causes/capacity; no model call' if _reviewed_world_state else 'Reviewed saved outcome with own protected actor patch omitted; original preserved; no model call' if _reviewed_outcome else 'Reviewed saved direct expression under corrected own-thought source contract; no model call' if _reviewed_channel else 'Reviewed saved note under corrected private-source contract; no model call'))
             else:
                 self.db.execute("UPDATE world_calls SET status='completed',usage=? WHERE id=?", (json.dumps(usage), call_id))
             self.snapshot()
@@ -1152,6 +1165,19 @@ class WorldSession:
                 payload=self.channel_extension.with_source_ids(payload,actor)
             self.store.save_input(cycle_id, payload)
             answer, usage = active_backend.generate(output_role, instruction, payload, **({'cancel': self.cancel} if self.cancel is not None else {}))
+            if stage=='horizon' and any('view_from' in h for h in answer.get('hooks',[])):
+                places={e['id'] for e in payload['world']['entities'] if e['kind']=='place'}
+                views={h['id']:h['view_from'] for h in answer['hooks'] if 'view_from' in h}
+                if any(not isinstance(v,list) or (places and not v) or len(v)>8 or not all(isinstance(p,str) and p in places for p in v) for v in views.values()):
+                    raise ValueError('opening viewpoint must be an existing place')
+                with self.store.lock,self.store.db:
+                    current=self.store.cycle(cycle_id);current['value']['hook_view_proposals']=views
+                    self.store.db.execute('UPDATE world_cycles SET value=? WHERE id=?',(json.dumps(current['value'],ensure_ascii=False),cycle_id))
+                answer={'hooks':[{k:v for k,v in h.items() if k!='view_from'} for h in answer['hooks']]}
+            geography=[]
+            if stage in ('world','outcome'):
+                from .world_geography import extract
+                answer,geography=extract(answer,payload,self.store,cycle,stage)
             social_answer=answer if social_role else None
             timing = None
             if self.timeline and stage == 'choice':
@@ -1183,6 +1209,9 @@ class WorldSession:
             if stage == 'choice':
                 after_choice = 'world' if personal and not active else 'research' if answer.get('kind') == 'research' else 'outcome'
             def apply_extensions(committed):
+                if stage in ('world','outcome'):
+                    from .world_geography import apply
+                    apply(self.store,geography,committed,stage)
                 if social_role:
                     self.channel_extension.apply(stage, social_answer, committed)
                 if self.timeline:
@@ -1190,7 +1219,7 @@ class WorldSession:
             self.store.complete(call_id, answer, usage, after_outcome=next_stage,
                                 after_world=after_world, after_choice=after_choice, after_experience=share_stage,
                                 after_audience=cycle['value'].get('entry_phase', 'impulse'),
-                                extra_apply=apply_extensions if social_role or self.timeline else None,
+                                extra_apply=apply_extensions if social_role or self.timeline or stage in ('world','outcome') else None,
                                 media_attached=bool(social_role and stage=='share' and social_answer.get('attachment')))
             return self.store.cycle(cycle_id)
         except Exception as error:

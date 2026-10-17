@@ -1115,6 +1115,8 @@ class WorldSession:
                 instruction += '\nТы ненадолго заглянул в Telegram во время начатого дела. ongoing_action — что начал делать, а не готовый результат. Дело продолжается; итог ещё не наступил и тебе неизвестен. По attention.purpose можешь выбрать собственную запись или ответ читателю; можно и промолчать. Нового физического действия здесь нет. Не объявляй начатое дело законченным.'
             if self.timeline:
                 payload = self.timeline.enrich(stage, payload, cycle)
+                if stage in ('world','outcome'):
+                    instruction+='\n'+self.timeline.world_instruction
                 if stage == 'outcome':
                     instruction += '\n'+self.timeline.outcome_instruction
             pace=(self.store.actor_get(actor, 'life_controls') or {}).get('episode_minutes') if self.external_channel else None

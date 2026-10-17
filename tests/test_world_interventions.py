@@ -41,7 +41,7 @@ class InterventionTests(unittest.TestCase):
             self.assertNotIn('author_event',json.dumps(self.store.actor_view(actor)))
         self.assertFalse(self.store.db.execute("SELECT 1 FROM world_events WHERE stage='post'").fetchone())
         f.scheduler.tick();self.assertEqual(len(f.backends['arkady'].inputs),1)
-        payload=SharedTimeline(self.store).enrich('world',{}, {'actor_id':'garik'})
+        payload=SharedTimeline(self.store).enrich('world',{'world':self.store.state()}, {'actor_id':'garik'})
         self.assertEqual(payload['author_world_facts'],facts(self.store))
 
     def test_pause_and_cancellation_never_call_a_model_and_request_is_idempotent(self):

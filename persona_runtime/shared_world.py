@@ -168,6 +168,28 @@ class SharedWorldStore(WorldStore):
             self.db.execute('UPDATE peer_positions SET place_id=NULL,source_id=? WHERE actor=?',(cycle_id+'-unresolved',cycle['actor_id']))
             self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
 
+    def release_rejected_place_event(self,cycle_id,reason):
+        """Explicitly quarantine an entire rejected world event, without rewriting its prose."""
+        if not isinstance(reason,str) or not reason.strip():raise ValueError('review reason required')
+        with self.lock,self.db:
+            cycle=self.cycle(cycle_id)
+            if any(r['cycle_id']==cycle_id for r in self.get('rejected_place_event_reviews') or []):return cycle
+            self._require_paused_review();v=cycle['value'];rejected=v.get('rejected',{});answer=rejected.get('answer',{})
+            prior={e['id']:e for e in v.get('inputs',{}).get('world',{}).get('world',{}).get('entities',[])}
+            changed=[e['id'] for e in answer.get('entities',[]) if e['id'] in ('home','shawarma') and e['id'] in prior
+                     and any(e.get(k)!=prior[e['id']][k] for k in ('name','kind','description'))] if isinstance(answer,dict) else []
+            if (cycle['status']!='blocked' or cycle['phase']!='world' or rejected.get('stage')!='world'
+                    or rejected.get('error_type')!='ValueError' or not changed or v.get('results',{})):
+                raise WorldConflict('rejected initial world event with rewritten authored place required')
+            call=self.db.execute("SELECT * FROM world_calls WHERE cycle_id=? AND stage='world' AND status='failed' ORDER BY rowid DESC LIMIT 1",(cycle_id,)).fetchone()
+            if not call:raise WorldConflict('failed source call required')
+            self.put('rejected_place_event_reviews',[*(self.get('rejected_place_event_reviews') or []),
+                {'cycle_id':cycle_id,'at':time.time(),'reason':reason,'original_cycle':cycle,'original_call':dict(call),
+                 'changed_place_ids':changed,'model_replayed':False,'event_applied':False}])
+            self.db.execute("UPDATE world_cycles SET status='abandoned' WHERE id=?",(cycle_id,))
+            # A world-stage observation is not a movement; preserve the confirmed position.
+            self.put('revision',self.get('revision')+1);self.snapshot();return self.cycle(cycle_id)
+
     def resolve_failed_research(self,cycle_id):
         """Retain a failed read-only attempt; advance to its failed outcome, never search again."""
         with self.lock,self.db:
@@ -285,6 +307,15 @@ class SharedWorldStore(WorldStore):
 
 
 class SharedTimeline:
+    world_instruction = '''
+world_contract.location — последнее подтверждённое место наблюдателя, с квитанцией.
+При известном месте показывай доступное оттуда; world не перемещает героя.
+История про квартиру не означает, что герой уже вернулся туда из шаурмичной.
+При неизвестном месте не придумывай точку наблюдения. У outcome конечное место
+подтверждается отдельно. fixed_place_fields содержит точные неизменяемые поля
+авторских мест: при обновлении condition/known_to/world_note копируй эти поля
+дословно; даже уточнение «под квартирой Гарика» в description меняет канон.
+'''
     choice_instruction = '''
 duration_minutes — реалистичный план времени дороги, ожидания и выбранного
 занятия, от 1 до 1440 минут; это не результат и не квота публикаций.
@@ -332,6 +363,13 @@ final_place_id — подтверждённое МЕСТО В КОНЦЕ поп�
         if stage in ('world','outcome','horizon'):
             from .world_interventions import facts
             payload['author_world_facts']=facts(self.store)
+        if stage in ('world','outcome'):
+            positions=payload['world'].get('positions',[])
+            location=next((p for p in positions if p['actor']==cycle['actor_id']),None)
+            payload['world_contract']={'observer_actor_id':cycle['actor_id'],
+                'location':{'place_id':location['place_id'] if location else None,'source_id':location['source_id'] if location else None},
+                'fixed_place_fields':[{k:e[k] for k in ('id','name','kind','description')}
+                    for e in payload['world']['entities'] if e['id'] in ('home','shawarma')]}
         if stage == 'outcome':
             window = cycle['value'].get('shared_window')
             if not window or self.store.get('minute') < window['due_minute']:
